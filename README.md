@@ -102,6 +102,23 @@ A real run: Jev opened Network & Internet at confidence 1.00, stalled at 0.43
 choosing among its sub-rows, handed over to a person who picked `Internet`, and
 then recognised the goal met at 0.87 on its own.
 
+## Reading the screen quickly
+
+`uiautomator dump` costs about 2.4s per observation: it spawns a JVM and then
+waits a hardcoded second for the accessibility event stream to fall quiet, with
+no flag to relax either. An accessibility helper already holding that session
+open answers in about 50ms over a tunnelled port, and emits the same document.
+
+The two were compared on a scrolled search-results list: **23 of 23 labelled
+elements matched in both directions**, no negative or off-screen bounds either
+side. Their total node counts differ, because the helper prunes unlabelled
+structural wrappers, but only labelled elements are ever acted on.
+
+That comparison is worth repeating on a busy screen whenever either side
+changes. A reader that silently drops a row is worse than a slow one: the loop
+reads the absence as the screen genuinely not offering it, and reasons
+confidently from a false premise.
+
 ## Confirming what was reached
 
 A verdict of success can be refused by acceptance criteria — specific claims

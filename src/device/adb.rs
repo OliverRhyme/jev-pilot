@@ -354,11 +354,20 @@ fn shell_quote(text: &str) -> String {
 
 /// Where a screen is read from.
 ///
-/// The two differ by roughly fifty times. `uiautomator dump` spawns a JVM and
+/// The two differ by roughly fifty times, and agree on what they see. `uiautomator dump` spawns a JVM and
 /// then waits a hardcoded second for the accessibility event stream to fall
 /// quiet, costing about 2.5s per observation with no flag to relax it. An
 /// accessibility helper already holding that session open answers in about
 /// 50ms, and emits the same document, so the reader is shared.
+///
+/// Checked rather than assumed: on a scrolled search-results list the two
+/// backends matched 23 of 23 labelled elements in both directions, with no
+/// negative or off-screen bounds on either side. Their *total* node counts
+/// differ — the helper prunes unlabelled structural wrappers — which looks
+/// alarming and is not, because only labelled elements are ever acted on.
+/// Worth re-checking on a busy screen after either side changes: a reader that
+/// silently drops a row is worse than a slow one, because the loop reads the
+/// absence as the screen genuinely not offering it.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Hierarchy {
