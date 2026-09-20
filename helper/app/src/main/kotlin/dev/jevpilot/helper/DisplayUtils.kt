@@ -1,6 +1,5 @@
 package dev.jevpilot.helper
 
-import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.os.Build
 import android.util.DisplayMetrics
@@ -24,14 +23,14 @@ object DisplayUtils {
     data class DisplayInfo(val rotation: Int, val width: Int, val height: Int)
 
     @Suppress("DEPRECATION")
-    fun getDisplayInfo(service: AccessibilityService): DisplayInfo {
+    fun getDisplayInfo(context: Context): DisplayInfo {
         var rotation = 0
         var width = 1080
         var height = 2400
 
         // Baseline: resource metrics cover tablets, TVs and emulators alike.
         runCatching {
-            val metrics = service.resources.displayMetrics
+            val metrics = context.resources.displayMetrics
             if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
                 width = metrics.widthPixels
                 height = metrics.heightPixels
@@ -41,7 +40,7 @@ object DisplayUtils {
         // API 30+: the full physical bounds, including the area under the bars.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             runCatching {
-                val manager = service.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+                val manager = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
                 val bounds = manager?.maximumWindowMetrics?.bounds
                 if (bounds != null && bounds.width() > 0 && bounds.height() > 0) {
                     width = bounds.width()
@@ -51,9 +50,9 @@ object DisplayUtils {
         }
 
         val display: Display? = runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) service.display else null
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) context.display else null
         }.getOrNull() ?: runCatching {
-            (service.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)?.defaultDisplay
+            (context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)?.defaultDisplay
         }.getOrNull()
 
         if (display != null) {

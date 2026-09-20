@@ -83,7 +83,7 @@ class PilotAccessibilityService : AccessibilityService() {
         }.onFailure { Log.w(TAG, "Failed to configure AccessibilityServiceInfo", it) }
 
         server?.shutdown()
-        server = CommandServer(this, DEFAULT_PORT).apply {
+        server = CommandServer(ServiceSource(this), DEFAULT_PORT, gestures = this).apply {
             isDaemon = true
             start()
         }

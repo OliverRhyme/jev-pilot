@@ -1,23 +1,16 @@
 package dev.jevpilot.helper
 
-import android.accessibilityservice.AccessibilityService
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.os.Build
 import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
-import android.view.Display
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Reads the screen through the accessibility APIs and serialises it.
@@ -46,14 +39,8 @@ object HierarchyDumper {
     private const val MAX_DEPTH = 75
     private const val MAX_NODES = 8000
 
-    private val screenshotExecutor = Executors.newSingleThreadExecutor()
-
     /** `AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID`, API 33+. */
     private const val PREFETCH_DESCENDANTS_HYBRID = 1 shl 3
-
-    /** The framework rate-limits `takeScreenshot` to roughly one per 333 ms. */
-    private const val ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT = 3
-    private const val SCREENSHOT_INTERVAL_RETRY_MS = 350L
 
     /** What a dump should contain. Every field defaults to the cheapest answer. */
     class DumpOptions {
@@ -101,14 +88,14 @@ object HierarchyDumper {
     }
 
     @JvmOverloads
-    fun dump(service: AccessibilityService, options: DumpOptions = DumpOptions.forDump()): JSONObject {
+    fun dump(source: ScreenSource, options: DumpOptions = DumpOptions.forDump()): JSONObject {
         val startTime = System.currentTimeMillis()
         val result = JSONObject()
 
         try {
-            val displayInfo = DisplayUtils.getDisplayInfo(service)
+            val displayInfo = DisplayUtils.getDisplayInfo(source.context)
             val stats = DumpStats()
-            val rootSnapshots = captureRootSnapshots(service, displayInfo, options, stats)
+            val rootSnapshots = captureRootSnapshots(source, displayInfo, options, stats)
 
             result.put("rotation", displayInfo.rotation)
             result.put("width", displayInfo.width)
@@ -142,10 +129,8 @@ object HierarchyDumper {
             result.put("window_count", rootSnapshots.size)
             result.put("elapsed_ms", System.currentTimeMillis() - startTime)
 
-            (service as? PilotAccessibilityService)?.let {
-                result.put("package", it.currentPackageName)
-                result.put("activity", it.currentActivityName)
-            }
+            result.put("package", source.currentPackage)
+            result.put("activity", source.currentActivity)
         } catch (t: Throwable) {
             Log.e(TAG, "Dump failed with exception", t)
             runCatching {
@@ -170,27 +155,21 @@ object HierarchyDumper {
      */
     @JvmOverloads
     fun dumpAtomicSnapshot(
-        service: AccessibilityService,
+        source: ScreenSource,
         options: DumpOptions = DumpOptions.forSnapshot(),
     ): JSONObject {
         val startTime = System.currentTimeMillis()
 
-        val bitmapRef = AtomicReference<Bitmap?>(null)
-        val errorRef = AtomicInteger(0)
-        val screenshotLatch = CountDownLatch(1)
+        // Taken on its own thread so the picture and the tree describe the
+        // same screen: reading them in sequence lets the UI move in between,
+        // and the mismatch is invisible in the result.
+        val shot = java.util.concurrent.atomic.AtomicReference<Bitmap?>(null)
+        val taking = Thread { shot.set(source.screenshot()) }.apply { start() }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            requestScreenshot(service, bitmapRef, errorRef, screenshotLatch, allowRetry = true)
-        } else {
-            screenshotLatch.countDown()
-        }
+        val dumpData = dump(source, options)
+        runCatching { taking.join(3_000L) }
 
-        val dumpData = dump(service, options)
-
-        // One retry after the rate-limit interval fits inside this wait.
-        runCatching { screenshotLatch.await(2_500L, TimeUnit.MILLISECONDS) }
-
-        val bitmap = bitmapRef.get()
+        val bitmap = shot.get()
         if (bitmap != null) {
             try {
                 val stream = ByteArrayOutputStream(bitmap.width * bitmap.height / 4)
@@ -200,6 +179,8 @@ object HierarchyDumper {
                     Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP),
                 )
                 dumpData.put("has_screenshot", true)
+                // The bitmap's own size, so a caller normalises coordinates
+                // against the very image it is looking at.
                 dumpData.put("width", bitmap.width)
                 dumpData.put("height", bitmap.height)
             } catch (t: Throwable) {
@@ -209,98 +190,21 @@ object HierarchyDumper {
                 bitmap.recycle()
             }
         } else {
-            runCatching {
-                dumpData.put("has_screenshot", false)
-                dumpData.put("screenshot_error_code", errorRef.get())
-                dumpData.put(
-                    "screenshot_error",
-                    when {
-                        Build.VERSION.SDK_INT < Build.VERSION_CODES.R ->
-                            "takeScreenshot not supported on Android < 11"
-                        errorRef.get() != 0 ->
-                            "takeScreenshot failed with errorCode ${errorRef.get()}"
-                        else -> "Screenshot capture timed out"
-                    },
-                )
-            }
+            runCatching { dumpData.put("has_screenshot", false) }
         }
 
         runCatching { dumpData.put("atomic_elapsed_ms", System.currentTimeMillis() - startTime) }
         return dumpData
     }
 
-    private fun requestScreenshot(
-        service: AccessibilityService,
-        bitmapRef: AtomicReference<Bitmap?>,
-        errorRef: AtomicInteger,
-        latch: CountDownLatch,
-        allowRetry: Boolean,
-    ) {
-        try {
-            service.takeScreenshot(
-                Display.DEFAULT_DISPLAY,
-                screenshotExecutor,
-                object : AccessibilityService.TakeScreenshotCallback {
-                    override fun onSuccess(screenshotResult: AccessibilityService.ScreenshotResult) {
-                        try {
-                            val buffer = screenshotResult.hardwareBuffer
-                            val hardware =
-                                Bitmap.wrapHardwareBuffer(buffer, screenshotResult.colorSpace)
-                            if (hardware != null) {
-                                // The hardware bitmap cannot be compressed
-                                // directly, and its buffer must be released.
-                                bitmapRef.set(hardware.copy(Bitmap.Config.ARGB_8888, false))
-                                hardware.recycle()
-                            }
-                            buffer.close()
-                        } catch (t: Throwable) {
-                            Log.w(TAG, "Error copying screenshot buffer", t)
-                        } finally {
-                            latch.countDown()
-                        }
-                    }
-
-                    override fun onFailure(errorCode: Int) {
-                        errorRef.set(errorCode)
-                        if (allowRetry &&
-                            errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT
-                        ) {
-                            Log.i(TAG, "takeScreenshot rate-limited; retrying")
-                            screenshotExecutor.execute {
-                                try {
-                                    Thread.sleep(SCREENSHOT_INTERVAL_RETRY_MS)
-                                } catch (_: InterruptedException) {
-                                    Thread.currentThread().interrupt()
-                                }
-                                requestScreenshot(
-                                    service,
-                                    bitmapRef,
-                                    errorRef,
-                                    latch,
-                                    allowRetry = false,
-                                )
-                            }
-                            return
-                        }
-                        Log.w(TAG, "takeScreenshot failed, errorCode: $errorCode")
-                        latch.countDown()
-                    }
-                },
-            )
-        } catch (t: Throwable) {
-            Log.w(TAG, "takeScreenshot invocation error", t)
-            latch.countDown()
-        }
-    }
-
     /** The hierarchy as a UIAutomator-shaped XML document. */
     @JvmOverloads
     fun dumpXml(
-        service: AccessibilityService,
+        source: ScreenSource,
         options: DumpOptions = DumpOptions.forSnapshot(),
     ): String {
-        val displayInfo = DisplayUtils.getDisplayInfo(service)
-        val roots = captureRootSnapshots(service, displayInfo, options, DumpStats())
+        val displayInfo = DisplayUtils.getDisplayInfo(source.context)
+        val roots = captureRootSnapshots(source, displayInfo, options, DumpStats())
         if (roots.isEmpty()) {
             return "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n" +
                 "<hierarchy rotation=\"${displayInfo.rotation}\" />\n"
@@ -340,7 +244,7 @@ object HierarchyDumper {
      * returning immediately would report a blank screen that never existed.
      */
     private fun captureRootSnapshots(
-        service: AccessibilityService,
+        source: ScreenSource,
         displayInfo: DisplayUtils.DisplayInfo,
         options: DumpOptions,
         stats: DumpStats,
@@ -349,7 +253,7 @@ object HierarchyDumper {
         var rawRoots: List<RawRootEntry> = emptyList()
 
         for (attempt in 0..retryBackoff.size) {
-            rawRoots = getActiveRawRoots(service)
+            rawRoots = getActiveRawRoots(source)
             if (rawRoots.isNotEmpty()) break
             if (attempt < retryBackoff.size) SystemClock.sleep(retryBackoff[attempt])
         }
@@ -407,14 +311,14 @@ object HierarchyDumper {
      * 3. The focused node, walked up to its root — the last resort that still
      *    recovers a tree mid-transition.
      */
-    private fun getActiveRawRoots(service: AccessibilityService): List<RawRootEntry> {
+    private fun getActiveRawRoots(source: ScreenSource): List<RawRootEntry> {
         val roots = ArrayList<RawRootEntry>()
         val seenHashes = HashSet<Int>()
         var hasAppWindow = false
 
         runCatching {
-            val windows = service.windows
-            if (!windows.isNullOrEmpty()) {
+            val windows = source.windows()
+            if (windows.isNotEmpty()) {
                 for (window in windows.sortedByDescending { it.layer }) {
                     runCatching {
                         val root = windowRoot(window)
@@ -446,7 +350,7 @@ object HierarchyDumper {
 
         if (!hasAppWindow) {
             runCatching {
-                service.rootInActiveWindow?.let { activeRoot ->
+                source.activeRoot()?.let { activeRoot ->
                     if (seenHashes.add(activeRoot.hashCode())) {
                         roots.add(
                             0,
@@ -469,10 +373,8 @@ object HierarchyDumper {
 
         if (roots.isEmpty()) {
             val focused =
-                runCatching { service.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) }.getOrNull()
-                    ?: runCatching {
-                        service.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
-                    }.getOrNull()
+                source.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                    ?: source.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
 
             if (focused != null) {
                 try {
@@ -662,8 +564,8 @@ object HierarchyDumper {
      * stays alive, and the caller owns it.
      */
     @JvmStatic
-    fun findInputNode(service: AccessibilityService): AccessibilityNodeInfo? {
-        val roots = getActiveRawRoots(service)
+    fun findInputNode(source: ScreenSource): AccessibilityNodeInfo? {
+        val roots = getActiveRawRoots(source)
         var found: AccessibilityNodeInfo? = null
         try {
             for (entry in roots) {

@@ -490,3 +490,87 @@ fn the_helper_is_given_time_after_a_borrow_and_not_otherwise() {
     reader.settled();
     assert!(!reader.rebinding(), "it has answered with a screen since");
 }
+
+// ---------------------------------------------------------------- //
+// The privileged reader
+// ---------------------------------------------------------------- //
+
+use jev_pilot::device::helper::{DEEP_PORT, DEEP_READER};
+
+/// `UiAutomation` is refused no window, where an accessibility service is
+/// refused several. It costs a process to hold open, so it is started only
+/// when a screen turns out to need it.
+#[test]
+fn the_privileged_reader_is_told_apart_from_the_service() {
+    let deep = r#"{"success":true,"service":"PilotInstrumentation","protocol_version":2,
+        "version_name":"0.1.0","token_set":true}"#;
+    let service = r#"{"success":true,"service":"PilotAccessibilityService","protocol_version":2,
+        "version_name":"0.1.0","token_set":true}"#;
+
+    assert!(HelperInfo::parse(deep).expect("json").is_privileged());
+    assert!(!HelperInfo::parse(service).expect("json").is_privileged());
+    assert!(
+        HelperInfo::parse(deep).expect("json").usable(),
+        "still ours, still our protocol"
+    );
+}
+
+/// `am instrument` must be given `-w`. Without it the platform never builds
+/// the UiAutomation connection and `getUiAutomation` hands back null, which
+/// was learned by watching it do exactly that.
+#[test]
+fn the_privileged_reader_is_started_with_the_flag_that_makes_it_work() {
+    let args = adb().instrument_args();
+    let parts: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    assert_eq!(&parts[2..5], &["shell", "am", "instrument"]);
+    assert!(
+        parts.contains(&"-w"),
+        "without -w there is no UiAutomation: {parts:?}"
+    );
+    assert!(parts.contains(&DEEP_READER), "{parts:?}");
+}
+
+/// Killing the adb child on this side leaves the instrumentation running on
+/// the device — measured — so stopping it has to be asked of the device.
+#[test]
+fn the_privileged_reader_is_stopped_on_the_device() {
+    let args = adb().stop_instrument_args();
+    let parts: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    assert_eq!(&parts[2..3], &["shell"]);
+    assert!(
+        parts.iter().any(|p| p.contains("PilotInstrumentation")),
+        "{parts:?}"
+    );
+}
+
+#[test]
+fn the_two_readers_listen_on_different_ports() {
+    assert_ne!(DEEP_PORT, jev_pilot::device::helper::DEVICE_PORT);
+}
+
+/// A service that is enabled but not bound is the state a killed process
+/// leaves behind, and Android does not rebind it on its own. Removing the
+/// component from the setting and putting it back is what makes the system
+/// bind it again; the setting ends up exactly as it started, so this is a
+/// repair rather than a change.
+#[test]
+fn reviving_the_service_leaves_the_setting_as_it_found_it() {
+    let before = "com.other/.S:dev.jevpilot.helper/dev.jevpilot.helper.PilotAccessibilityService";
+
+    let (without, with) = Provision::revival_of(before);
+
+    assert_eq!(without, "com.other/.S", "ours removed, everyone else kept");
+    assert_eq!(with, before, "and put back exactly as it was");
+}
+
+/// On a device where ours is the only one, the setting has to pass through a
+/// value the framework reads as empty rather than a stray separator.
+#[test]
+fn reviving_the_only_service_does_not_leave_a_stray_separator() {
+    let (without, with) = Provision::revival_of(Provision::SERVICE_COMPONENT);
+
+    assert_eq!(without, "null");
+    assert_eq!(with, Provision::SERVICE_COMPONENT);
+}

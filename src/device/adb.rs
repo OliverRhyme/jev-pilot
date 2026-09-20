@@ -424,6 +424,32 @@ impl Adb {
         ])
     }
 
+    /// Start the privileged reader on the device.
+    ///
+    /// `-w` is not optional: without it the platform never builds the
+    /// `UiAutomation` connection, and the instrumentation finds
+    /// `getUiAutomation` handing back null. The command does not return while
+    /// the reader runs, so a caller keeps the child rather than waiting on it.
+    #[must_use]
+    pub fn instrument_args(&self) -> Vec<String> {
+        self.targeted(&[
+            "shell",
+            "am",
+            "instrument",
+            "-w",
+            crate::device::helper::DEEP_READER,
+        ])
+    }
+
+    /// Stop the privileged reader.
+    ///
+    /// Asked of the device, because killing the adb child on this side leaves
+    /// the instrumentation running there.
+    #[must_use]
+    pub fn stop_instrument_args(&self) -> Vec<String> {
+        self.targeted(&["shell", "pkill", "-f", "PilotInstrumentation"])
+    }
+
     /// Whether a hierarchy shows an application, rather than only the
     /// system's own windows.
     ///
@@ -555,6 +581,39 @@ pub enum Hierarchy {
     },
 }
 
+/// The privileged reader, while it is running.
+///
+/// Holds the `adb` child so the instrumentation stays up: the command does not
+/// return, and dropping the child on this side would not stop it on the device
+/// anyway, so stopping is asked of the device on the way out.
+#[cfg(feature = "http")]
+#[derive(Debug)]
+struct DeepReader {
+    endpoint: Box<str>,
+    token: Box<str>,
+    child: std::process::Child,
+    stop: Vec<String>,
+}
+
+/// Stopping it is asked of the device.
+///
+/// `am instrument -w` does not return while the reader runs, so the child is
+/// held rather than waited on — but killing that child leaves the
+/// instrumentation running on the device, measured, and a `UiAutomation` left
+/// alive keeps `uiautomator dump` answering `Killed` for every later run.
+#[cfg(feature = "http")]
+impl Drop for DeepReader {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("adb")
+            .args(&self.stop)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// A live Android device driven through the `adb` binary.
 #[derive(Debug)]
 pub struct AdbDevice {
@@ -562,6 +621,9 @@ pub struct AdbDevice {
     reader: crate::device::helper::Reader,
     /// Whether the last helper reading showed an application window.
     saw_an_application: bool,
+    /// The privileged reader, once a screen has needed one.
+    #[cfg(feature = "http")]
+    deep: Option<DeepReader>,
     adb: Adb,
     platform: crate::platform::Android,
     navigation: Option<Navigation>,
@@ -653,6 +715,12 @@ impl AdbDevice {
     /// The first backoff between those reads; it grows with each attempt.
     pub const EMPTY_BACKOFF_MS: u64 = 150;
 
+    /// How many times the privileged reader is polled while it starts.
+    pub const DEEP_ATTEMPTS: u32 = 20;
+
+    /// How long between those polls.
+    pub const DEEP_POLL_MS: u64 = 250;
+
     /// How long an accessibility service takes to rebind after a dump released
     /// the `UiAutomation` connection that suppressed it.
     pub const REBIND_MS: u64 = 1_500;
@@ -664,6 +732,8 @@ impl AdbDevice {
             hierarchy: Hierarchy::Cli,
             reader: crate::device::helper::Reader::cli("the helper was not asked for"),
             saw_an_application: true,
+            #[cfg(feature = "http")]
+            deep: None,
             adb: Adb::new(serial),
             platform: crate::platform::Android,
             navigation: None,
@@ -786,6 +856,27 @@ impl AdbDevice {
         })
     }
 
+    /// Make the system bind a service that is enabled but not answering.
+    ///
+    /// A killed process leaves the service listed as enabled and not bound,
+    /// and Android does not bind it again on its own. Stopping the privileged
+    /// reader does exactly that, since it shares this package.
+    ///
+    /// # Errors
+    /// Returns [`AdbError`] when the settings cannot be written.
+    pub fn revive_helper(&self) -> Result<(), AdbError> {
+        use crate::device::helper::Provision;
+
+        let current = Self::run(&self.adb.enabled_services_args())?;
+        let (without, with) = Provision::revival_of(&current);
+        Self::run(&self.adb.set_enabled_services_args(&without))?;
+        std::thread::sleep(std::time::Duration::from_millis(Self::ENABLE_SETTLE_MS));
+        Self::run(&self.adb.set_enabled_services_args(&with))?;
+        Self::run(&self.adb.enable_accessibility_args())?;
+        std::thread::sleep(std::time::Duration::from_millis(Self::ENABLE_SETTLE_MS));
+        Ok(())
+    }
+
     /// Read screens through the helper for the rest of this run.
     ///
     /// Opens the tunnel, checks that what answers is our own helper speaking a
@@ -866,7 +957,16 @@ impl AdbDevice {
             });
         }
         let serial = self.adb.serial().to_owned();
-        match self.through_jev_helper() {
+        // A helper the device reports as ready and which does not answer has
+        // been left unbound by a killed process. Rebinding it is cheaper than
+        // a whole run at 2.5s a screen.
+        if let Ok(attached) = self.through_jev_helper() {
+            return Ok(attached);
+        }
+        let revived = AdbDevice::new(serial.clone())
+            .revive_helper()
+            .and_then(|()| AdbDevice::new(serial.clone()).through_jev_helper());
+        match revived {
             Ok(attached) => Ok(attached),
             Err(error) => {
                 let why = format!("helper did not answer: {error}");
@@ -1044,6 +1144,89 @@ impl AdbDevice {
             .map_err(AdbError::Hierarchy)
     }
 
+    /// Read through the privileged reader, starting it if this is the first
+    /// screen to need it.
+    ///
+    /// `None` when there is none to be had, so the caller falls back to the
+    /// CLI. The two cannot both work: only one `UiAutomation` exists at a
+    /// time, and `uiautomator dump` answers `Killed` while this runs.
+    #[cfg(feature = "http")]
+    fn read_deeply(&mut self) -> Option<Result<crate::snapshot::Snapshot, AdbError>> {
+        if self.deep.is_none() {
+            match self.start_deep_reader() {
+                Ok(reader) => self.deep = Some(reader),
+                Err(error) => {
+                    // Not fatal: the CLI still reads these screens, slower.
+                    eprintln!("jev-pilot: could not start the privileged reader: {error}");
+                    return None;
+                }
+            }
+        }
+        let reader = self.deep.as_ref()?;
+        let (endpoint, token) = (reader.endpoint.clone(), reader.token.clone());
+        Some(match Self::read_helper(&endpoint, Some(&token)) {
+            Ok(raw) => self.parse(&raw),
+            Err(error) => {
+                self.deep = None;
+                Err(error)
+            }
+        })
+    }
+
+    /// Start the instrumentation and wait for it to answer.
+    #[cfg(feature = "http")]
+    fn start_deep_reader(&mut self) -> Result<DeepReader, AdbError> {
+        use crate::device::helper::{DEEP_PORT, DUMP_PATH, HelperInfo, Token};
+
+        let child = std::process::Command::new("adb")
+            .args(self.adb.instrument_args())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(AdbError::Spawn)?;
+
+        let local = match Self::run(&self.adb.forward_list_args())
+            .ok()
+            .and_then(|listing| self.adb.parse_forward_reuse(&listing, DEEP_PORT))
+        {
+            Some(port) => port,
+            None => Self::open_forward(&self.adb, DEEP_PORT)?,
+        };
+        let base = format!("http://127.0.0.1:{local}");
+
+        // It has a runtime to start before it can answer.
+        let mut info = None;
+        for _ in 0..Self::DEEP_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(Self::DEEP_POLL_MS));
+            if let Ok(ping) = Self::read_helper(&format!("{base}/ping"), None)
+                && let Some(parsed) = HelperInfo::parse(&ping)
+            {
+                info = Some(parsed);
+                break;
+            }
+        }
+        let info = info.ok_or(AdbError::Failed {
+            args: "am instrument".into(),
+            stderr: "the privileged reader never answered".into(),
+        })?;
+        if !info.usable() || !info.is_privileged() {
+            return Err(AdbError::Failed {
+                args: "am instrument".into(),
+                stderr: "what answered was not this crate's privileged reader".into(),
+            });
+        }
+
+        let token = Token::random().map_err(AdbError::Spawn)?;
+        Self::run(&self.adb.push_token_args(&token))?;
+
+        Ok(DeepReader {
+            endpoint: format!("{base}{DUMP_PATH}").into_boxed_str(),
+            token: Box::from(token.expose()),
+            child,
+            stop: self.adb.stop_instrument_args(),
+        })
+    }
+
     /// One reading through `uiautomator dump`, whatever the helper is doing.
     fn read_via_cli(&mut self) -> Result<crate::snapshot::Snapshot, AdbError> {
         let args = self.adb.dump_args();
@@ -1115,7 +1298,14 @@ impl super::Device for AdbDevice {
         // dump settles which of the two this is.
         #[cfg(feature = "http")]
         if self.reader.uses_helper() {
-            let via_cli = self.read_via_cli()?;
+            // `UiAutomation` is refused no window, and answers in about 200ms
+            // where `uiautomator dump` takes 2.5s. It costs a process to hold
+            // open, so it is started the first time a screen turns out to need
+            // it rather than for every run.
+            let via_cli = match self.read_deeply() {
+                Some(snapshot) => snapshot?,
+                None => self.read_via_cli()?,
+            };
             let seen = via_cli.refs().count();
             if crate::device::helper::Reader::cli_saw_more(0, seen) {
                 // Borrowed for this screen, not given up for the run. Which

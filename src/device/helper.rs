@@ -34,6 +34,26 @@ pub const DUMP_PATH: &str = "/dump_xml";
 /// The path that carries out a gesture.
 pub const ACTION_PATH: &str = "/action";
 
+/// The loopback port the privileged reader listens on, on the device.
+pub const DEEP_PORT: u16 = 18878;
+
+/// The instrumentation that reads the screen through `UiAutomation`.
+///
+/// Started only when a screen turns out to need it. It is refused no window,
+/// where an accessibility service is refused several — Settings' Wi-Fi panel
+/// among them — and it answers in about 200ms where `uiautomator dump` takes
+/// 2.5s, because the runtime stays up between readings.
+///
+/// It takes `FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES`, so the helper service
+/// keeps running while it does. `uiautomator dump` does not survive it though:
+/// only one `UiAutomation` exists at a time, and the command answers `Killed`
+/// for as long as this is running. It replaces that path rather than joining
+/// it.
+pub const DEEP_READER: &str = "dev.jevpilot.helper/.PilotInstrumentation";
+
+/// The name the privileged reader reports for itself.
+const DEEP_SERVICE_NAME: &str = "PilotInstrumentation";
+
 /// The header carrying the session token.
 pub const TOKEN_HEADER: &str = "X-Jev-Token";
 
@@ -139,6 +159,32 @@ impl Provision {
             return current.to_owned();
         }
         format!("{current}:{}", Self::SERVICE_COMPONENT)
+    }
+
+    /// The two values that rebind the service: without it, then with it again.
+    ///
+    /// A killed process leaves the service enabled but unbound, and Android
+    /// does not bind it again on its own. Taking the component out of the
+    /// setting and putting it back is what does. Every other service is kept
+    /// throughout, and the setting ends as it began, so this changes nothing
+    /// that outlives the repair.
+    ///
+    /// `settings get` prints `null` for an unset key, and writing `null` is
+    /// how the value is cleared without leaving a stray separator that the
+    /// framework would read as an empty component name.
+    #[must_use]
+    pub fn revival_of(current: &str) -> (String, String) {
+        let others: Vec<&str> = current
+            .trim()
+            .split(':')
+            .filter(|service| !service.is_empty() && *service != Self::SERVICE_COMPONENT)
+            .collect();
+        let without = if others.is_empty() {
+            "null".to_owned()
+        } else {
+            others.join(":")
+        };
+        (without, Self::enabled_services_with_helper(current))
     }
 
     /// One line saying what the device needs, for a caller to show a person.
@@ -261,6 +307,12 @@ impl HelperInfo {
         self.token_set
     }
 
+    /// Whether this is the privileged reader rather than the service.
+    #[must_use]
+    pub fn is_privileged(&self) -> bool {
+        self.service == DEEP_SERVICE_NAME
+    }
+
     /// Whether a run may read screens from whatever answered.
     ///
     /// Two separate checks. The port is reachable by every app on the phone,
@@ -269,7 +321,8 @@ impl HelperInfo {
     /// newer build can describe a screen in a shape this crate misreads.
     #[must_use]
     pub fn usable(&self) -> bool {
-        self.service == SERVICE_NAME && self.protocol_version == PROTOCOL_VERSION
+        (self.service == SERVICE_NAME || self.service == DEEP_SERVICE_NAME)
+            && self.protocol_version == PROTOCOL_VERSION
     }
 }
 

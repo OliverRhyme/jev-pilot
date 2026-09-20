@@ -1,5 +1,6 @@
 package dev.jevpilot.helper
 
+import android.os.Build
 import android.util.Log
 import org.json.JSONObject
 import java.io.BufferedInputStream
@@ -51,8 +52,14 @@ import java.util.concurrent.TimeUnit
  * UTF-8 payloads in any script survive exactly.
  */
 class CommandServer(
-    private val service: PilotAccessibilityService,
+    private val source: ScreenSource,
     private val port: Int,
+    /**
+     * Gestures, when this server can perform them. An instrumentation reads
+     * the screen and does not act on it: acting stays with the accessibility
+     * service, which is bound the whole time and needs no process started.
+     */
+    private val gestures: PilotAccessibilityService? = null,
 ) : Thread("JevPilotCommandServer") {
 
     @Volatile
@@ -206,16 +213,16 @@ class CommandServer(
             when {
                 path == "/snapshot" -> {
                     val options = HierarchyDumper.DumpOptions.forSnapshot().apply(query)
-                    sendJson(output, 200, HierarchyDumper.dumpAtomicSnapshot(service, options).toString())
+                    sendJson(output, 200, HierarchyDumper.dumpAtomicSnapshot(source, options).toString())
                 }
                 path == "/dump_xml" || path == "/hierarchy.xml" ||
                     (path == "/dump" && query["format"] == "xml") -> {
                     val options = HierarchyDumper.DumpOptions.forSnapshot().apply(query)
-                    sendXml(output, HierarchyDumper.dumpXml(service, options))
+                    sendXml(output, HierarchyDumper.dumpXml(source, options))
                 }
                 path == "/dump" || path == "/hierarchy" -> {
                     val options = HierarchyDumper.DumpOptions.forDump().apply(query)
-                    sendJson(output, 200, HierarchyDumper.dump(service, options).toString())
+                    sendJson(output, 200, HierarchyDumper.dump(source, options).toString())
                 }
                 path == "/action" || path == "/rpc" -> {
                     val json = if (body.isEmpty()) JSONObject() else JSONObject(body)
@@ -272,34 +279,39 @@ class CommandServer(
             when (cmd.lowercase(Locale.ROOT)) {
                 "ping" -> return buildPing(true)
                 "dump", "dump_ui" ->
-                    return HierarchyDumper.dump(service, HierarchyDumper.DumpOptions.forDump())
+                    return HierarchyDumper.dump(source, HierarchyDumper.DumpOptions.forDump())
                 "snapshot" ->
                     return HierarchyDumper.dumpAtomicSnapshot(
-                        service,
+                        source,
                         HierarchyDumper.DumpOptions.forSnapshot(),
                     )
                 "dump_xml" -> {
                     resp.put("success", true)
-                    resp.put("xml", HierarchyDumper.dumpXml(service))
+                    resp.put("xml", HierarchyDumper.dumpXml(source))
                 }
-                "tap" -> withPoint(params, resp) { x, y ->
-                    GestureController.tap(service, x, y, params.optLong("timeout", 1_500L))
+                "tap" -> withGestures(resp) { service ->
+                    withPoint(params, resp) { x, y ->
+                        GestureController.tap(service, x, y, params.optLong("timeout", 1_500L))
+                    }
                 }
-                "double_tap" -> withPoint(params, resp) { x, y ->
-                    GestureController.doubleTap(service, x, y, params.optLong("timeout", 2_000L))
+                "double_tap" -> withGestures(resp) { service ->
+                    withPoint(params, resp) { x, y ->
+                        GestureController.doubleTap(service, x, y, params.optLong("timeout", 2_000L))
+                    }
                 }
-                "long_press" -> withPoint(params, resp) { x, y ->
-                    GestureController.longPress(
-                        service,
-                        x,
-                        y,
-                        params.optLong("duration", 1_000L),
-                        2_500L,
-                    )
+                "long_press" -> withGestures(resp) { service ->
+                    withPoint(params, resp) { x, y ->
+                        GestureController.longPress(
+                            service,
+                            x,
+                            y,
+                            params.optLong("duration", 1_000L),
+                            2_500L,
+                        )
+                    }
                 }
-                "swipe" -> resp.put(
-                    "success",
-                    GestureController.swipe(
+                "swipe" -> withGestures(resp) { service ->
+                    resp.put("success", GestureController.swipe(
                         service,
                         params.optDouble("x1", -1.0).toFloat(),
                         params.optDouble("y1", -1.0).toFloat(),
@@ -307,25 +319,24 @@ class CommandServer(
                         params.optDouble("y2", -1.0).toFloat(),
                         params.optLong("duration", 300L),
                         3_000L,
-                    ),
-                )
-                "type" -> resp.put(
-                    "success",
-                    GestureController.setText(
+                    ))
+                }
+                "type" -> withGestures(resp) { service ->
+                    resp.put("success", GestureController.setText(
                         service,
                         params.optString("text", ""),
                         params.optBoolean("append", false),
-                    ),
-                )
-                "clear" -> resp.put("success", GestureController.clearText(service))
-                "clipboard" -> resp.put(
-                    "success",
-                    GestureController.setClipboard(service, params.optString("text", "")),
-                )
-                "global" -> resp.put(
-                    "success",
-                    GestureController.performGlobalAction(service, params.optString("action", "")),
-                )
+                    ))
+                }
+                "clear" -> withGestures(resp) { service ->
+                    resp.put("success", GestureController.clearText(service))
+                }
+                "clipboard" -> withGestures(resp) { service ->
+                    resp.put("success", GestureController.setClipboard(service, params.optString("text", "")))
+                }
+                "global" -> withGestures(resp) { service ->
+                    resp.put("success", GestureController.performGlobalAction(service, params.optString("action", "")))
+                }
                 else -> {
                     resp.put("success", false)
                     resp.put("error", "Unknown command")
@@ -339,6 +350,24 @@ class CommandServer(
             }
         }
         return resp
+    }
+
+    /**
+     * Runs [act] when this server can perform gestures, and says so when it
+     * cannot.
+     *
+     * The instrumentation reads the screen; it does not act on it. Acting
+     * belongs to the accessibility service, which is bound the whole time and
+     * needs no process started to reach it.
+     */
+    private inline fun withGestures(resp: JSONObject, act: (PilotAccessibilityService) -> Unit) {
+        val service = gestures
+        if (service == null) {
+            resp.put("success", false)
+            resp.put("error", "this endpoint reads the screen; gestures go to the helper service")
+        } else {
+            act(service)
+        }
     }
 
     /** Runs [gesture] only when the request carried a point on the screen. */
@@ -365,19 +394,38 @@ class CommandServer(
      * whether to push its token. What is on screen — the foreground package and
      * activity — is told only to a caller that proved it holds the token.
      */
+    /** The installed build, read from the package manager. */
+    private val versionCode: Long
+        get() = runCatching {
+            val info = source.context.packageManager
+                .getPackageInfo(source.context.packageName, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                info.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                info.versionCode.toLong()
+            }
+        }.getOrDefault(-1L)
+
+    private val versionName: String
+        get() = runCatching {
+            source.context.packageManager
+                .getPackageInfo(source.context.packageName, 0).versionName.orEmpty()
+        }.getOrDefault("")
+
     private fun buildPing(authed: Boolean): JSONObject = JSONObject().apply {
         put("success", true)
-        put("service", "PilotAccessibilityService")
-        put("version_code", service.versionCode)
-        put("version_name", service.versionName)
+        put("service", source.label)
+        put("version_code", versionCode)
+        put("version_name", versionName)
         put("protocol_version", PilotAccessibilityService.PROTOCOL_VERSION)
         put("port", port)
         put("auth_required", true)
         put("token_set", TokenStore.isSet)
         put("authenticated", authed)
         if (authed) {
-            put("package", service.currentPackageName)
-            put("activity", service.currentActivityName)
+            put("package", source.currentPackage)
+            put("activity", source.currentActivity)
         }
     }
 

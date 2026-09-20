@@ -95,7 +95,11 @@ impl Desk {
         // something else.
         while self.typed.try_recv().is_ok() {}
 
-        loop {
+        // A question nobody is there to answer must not hold a run open for
+        // ever. A person at the terminal has as long as they like; a run with
+        // nothing attached to its desk gives up and says so.
+        let deadline = std::time::Instant::now() + Duration::from_secs(WAIT_SECONDS);
+        while std::time::Instant::now() < deadline {
             if let Ok(raw) = std::fs::read_to_string(&answer)
                 && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw)
             {
@@ -116,6 +120,11 @@ impl Desk {
                 }
             }
         }
+        let _ = std::fs::remove_file(&ask);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("nobody answered within {WAIT_SECONDS}s"),
+        ))
     }
 
     /// Put an impasse to whoever is there, and resolve their answer.
@@ -190,6 +199,9 @@ fn resolve_json(value: &serde_json::Value) -> Resolution {
             .and_then(|n| usize::try_from(n).ok()),
     }
 }
+
+/// How long a question waits for an answer before the run gives up.
+const WAIT_SECONDS: u64 = 300;
 
 enum Answer {
     Typed(String),
