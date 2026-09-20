@@ -473,3 +473,20 @@ fn many_borrows_still_do_not_end_the_helpers_use() {
     assert!(reader.uses_helper());
     assert_eq!(reader.borrowed(), 10);
 }
+
+/// "No application window" means two things that want opposite treatment: a
+/// screen withheld from accessibility services, which will never improve, and
+/// a helper still rebinding after a dump we ourselves did, which improves in
+/// about 1.5s. Only the second deserves patience, and the reader is what knows
+/// which is expected.
+#[test]
+fn the_helper_is_given_time_after_a_borrow_and_not_otherwise() {
+    let mut reader = Reader::helper();
+    assert!(!reader.rebinding(), "nothing has silenced it");
+
+    reader.borrow_cli("blind");
+    assert!(reader.rebinding(), "our own dump just silenced it");
+
+    reader.settled();
+    assert!(!reader.rebinding(), "it has answered with a screen since");
+}

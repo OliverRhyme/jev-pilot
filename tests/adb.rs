@@ -300,3 +300,35 @@ fn the_attached_devices_are_read_from_adb_devices() {
     );
     assert!(Adb::parse_devices("List of devices attached\n\n").is_empty());
 }
+
+/// A screen withheld from accessibility services and a screen caught
+/// mid-transition both parse to no actionable rows, and they want opposite
+/// treatment: the first will never improve and needs the 2.5s dump now, the
+/// second improves in 150ms and needs only patience.
+///
+/// The helper's own answer tells them apart. A withheld screen leaves only the
+/// system's own windows — on Settings' Wi-Fi panel, six nodes, every one of
+/// them `com.android.systemui` — while the application window it is hiding is
+/// listed by the platform as present and focused the whole time.
+#[test]
+fn a_document_without_an_application_window_means_one_is_being_withheld() {
+    let withheld = r#"<hierarchy rotation="0">
+        <node index="0" package="com.android.systemui" window-type="system" bounds="[0,0][1008,113]" />
+        </hierarchy>"#;
+    let ordinary = r#"<hierarchy rotation="0">
+        <node index="0" package="com.android.systemui" window-type="system" bounds="[0,0][1008,113]" />
+        <node index="1" package="com.android.settings" window-type="application" bounds="[0,0][1008,2244]" />
+        </hierarchy>"#;
+
+    assert!(!Adb::shows_an_application(withheld));
+    assert!(Adb::shows_an_application(ordinary));
+}
+
+/// The CLI's own dumps carry no window metadata at all, and must not be read
+/// as withholding anything.
+#[test]
+fn a_document_with_no_window_metadata_is_not_treated_as_withheld() {
+    let cli_shaped = r#"<hierarchy rotation="0"><node index="0" class="x" /></hierarchy>"#;
+
+    assert!(Adb::shows_an_application(cli_shaped));
+}

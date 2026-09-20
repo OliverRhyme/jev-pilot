@@ -71,7 +71,13 @@ impl Adb {
     /// halves the round trips per observation.
     #[must_use]
     pub fn dump_args(&self) -> Vec<String> {
-        self.targeted(&["exec-out", "uiautomator", "dump", "/dev/tty"])
+        self.targeted(&[
+            "exec-out",
+            "uiautomator",
+            "dump",
+            "--compressed",
+            "/dev/tty",
+        ])
     }
 
     /// Tap a point.
@@ -418,6 +424,22 @@ impl Adb {
         ])
     }
 
+    /// Whether a hierarchy shows an application, rather than only the
+    /// system's own windows.
+    ///
+    /// Used to tell a screen that is withheld from accessibility services from
+    /// one caught mid-transition. Both parse to no actionable rows and they
+    /// want opposite treatment: the first will never improve and needs the
+    /// 2.5s dump now, the second improves in 150ms and needs only patience.
+    ///
+    /// Only the helper's documents carry `window-type`; `uiautomator`'s do
+    /// not, and a document without the attribute at all is not withholding
+    /// anything.
+    #[must_use]
+    pub fn shows_an_application(raw: &str) -> bool {
+        !raw.contains("window-type=") || raw.contains(r#"window-type="application""#)
+    }
+
     /// Ask adb which devices are attached.
     #[must_use]
     pub fn devices_args() -> Vec<String> {
@@ -538,6 +560,8 @@ pub enum Hierarchy {
 pub struct AdbDevice {
     hierarchy: Hierarchy,
     reader: crate::device::helper::Reader,
+    /// Whether the last helper reading showed an application window.
+    saw_an_application: bool,
     adb: Adb,
     platform: crate::platform::Android,
     navigation: Option<Navigation>,
@@ -639,6 +663,7 @@ impl AdbDevice {
         Self {
             hierarchy: Hierarchy::Cli,
             reader: crate::device::helper::Reader::cli("the helper was not asked for"),
+            saw_an_application: true,
             adb: Adb::new(serial),
             platform: crate::platform::Android,
             navigation: None,
@@ -972,7 +997,13 @@ impl AdbDevice {
         if let Hierarchy::Helper { endpoint, token } = &self.hierarchy {
             let (endpoint, token) = (endpoint.clone(), token.clone());
             match Self::read_helper(&endpoint, token.as_deref()) {
-                Ok(raw) => return self.parse(&raw),
+                Ok(raw) => {
+                    self.saw_an_application = Adb::shows_an_application(&raw);
+                    if self.saw_an_application {
+                        self.reader.settled();
+                    }
+                    return self.parse(&raw);
+                }
                 // A dump we ourselves just did silences the helper for about
                 // 1.5s, so the read right after one finds it mid-rebind. That
                 // failure means "not yet", and waiting it out is cheaper than
@@ -980,7 +1011,13 @@ impl AdbDevice {
                 Err(_) if self.reader.forgives_a_failure() => {
                     std::thread::sleep(std::time::Duration::from_millis(Self::REBIND_MS));
                     match Self::read_helper(&endpoint, token.as_deref()) {
-                        Ok(raw) => return self.parse(&raw),
+                        Ok(raw) => {
+                            self.saw_an_application = Adb::shows_an_application(&raw);
+                            if self.saw_an_application {
+                                self.reader.settled();
+                            }
+                            return self.parse(&raw);
+                        }
                         Err(error) => {
                             self.reader
                                 .degrade(format!("helper did not come back: {error}"));
@@ -1050,6 +1087,18 @@ impl super::Device for AdbDevice {
         for attempt in 1..Self::EMPTY_ATTEMPTS {
             if blank.worth_acting_on() {
                 return Ok(blank);
+            }
+            // The helper answered with no application window at all, only the
+            // system's own. That is a screen withheld from accessibility
+            // services, and no amount of asking again will change it: waiting
+            // would only cost a second before the dump that was always going
+            // to be needed.
+            //
+            // Unless a dump of ours is still suppressing the helper, in which
+            // case the very same answer means it has not finished rebinding,
+            // and patience is exactly what it needs.
+            if !self.saw_an_application && !self.reader.rebinding() {
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(
                 Self::EMPTY_BACKOFF_MS * u64::from(attempt),

@@ -438,6 +438,22 @@ impl Reader {
         self.borrowed
     }
 
+    /// Whether a dump we did is still expected to be suppressing the helper.
+    ///
+    /// An answer with no application window in it means one of two things: the
+    /// screen is withheld from accessibility services, or the helper has not
+    /// finished rebinding after a dump. The first will never improve and the
+    /// second improves in about 1.5s, so only the second is worth waiting for.
+    #[must_use]
+    pub const fn rebinding(&self) -> bool {
+        self.rebinding
+    }
+
+    /// Note that the helper has answered with a screen, so it is back.
+    pub const fn settled(&mut self) {
+        self.rebinding = false;
+    }
+
     /// Whether the next helper failure means "still rebinding" rather than
     /// "gone", and should be waited out instead of ending its use.
     ///
