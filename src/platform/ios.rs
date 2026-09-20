@@ -32,6 +32,7 @@ const OPERATIONS: &[Operation] = &[
     Operation::ScrollDown,
     Operation::Home,
     Operation::AppSwitcher,
+    Operation::Submit,
     Operation::Wait,
     Operation::Done,
     Operation::Blocked,

@@ -211,3 +211,31 @@ fn the_stderr_classification_is_not_shadowed_by_the_exit_status() {
     );
     assert_eq!(Adb::classify_stderr("device offline"), None);
 }
+
+/// Typing into a field leaves the text uncommitted. Without a way to submit it,
+/// a search can be composed and never run, which reads as a loop that typed
+/// correctly and then had nothing left it could do.
+#[test]
+fn submitting_presses_the_enter_key() {
+    let args = adb().system_args(SystemAct::Submit);
+    assert_eq!(args.last().map(String::as_str), Some("KEYCODE_ENTER"));
+}
+
+/// The helper listens on a loopback port on the phone, so a tunnel is needed.
+/// `tcp:0` lets adb pick the host port, which is what makes two processes able
+/// to attach to the same device without agreeing a number in advance.
+#[test]
+fn the_helper_tunnel_lets_adb_choose_the_host_port() {
+    let args = adb().forward_args(18888);
+    let parts: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    assert_eq!(&parts[2..], &["forward", "tcp:0", "tcp:18888"]);
+}
+
+/// adb prints the port it allocated, and nothing else useful.
+#[test]
+fn the_allocated_host_port_is_read_back_from_adb() {
+    assert_eq!(Adb::parse_forward_port("18899\n"), Some(18899));
+    assert_eq!(Adb::parse_forward_port(""), None);
+    assert_eq!(Adb::parse_forward_port("error: cannot bind"), None);
+}

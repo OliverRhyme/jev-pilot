@@ -4,7 +4,7 @@
 //! client, so the loop's control flow — the guards, the confidence floor, the
 //! step limit — is tested against scripted answers instead of against a model.
 
-use crate::act::{Act, Catalog, Indecision, Operation, Outcome};
+use crate::act::{Act, Catalog, Decision, Indecision, Operation, Outcome};
 use crate::device::{Command, Device, command_for};
 use crate::judgment::Confidence;
 use crate::platform::Platform;
@@ -54,6 +54,14 @@ pub struct Impasse<'i> {
     pub step: u32,
     /// Why the answer could not be acted on.
     pub because: &'i Indecision,
+    /// The operation Jev leaned toward, even though it was not sure enough.
+    pub leaning: Operation,
+    /// How sure it was about the operation.
+    pub operation_confidence: Confidence,
+    /// How sure it was about the row, when it named one.
+    pub target_confidence: Option<Confidence>,
+    /// What the operation was nearly beaten by, highest first.
+    pub alternatives: &'i [(Box<str>, f64)],
     /// The rows on screen, in the order they were offered.
     pub rows: &'i [String],
     /// The operations this platform offers here.
@@ -96,6 +104,64 @@ pub trait Escalate {
     /// # Errors
     /// Returns [`Self::Error`] when the second opinion cannot be obtained.
     fn consult(&mut self, impasse: &Impasse<'_>) -> Result<Resolution, Self::Error>;
+}
+
+/// What a field is waiting to be given.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Writing<'w> {
+    /// What the run is trying to achieve.
+    pub goal: &'w str,
+    /// Which step this is.
+    pub step: u32,
+    /// The field the words will be typed into.
+    pub field: &'w Element,
+    /// The rows on screen, as the model was shown them.
+    pub rows: &'w [String],
+    /// What the previous step did, if there was one.
+    pub previous: Option<&'w str>,
+}
+
+/// Writes the text a System One model cannot.
+///
+/// Jev decides *whether* to type and *where*; it selects among options and does
+/// not generate, so the words themselves must come from somewhere else. This is
+/// the same handover as [`Escalate`] and for the same reason — a slower, more
+/// general judge, which may be a reasoning model or a person.
+pub trait Compose {
+    /// What can go wrong writing.
+    type Error;
+
+    /// Write what should be typed into this field.
+    ///
+    /// # Errors
+    /// Returns [`Self::Error`] when the text cannot be obtained.
+    fn compose(&mut self, request: &Writing<'_>) -> Result<Box<str>, Self::Error>;
+}
+
+/// The default: nothing can write, so typing is never offered.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Mute;
+
+impl Compose for Mute {
+    type Error = core::convert::Infallible;
+
+    fn compose(&mut self, _request: &Writing<'_>) -> Result<Box<str>, Self::Error> {
+        // Unreachable: `Mute` means typing is not offered, so nothing resolves
+        // to a request for words.
+        Ok(Box::from(""))
+    }
+}
+
+impl<F, E> Compose for F
+where
+    F: FnMut(&Writing<'_>) -> Result<Box<str>, E>,
+{
+    type Error = E;
+
+    fn compose(&mut self, request: &Writing<'_>) -> Result<Box<str>, Self::Error> {
+        self(request)
+    }
 }
 
 /// The default policy: stop, and let the caller decide what to do about it.
@@ -148,39 +214,46 @@ pub enum Ending {
 /// A run could not be carried out.
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum RunError<D, J, X> {
+pub enum RunError<D, J, X, C> {
     /// The device could not be observed or driven.
     Device(D),
     /// The judgment could not be obtained.
     Judge(J),
     /// The second opinion could not be obtained.
     Escalation(X),
+    /// The text to type could not be written.
+    Composition(C),
     /// An action named a screen that had already been replaced.
     Stale(StaleRef),
 }
 
-impl<D: fmt::Display, J: fmt::Display, X: fmt::Display> fmt::Display for RunError<D, J, X> {
+impl<D: fmt::Display, J: fmt::Display, X: fmt::Display, C: fmt::Display> fmt::Display
+    for RunError<D, J, X, C>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Device(inner) => write!(f, "device: {inner}"),
             Self::Judge(inner) => write!(f, "judge: {inner}"),
             Self::Escalation(inner) => write!(f, "escalation: {inner}"),
+            Self::Composition(inner) => write!(f, "composing text: {inner}"),
             Self::Stale(inner) => write!(f, "{inner}"),
         }
     }
 }
 
-impl<D, J, X> core::error::Error for RunError<D, J, X>
+impl<D, J, X, C> core::error::Error for RunError<D, J, X, C>
 where
     D: core::error::Error + 'static,
     J: core::error::Error + 'static,
     X: core::error::Error + 'static,
+    C: core::error::Error + 'static,
 {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Device(inner) => Some(inner),
             Self::Judge(inner) => Some(inner),
             Self::Escalation(inner) => Some(inner),
+            Self::Composition(inner) => Some(inner),
             Self::Stale(inner) => Some(inner),
         }
     }
@@ -209,30 +282,49 @@ pub struct StepReport<'s> {
     pub is_error_screen: f64,
 }
 
-/// What a run produces: an ending, or a failure from one of its three parts.
-pub type RunResult<D, J, X> =
-    Result<Ending, RunError<<D as Device>::Error, <J as Judge>::Error, <X as Escalate>::Error>>;
+/// A failure from one of a run's four parts.
+pub type Failure<D, J, X, C> = RunError<
+    <D as Device>::Error,
+    <J as Judge>::Error,
+    <X as Escalate>::Error,
+    <C as Compose>::Error,
+>;
+
+/// What a run produces: an ending, or a failure from one of its four parts.
+pub type RunResult<D, J, X, C> = Result<Ending, Failure<D, J, X, C>>;
 
 /// Something told about each step as it happens.
 type Observer<'p> = Box<dyn FnMut(&StepReport<'_>) + 'p>;
+
+/// One step, as everything that decides about it needs to see it.
+struct Taken<'s> {
+    goal: &'s str,
+    step: u32,
+    snapshot: &'s Snapshot,
+    catalog: &'s Catalog,
+    answers: &'s StepAnswers,
+    previous: Option<&'s str>,
+}
 
 /// Drives one device towards a goal.
 ///
 /// `Debug` is written out rather than derived: the step observer is a boxed
 /// closure, which has no `Debug` of its own, so its presence is reported
 /// instead of its contents.
-pub struct Pilot<'p, D, J, X = Halt> {
+pub struct Pilot<'p, D, J, X = Halt, C = Mute> {
     device: D,
     judge: J,
     escalation: X,
+    composer: C,
     platform: &'p dyn Platform,
     floor: Confidence,
     limit: u32,
     certainty: f64,
+    types: bool,
     observer: Option<Observer<'p>>,
 }
 
-impl<'p, D: Device, J: Judge, X: Escalate> Pilot<'p, D, J, X> {
+impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// How many steps a run takes before giving up.
     pub const STEP_LIMIT: u32 = 25;
 
@@ -241,42 +333,70 @@ impl<'p, D: Device, J: Judge, X: Escalate> Pilot<'p, D, J, X> {
 
     /// Send impasses to a second opinion instead of stopping at them.
     #[must_use]
-    pub fn escalating_to<Y: Escalate>(self, escalation: Y) -> Pilot<'p, D, J, Y> {
+    pub fn escalating_to<Y: Escalate>(self, escalation: Y) -> Pilot<'p, D, J, Y, C> {
         Pilot {
             device: self.device,
             judge: self.judge,
             escalation,
+            composer: self.composer,
             platform: self.platform,
             floor: self.floor,
             limit: self.limit,
             certainty: self.certainty,
+            types: self.types,
+            observer: self.observer,
+        }
+    }
+
+    /// Offer typing, with this to write the words.
+    ///
+    /// Typing is not offered until something can supply the text, because an
+    /// operation the model can choose and nothing can carry out is worse than
+    /// one it was never offered.
+    #[must_use]
+    pub fn writing_with<W: Compose>(self, composer: W) -> Pilot<'p, D, J, X, W> {
+        Pilot {
+            device: self.device,
+            judge: self.judge,
+            escalation: self.escalation,
+            composer,
+            platform: self.platform,
+            floor: self.floor,
+            limit: self.limit,
+            certainty: self.certainty,
+            types: true,
             observer: self.observer,
         }
     }
 }
 
-impl<'p, D: Device, J: Judge> Pilot<'p, D, J, Halt> {
+impl<'p, D: Device, J: Judge> Pilot<'p, D, J, Halt, Mute> {
     /// Pair a device with something that can judge what to do next.
     pub fn new(device: D, judge: J, platform: &'p dyn Platform) -> Self {
         Self {
             device,
             judge,
             escalation: Halt,
+            composer: Mute,
             platform,
             floor: Confidence::ZERO,
             limit: Self::STEP_LIMIT,
             certainty: Self::CERTAINTY,
+            types: false,
             observer: None,
         }
     }
 }
 
-impl<D: fmt::Debug, J: fmt::Debug, X: fmt::Debug> fmt::Debug for Pilot<'_, D, J, X> {
+impl<D: fmt::Debug, J: fmt::Debug, X: fmt::Debug, C: fmt::Debug> fmt::Debug
+    for Pilot<'_, D, J, X, C>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Pilot")
             .field("device", &self.device)
             .field("judge", &self.judge)
             .field("escalation", &self.escalation)
+            .field("composer", &self.composer)
             .field("platform", &self.platform.name())
             .field("floor", &self.floor)
             .field("limit", &self.limit)
@@ -286,7 +406,7 @@ impl<D: fmt::Debug, J: fmt::Debug, X: fmt::Debug> fmt::Debug for Pilot<'_, D, J,
     }
 }
 
-impl<'p, D: Device, J: Judge, X: Escalate> Pilot<'p, D, J, X> {
+impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// Report every step as it happens.
     #[must_use]
     pub fn watching(mut self, observer: impl FnMut(&StepReport<'_>) + 'p) -> Self {
@@ -338,17 +458,76 @@ impl<'p, D: Device, J: Judge, X: Escalate> Pilot<'p, D, J, X> {
         });
     }
 
+    /// Ask a second opinion what to do about an impasse.
+    ///
+    /// `None` means the run should end: either the opinion declined, or what it
+    /// named could not be resolved through this screen's catalog. A second
+    /// opinion is bound by exactly the constraints Jev was, so it can widen who
+    /// decides without widening what may happen.
+    fn consult(
+        &mut self,
+        at: &Taken<'_>,
+        because: &Indecision,
+    ) -> Result<Option<Decision>, Failure<D, J, X, C>> {
+        let (goal, step, snapshot, catalog, answers, previous) = (
+            at.goal,
+            at.step,
+            at.snapshot,
+            at.catalog,
+            at.answers,
+            at.previous,
+        );
+        let rows: Vec<String> = snapshot
+            .refs()
+            .map(|(_, element)| element.describe())
+            .collect();
+
+        // Sorted so the thing it was nearly beaten by comes first: that is the
+        // decision actually being asked about.
+        let mut alternatives: Vec<(Box<str>, f64)> = answers
+            .operation
+            .probabilities
+            .iter()
+            .map(|(name, probability)| (name.clone(), *probability))
+            .collect();
+        alternatives.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal));
+
+        let resolution = self
+            .escalation
+            .consult(&Impasse {
+                goal,
+                step,
+                because,
+                leaning: answers.operation.choice,
+                operation_confidence: answers.operation.confidence,
+                target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),
+                alternatives: &alternatives,
+                rows: &rows,
+                operations: catalog.operations(),
+                previous,
+            })
+            .map_err(RunError::Escalation)?;
+
+        Ok(match resolution {
+            Resolution::Stop => None,
+            Resolution::Choose { operation, target } => catalog.act_from(operation, target).ok(),
+        })
+    }
+
     /// Work towards `goal` until the run ends.
     ///
     /// # Errors
     /// Returns [`RunError`] when the device or the judge fails. A run that
     /// merely does not succeed — uncertain, blocked, out of steps — is an
     /// [`Ending`], not an error.
-    pub fn pursue(&mut self, goal: &str) -> RunResult<D, J, X> {
+    pub fn pursue(&mut self, goal: &str) -> RunResult<D, J, X, C> {
         let mut previous: Option<String> = None;
         for index in 1..=self.limit {
             let snapshot = self.device.observe().map_err(RunError::Device)?;
-            let catalog = Catalog::for_screen(&snapshot, self.platform);
+            let mut catalog = Catalog::for_screen(&snapshot, self.platform);
+            if self.types {
+                catalog = catalog.accepting_text();
+            }
             let questions = StepQuestions::new(goal, &catalog);
 
             let answers = self
@@ -362,49 +541,55 @@ impl<'p, D: Device, J: Judge, X: Escalate> Pilot<'p, D, J, X> {
             let decided = catalog.resolve(&answers, self.floor);
 
             if answers.is_error_screen.noul > self.certainty {
-                self.report(index, &snapshot, &answers, decided.as_ref().ok());
+                self.report(index, &snapshot, &answers, None);
                 return Ok(Ending::ErrorScreen);
             }
             if answers.goal_met.noul > self.certainty {
-                self.report(index, &snapshot, &answers, decided.as_ref().ok());
+                self.report(index, &snapshot, &answers, None);
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
 
-            let act = match decided {
-                Ok(act) => act,
+            let decision = match decided {
+                Ok(decision) => decision,
                 Err(because) => {
+                    let taken = Taken {
+                        goal,
+                        step: index,
+                        snapshot: &snapshot,
+                        catalog: &catalog,
+                        answers: &answers,
+                        previous: previous.as_deref(),
+                    };
+                    if let Some(decision) = self.consult(&taken, &because)? {
+                        decision
+                    } else {
+                        self.report(index, &snapshot, &answers, None);
+                        return Ok(Ending::Uncertain { because });
+                    }
+                }
+            };
+
+            // Jev chose whether and where to type; it cannot choose what, so
+            // the words are asked for here, once a field is settled on.
+            let act = match decision {
+                Decision::Ready(act) => act,
+                Decision::NeedsText { into } => {
                     let rows: Vec<String> = snapshot
                         .refs()
                         .map(|(_, element)| element.describe())
                         .collect();
-                    let resolution = self
-                        .escalation
-                        .consult(&Impasse {
+                    let field = snapshot.resolve(into).map_err(RunError::Stale)?;
+                    let text = self
+                        .composer
+                        .compose(&Writing {
                             goal,
                             step: index,
-                            because: &because,
+                            field,
                             rows: &rows,
-                            operations: catalog.operations(),
                             previous: previous.as_deref(),
                         })
-                        .map_err(RunError::Escalation)?;
-                    match resolution {
-                        Resolution::Stop => {
-                            self.report(index, &snapshot, &answers, None);
-                            return Ok(Ending::Uncertain { because });
-                        }
-                        // Resolved through the same catalog, so a second opinion
-                        // is bound by every constraint Jev was.
-                        Resolution::Choose { operation, target } => {
-                            match catalog.act_from(operation, target) {
-                                Ok(act) => act,
-                                Err(because) => {
-                                    self.report(index, &snapshot, &answers, None);
-                                    return Ok(Ending::Uncertain { because });
-                                }
-                            }
-                        }
-                    }
+                        .map_err(RunError::Composition)?;
+                    Act::TypeText { into, text }
                 }
             };
 
@@ -412,6 +597,14 @@ impl<'p, D: Device, J: Judge, X: Escalate> Pilot<'p, D, J, X> {
             // escalation is logged with what was actually sent to the device
             // rather than with the refusal that preceded it.
             self.report(index, &snapshot, &answers, Some(&act));
+
+            // A verdict ends the run. It resolves to no command, so without
+            // this the loop carries on driving a screen it has just declared
+            // finished — and the goal-met guard hides that whenever the two
+            // happen to agree.
+            if let Act::Finish(outcome) = act {
+                return Ok(Ending::Finished(outcome));
+            }
 
             previous = Some(recount(&act, &snapshot));
             let command = command_for(&act, &snapshot).map_err(RunError::Stale)?;

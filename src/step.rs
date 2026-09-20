@@ -29,6 +29,9 @@ pub struct ChosenOperation {
     pub choice: Operation,
     /// How concentrated the distribution was.
     pub confidence: Confidence,
+    /// Every operation and its probability. See [`Chosen::probabilities`].
+    #[serde(default)]
+    pub probabilities: std::collections::BTreeMap<Box<str>, f64>,
 }
 
 /// Everything one step asks of the model.
@@ -44,6 +47,9 @@ pub struct StepQuestions<'a> {
     /// Which row to do it to, when the screen has any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tap_target: Option<Question<Deciding<'a>>>,
+    /// Which field to type into, when the screen has one and typing is offered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_field: Option<Question<Deciding<'a>>>,
     /// Whether the goal is already satisfied.
     pub goal_met: Question<Checking<'a>>,
     /// Whether the screen is an error state.
@@ -57,6 +63,11 @@ impl<'a> StepQuestions<'a> {
         Self {
             operation: catalog.operation_question(goal),
             tap_target: catalog.tap_target_question(goal),
+            type_field: catalog
+                .operations()
+                .contains(&Operation::TypeText)
+                .then(|| catalog.type_field_question(goal))
+                .flatten(),
             goal_met: Question::Noul {
                 instructions: Checking {
                     goal,
@@ -87,6 +98,9 @@ pub struct StepAnswers {
     /// The row it would act on, if the operation needs one.
     #[serde(default)]
     pub tap_target: Option<Chosen>,
+    /// The field it would type into, if the operation is typing.
+    #[serde(default)]
+    pub type_field: Option<Chosen>,
     /// How likely the goal is already met.
     pub goal_met: Likelihood,
     /// How likely the screen is an error state.

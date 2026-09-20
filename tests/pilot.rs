@@ -233,3 +233,42 @@ fn a_step_resolved_by_escalation_is_reported_with_the_act_it_performed() {
         "the escalated act should appear in the log, got {first:?}"
     );
 }
+
+/// Choosing to stop must stop, on its own. The goal-met guard can also end a
+/// run, and when both fire together it hides a missing check: a verdict that
+/// resolves to a command the device cannot carry out becomes a no-op, and the
+/// loop keeps driving a screen it has already declared finished.
+#[test]
+fn a_verdict_ends_the_run_even_when_the_guard_does_not_agree() {
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        // goal_met stays low: only the chosen operation says to stop.
+        Scripted::new(vec![answer("done", None, 0.99, 0.05)]),
+        &Android,
+    );
+
+    let ending = pilot
+        .pursue("Something already satisfied")
+        .expect("completes");
+
+    assert_eq!(ending, Ending::Finished(Outcome::Achieved));
+    assert!(
+        pilot.device().performed.is_empty(),
+        "a verdict touches nothing"
+    );
+}
+
+/// The same for giving up.
+#[test]
+fn declaring_the_goal_unreachable_ends_the_run() {
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        Scripted::new(vec![answer("blocked", None, 0.99, 0.05)]),
+        &Android,
+    );
+
+    assert_eq!(
+        pilot.pursue("Something impossible").expect("completes"),
+        Ending::Finished(Outcome::Blocked)
+    );
+}

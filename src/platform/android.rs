@@ -24,6 +24,7 @@ const OPERATIONS: &[Operation] = &[
     Operation::Back,
     Operation::Home,
     Operation::AppSwitcher,
+    Operation::Submit,
     Operation::Wait,
     Operation::Done,
     Operation::Blocked,

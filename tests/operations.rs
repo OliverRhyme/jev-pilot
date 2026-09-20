@@ -1,6 +1,6 @@
 //! The two-dimensional action space: what to do, and what to do it to.
 
-use jev_pilot::act::{Act, Catalog, Direction, Operation, Outcome};
+use jev_pilot::act::{Act, Catalog, Decision, Direction, Operation, Outcome};
 use jev_pilot::judgment::Confidence;
 use jev_pilot::platform::{Android, Ios, Platform};
 use jev_pilot::step::StepAnswers;
@@ -77,7 +77,7 @@ fn the_target_matching_the_chosen_operation_is_the_one_used() {
         .expect("a decision");
 
     let expected = snapshot.refs().nth(2).expect("a third row").0;
-    assert_eq!(act, Act::Tap(expected));
+    assert_eq!(act, Decision::Ready(Act::Tap(expected)));
 }
 
 /// An operation that needs no target ignores the target heads entirely, even
@@ -103,7 +103,7 @@ fn an_operation_without_a_target_ignores_the_speculative_heads() {
                 Confidence::ZERO,
             )
             .expect("a decision");
-        assert_eq!(act, expected, "for {choice}");
+        assert_eq!(act, Decision::Ready(expected), "for {choice}");
     }
 }
 

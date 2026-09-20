@@ -104,3 +104,27 @@ fn long_clickable_and_checkable_controls_are_offered() {
 
     assert_eq!(labels, vec!["Shortcut", "Wi-Fi toggle"]);
 }
+
+/// An accessibility helper serving the hierarchy over a socket emits the same
+/// document `uiautomator dump` does, so the reader is shared. Captured from the
+/// helper on a physical Pixel 8 Pro; it is 50x faster to obtain, which is the
+/// whole reason to have a second source at all.
+#[test]
+fn a_helper_served_hierarchy_reads_with_the_same_parser() {
+    const HELPER: &str = include_str!("fixtures/helper-home.xml");
+
+    let snapshot = Android
+        .parse_hierarchy(HELPER)
+        .expect("the helper document parses");
+
+    let labels: Vec<&str> = snapshot.refs().map(|(_, e)| &*e.label).collect();
+    assert!(!labels.is_empty(), "the home screen has actionable rows");
+    assert!(
+        labels.iter().any(|l| l.contains("YouTube")),
+        "got {labels:?}"
+    );
+    // Geometry survives, which is what a tap depends on.
+    let (handle, _) = snapshot.refs().next().expect("a row");
+    let centre = snapshot.resolve(handle).expect("live").bounds.center();
+    assert!(centre.x > 0 && centre.y > 0, "got {centre:?}");
+}

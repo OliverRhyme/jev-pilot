@@ -205,3 +205,55 @@ fn an_escalation_cannot_name_a_row_that_is_not_on_screen() {
     assert!(pilot.device().performed.is_empty(), "nothing may be tapped");
     let _ = Act::Wait;
 }
+
+/// A second opinion needs to know what the first one was struggling with. "The
+/// confidence was 0.44" says nothing; "it was torn between tapping Internet and
+/// tapping SIMs, 0.44 to 0.41" says what to actually decide.
+#[test]
+fn the_impasse_carries_what_jev_was_torn_between() {
+    let seen = std::rc::Rc::new(RefCell::new(None));
+    let recorded = std::rc::Rc::clone(&seen);
+
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        Scripted(RefCell::new(vec![serde_json::json!({
+            "operation": {
+                "type": "choice", "choice": "tap", "confidence": 0.30,
+                "probabilities": { "tap": 0.44, "scroll_down": 0.41, "back": 0.15 }
+            },
+            "tap_target": {
+                "type": "choice", "choice": "A3", "confidence": 0.28,
+                "probabilities": { "A3": 0.40, "A4": 0.38 }
+            },
+            "goal_met": { "type": "noul", "noul": 0.02 },
+            "is_error_screen": { "type": "noul", "noul": 0.01 },
+        })])),
+        &Android,
+    )
+    .requiring(floor())
+    .escalating_to(
+        move |impasse: &Impasse<'_>| -> Result<Resolution, Infallible> {
+            *recorded.borrow_mut() = Some((
+                impasse.leaning,
+                impasse.operation_confidence.get(),
+                impasse.alternatives.to_vec(),
+                impasse.target_confidence.map(Confidence::get),
+            ));
+            Ok(Resolution::Stop)
+        },
+    );
+
+    pilot.pursue("Open Wi-Fi").expect("completes");
+
+    let (leaning, confidence, alternatives, target) =
+        seen.borrow().clone().expect("the escalation was consulted");
+    assert_eq!(leaning, Operation::Tap, "what it was leaning toward");
+    assert!((confidence - 0.30).abs() < 1e-9);
+    assert_eq!(target, Some(0.28), "the row head was unsure too");
+    assert!(
+        alternatives
+            .iter()
+            .any(|(name, p)| &**name == "scroll_down" && (*p - 0.41).abs() < 1e-9),
+        "the near miss must be visible: {alternatives:?}"
+    );
+}

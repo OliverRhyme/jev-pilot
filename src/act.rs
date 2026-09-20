@@ -23,6 +23,9 @@ pub enum SystemAct {
     Home,
     /// Show the list of running apps.
     AppSwitcher,
+    /// Commit what has been typed, as pressing enter or the keyboard's search
+    /// key. Without it, text can be composed into a field and never acted on.
+    Submit,
 }
 
 impl SystemAct {
@@ -33,6 +36,7 @@ impl SystemAct {
             Self::Back => "Go back to the previous screen",
             Self::Home => "Leave the app and return to the home screen",
             Self::AppSwitcher => "Open the list of running apps",
+            Self::Submit => "Submit what has been typed",
         }
     }
 }
@@ -70,6 +74,12 @@ pub enum Direction {
 pub enum Operation {
     /// Tap an element. Needs a tap target.
     Tap,
+    /// Type into a field.
+    ///
+    /// Offered only when the screen has a field and the caller can supply the
+    /// words. A System One model selects; it does not write, so the text comes
+    /// from elsewhere — see [`crate::pilot::Compose`].
+    TypeText,
     /// Tap an element twice in quick succession. Needs a tap target.
     DoubleTap,
     /// Press and hold an element, which usually opens a context menu.
@@ -98,6 +108,8 @@ pub enum Operation {
     Home,
     /// Show the running apps.
     AppSwitcher,
+    /// Commit what has been typed into the focused field.
+    Submit,
     /// Let the screen settle and look again.
     Wait,
     /// Stop: the goal is satisfied.
@@ -112,6 +124,7 @@ impl Operation {
     pub const fn key(self) -> &'static str {
         match self {
             Self::Tap => "tap",
+            Self::TypeText => "type_text",
             Self::DoubleTap => "double_tap",
             Self::LongPress => "long_press",
             Self::SwipeLeft => "swipe_left",
@@ -122,6 +135,7 @@ impl Operation {
             Self::Back => "back",
             Self::Home => "home",
             Self::AppSwitcher => "app_switcher",
+            Self::Submit => "submit",
             Self::Wait => "wait",
             Self::Done => "done",
             Self::Blocked => "blocked",
@@ -133,6 +147,7 @@ impl Operation {
     pub const fn rubric(self) -> &'static str {
         match self {
             Self::Tap => "Tap one of the rows on screen",
+            Self::TypeText => "Type into one of the fields on screen",
             Self::DoubleTap => "Tap a row twice quickly, as for zooming or selecting a word",
             Self::LongPress => "Press and hold a row to open its context menu or selection options",
             Self::SwipeLeft => {
@@ -147,10 +162,18 @@ impl Operation {
             Self::Back => "Go back to the previous screen",
             Self::Home => "Leave the app and return to the home screen",
             Self::AppSwitcher => "Open the list of running apps",
+            Self::Submit => "Submit what has been typed, as pressing enter or search",
             Self::Wait => "Wait for the screen to finish loading, then look again",
             Self::Done => "Stop: the goal is satisfied on this screen",
             Self::Blocked => "Stop: the goal cannot be reached from this screen",
         }
+    }
+
+    /// Whether this operation needs a row to act on.
+    /// Whether this operation needs a field to type into.
+    #[must_use]
+    pub const fn needs_field(self) -> bool {
+        matches!(self, Self::TypeText)
     }
 
     /// Whether this operation needs a row to act on.
@@ -185,6 +208,7 @@ impl<'de> serde::Deserialize<'de> for Operation {
         let raw = std::borrow::Cow::<str>::deserialize(deserializer)?;
         [
             Self::Tap,
+            Self::TypeText,
             Self::DoubleTap,
             Self::LongPress,
             Self::SwipeLeft,
@@ -195,6 +219,7 @@ impl<'de> serde::Deserialize<'de> for Operation {
             Self::Back,
             Self::Home,
             Self::AppSwitcher,
+            Self::Submit,
             Self::Wait,
             Self::Done,
             Self::Blocked,
@@ -274,6 +299,22 @@ pub struct Deciding<'a> {
     pub question: &'static str,
 }
 
+/// What a step's answers resolved to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Decision {
+    /// Ready to carry out as it stands.
+    Ready(Act),
+    /// A field was chosen, but the words have not been written yet.
+    ///
+    /// Kept separate rather than handing back a half-filled `Act::TypeText`,
+    /// so text that was never composed is not a state the type can hold.
+    NeedsText {
+        /// The field to type into.
+        into: ElementRef,
+    },
+}
+
 /// Why a choice did not become an action.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -328,6 +369,8 @@ pub struct Catalog {
     operations: Options,
     targets: Vec<(OptionId, ElementRef)>,
     target_options: Options,
+    fields: Vec<(OptionId, ElementRef)>,
+    field_options: Options,
 }
 
 impl Catalog {
@@ -351,9 +394,16 @@ impl Catalog {
 
         let mut target_options = Options::default();
         let mut targets = Vec::new();
+        let mut field_options = Options::default();
+        let mut fields = Vec::new();
         for (handle, element) in snapshot.refs() {
             if let Ok(id) = target_options.push(element.describe()) {
                 targets.push((id, handle));
+            }
+            if element.editable
+                && let Ok(id) = field_options.push(element.describe())
+            {
+                fields.push((id, handle));
             }
         }
 
@@ -362,7 +412,48 @@ impl Catalog {
             operations,
             targets,
             target_options,
+            fields,
+            field_options,
         }
+    }
+
+    /// Also offer typing, when this screen has somewhere to type.
+    ///
+    /// Left off by default: without something able to write the words, typing
+    /// is an operation the model can choose and nothing can carry out.
+    #[must_use]
+    pub fn accepting_text(mut self) -> Self {
+        if !self.fields.is_empty()
+            && self
+                .operations
+                .push_named(Operation::TypeText.key(), Operation::TypeText.rubric())
+                .is_ok()
+        {
+            self.supported.push(Operation::TypeText);
+        }
+        self
+    }
+
+    /// The Choice asking which field to type into.
+    #[must_use]
+    pub fn type_field_question<'a>(&self, goal: &'a str) -> Option<Question<Deciding<'a>>> {
+        if self.fields.is_empty() {
+            return None;
+        }
+        Some(Question::Choice {
+            instructions: Deciding {
+                goal,
+                question: "Which field should be typed into to advance `goal`, \
+                           assuming the chosen operation is typing?",
+            },
+            criteria: self.field_options.clone(),
+        })
+    }
+
+    /// The fields on this screen that accept text.
+    #[must_use]
+    pub fn fields(&self) -> usize {
+        self.fields.len()
     }
 
     /// The action an operation that needs no row stands for.
@@ -373,6 +464,7 @@ impl Catalog {
             Operation::Back => Act::System(SystemAct::Back),
             Operation::Home => Act::System(SystemAct::Home),
             Operation::AppSwitcher => Act::System(SystemAct::AppSwitcher),
+            Operation::Submit => Act::System(SystemAct::Submit),
             Operation::Wait => Act::Wait,
             Operation::Done => Act::Finish(Outcome::Achieved),
             Operation::Blocked => Act::Finish(Outcome::Blocked),
@@ -403,8 +495,8 @@ impl Catalog {
                 direction: Swipe::Right,
             },
             Operation::Peek => Act::Peek(target),
-            // Reached only if an untargeted operation is routed here, which the
-            // callers prevent; refusing beats acting on a guess.
+            // Typing is routed through `NeedsText`, and every other operation
+            // needs no row. Refusing beats acting on a guess.
             _ => return Err(Indecision::NoTarget),
         })
     }
@@ -455,7 +547,7 @@ impl Catalog {
         &self,
         answers: &crate::step::StepAnswers,
         floor: Confidence,
-    ) -> Result<Act, Indecision> {
+    ) -> Result<Decision, Indecision> {
         let operation = answers.operation.choice;
         if answers.operation.confidence < floor {
             return Err(Indecision::TooUncertain {
@@ -469,8 +561,27 @@ impl Catalog {
             });
         }
 
+        if operation.needs_field() {
+            let chosen = answers.type_field.as_ref().ok_or(Indecision::NoTarget)?;
+            if chosen.confidence < floor {
+                return Err(Indecision::TooUncertain {
+                    got: chosen.confidence,
+                    floor,
+                });
+            }
+            let into = self
+                .fields
+                .iter()
+                .find(|(id, _)| *id == chosen.choice)
+                .map(|(_, handle)| *handle)
+                .ok_or_else(|| Indecision::NotOffered {
+                    what: chosen.choice.to_string().into_boxed_str(),
+                })?;
+            return Ok(Decision::NeedsText { into });
+        }
+
         if !operation.needs_tap_target() {
-            return Self::untargeted(operation);
+            return Self::untargeted(operation).map(Decision::Ready);
         }
 
         let chosen = answers.tap_target.as_ref().ok_or(Indecision::NoTarget)?;
@@ -489,7 +600,7 @@ impl Catalog {
                 what: chosen.choice.to_string().into_boxed_str(),
             })?;
 
-        Self::targeted(operation, target)
+        Self::targeted(operation, target).map(Decision::Ready)
     }
 
     /// Build an action from an operation and a row position.
@@ -503,14 +614,29 @@ impl Catalog {
     /// # Errors
     /// Returns [`Indecision`] when the operation is not offered here, or when
     /// it needs a row and the one named does not exist.
-    pub fn act_from(&self, operation: Operation, target: Option<usize>) -> Result<Act, Indecision> {
+    pub fn act_from(
+        &self,
+        operation: Operation,
+        target: Option<usize>,
+    ) -> Result<Decision, Indecision> {
         if !self.supported.contains(&operation) {
             return Err(Indecision::NotOffered {
                 what: operation.key().into(),
             });
         }
+        if operation.needs_field() {
+            let position = target.ok_or(Indecision::NoTarget)?;
+            let into = self
+                .fields
+                .get(position)
+                .map(|(_, handle)| *handle)
+                .ok_or_else(|| Indecision::NotOffered {
+                    what: format!("field {position}").into_boxed_str(),
+                })?;
+            return Ok(Decision::NeedsText { into });
+        }
         if !operation.needs_tap_target() {
-            return Self::untargeted(operation);
+            return Self::untargeted(operation).map(Decision::Ready);
         }
         let position = target.ok_or(Indecision::NoTarget)?;
         let handle = self
@@ -520,7 +646,7 @@ impl Catalog {
             .ok_or_else(|| Indecision::NotOffered {
                 what: format!("row {position}").into_boxed_str(),
             })?;
-        Self::targeted(operation, handle)
+        Self::targeted(operation, handle).map(Decision::Ready)
     }
 
     /// The operations offered on this screen.

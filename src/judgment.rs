@@ -8,6 +8,7 @@
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// The most options a single Choice may carry, per the API reference.
@@ -204,6 +205,13 @@ pub struct Chosen {
     pub choice: OptionId,
     /// How concentrated the distribution was.
     pub confidence: Confidence,
+    /// Every option and its probability.
+    ///
+    /// Kept rather than discarded once the winner is known: when the winner is
+    /// not clear enough to act on, what it was nearly beaten by is the most
+    /// useful thing anyone deciding next can be told.
+    #[serde(default)]
+    pub probabilities: BTreeMap<Box<str>, f64>,
 }
 
 /// The answer to a Noul: the probability that the answer is yes.

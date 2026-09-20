@@ -164,6 +164,7 @@ impl Adb {
             SystemAct::Back => "KEYCODE_BACK",
             SystemAct::Home => "KEYCODE_HOME",
             SystemAct::AppSwitcher => "KEYCODE_APP_SWITCH",
+            SystemAct::Submit => "KEYCODE_ENTER",
         };
         self.targeted(&["shell", "input", "keyevent", keycode])
     }
@@ -276,6 +277,21 @@ impl Adb {
         None
     }
 
+    /// Open a tunnel from a host port to a port on the device.
+    ///
+    /// `tcp:0` asks adb to allocate the host port and print it. A fixed number
+    /// would collide the moment a second process attached to the same phone.
+    #[must_use]
+    pub fn forward_args(&self, device_port: u16) -> Vec<String> {
+        self.targeted(&["forward", "tcp:0", &format!("tcp:{device_port}")])
+    }
+
+    /// The host port adb allocated, as it prints it.
+    #[must_use]
+    pub fn parse_forward_port(raw: &str) -> Option<u16> {
+        raw.trim().lines().next()?.trim().parse().ok()
+    }
+
     /// Read the device's navigation mode.
     #[must_use]
     pub fn navigation_args(&self) -> Vec<String> {
@@ -336,9 +352,32 @@ fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
+/// Where a screen is read from.
+///
+/// The two differ by roughly fifty times. `uiautomator dump` spawns a JVM and
+/// then waits a hardcoded second for the accessibility event stream to fall
+/// quiet, costing about 2.5s per observation with no flag to relax it. An
+/// accessibility helper already holding that session open answers in about
+/// 50ms, and emits the same document, so the reader is shared.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum Hierarchy {
+    /// `uiautomator dump`, over adb. Needs nothing installed.
+    Cli,
+    /// A helper serving the hierarchy over a tunnelled HTTP port.
+    #[cfg(feature = "http")]
+    Helper {
+        /// Where to GET the document, e.g. `http://127.0.0.1:18899/dump_xml`.
+        endpoint: Box<str>,
+        /// Sent as `X-Artemis-Token`, when the helper requires one.
+        token: Option<Box<str>>,
+    },
+}
+
 /// A live Android device driven through the `adb` binary.
 #[derive(Debug)]
 pub struct AdbDevice {
+    hierarchy: Hierarchy,
     adb: Adb,
     platform: crate::platform::Android,
     navigation: Option<Navigation>,
@@ -422,6 +461,7 @@ impl AdbDevice {
     #[must_use]
     pub fn new(serial: impl Into<Box<str>>) -> Self {
         Self {
+            hierarchy: Hierarchy::Cli,
             adb: Adb::new(serial),
             platform: crate::platform::Android,
             navigation: None,
@@ -434,6 +474,56 @@ impl AdbDevice {
     #[must_use]
     pub fn serial(&self) -> &str {
         self.adb.serial()
+    }
+
+    /// Read screens from somewhere other than the `uiautomator` CLI.
+    #[must_use]
+    pub fn reading_from(mut self, hierarchy: Hierarchy) -> Self {
+        self.hierarchy = hierarchy;
+        self
+    }
+
+    /// Open a tunnel to a helper on the device and read screens through it.
+    ///
+    /// # Errors
+    /// Returns [`AdbError`] when the tunnel cannot be opened or adb does not
+    /// report the port it allocated.
+    #[cfg(feature = "http")]
+    pub fn through_helper(
+        self,
+        device_port: u16,
+        path: &str,
+        token: Option<&str>,
+    ) -> Result<Self, AdbError> {
+        let raw = Self::run(&self.adb.forward_args(device_port))?;
+        let local = Adb::parse_forward_port(&raw).ok_or_else(|| AdbError::Failed {
+            args: "forward tcp:0".into(),
+            stderr: format!("adb did not report a host port, said {raw:?}").into_boxed_str(),
+        })?;
+        Ok(self.reading_from(Hierarchy::Helper {
+            endpoint: format!("http://127.0.0.1:{local}{path}").into_boxed_str(),
+            token: token.map(Box::from),
+        }))
+    }
+
+    /// Fetch a screen from a helper over the tunnel.
+    #[cfg(feature = "http")]
+    fn read_helper(endpoint: &str, token: Option<&str>) -> Result<String, AdbError> {
+        let mut request = ureq::get(endpoint);
+        if let Some(token) = token {
+            request = request.header("X-Artemis-Token", token);
+        }
+        let mut response = request.call().map_err(|error| AdbError::Failed {
+            args: "helper".into(),
+            stderr: error.to_string().into_boxed_str(),
+        })?;
+        response
+            .body_mut()
+            .read_to_string()
+            .map_err(|error| AdbError::Failed {
+                args: "helper".into(),
+                stderr: error.to_string().into_boxed_str(),
+            })
     }
 
     /// Run one invocation and return its stdout.
@@ -502,6 +592,16 @@ impl super::Device for AdbDevice {
     /// that window repeatedly, so the only remedy is to ask again.
     fn observe(&mut self) -> Result<crate::snapshot::Snapshot, Self::Error> {
         use crate::platform::Platform as _;
+
+        #[cfg(feature = "http")]
+        if let Hierarchy::Helper { endpoint, token } = &self.hierarchy {
+            let raw = Self::read_helper(endpoint, token.as_deref())?;
+            let document = Adb::extract_hierarchy(&raw).ok_or(AdbError::NoActiveWindow)?;
+            return self
+                .platform
+                .parse_hierarchy(document)
+                .map_err(AdbError::Hierarchy);
+        }
 
         let args = self.adb.dump_args();
         let mut last_settled_failure = None;
