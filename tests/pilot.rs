@@ -475,3 +475,30 @@ fn naming_the_app_brings_it_to_the_front_before_anything_is_judged() {
     let seen = seen.borrow();
     assert!(seen[0].get("started_in").is_none(), "{}", seen[0]);
 }
+
+/// A soft keyboard covers the bottom of the screen, and what it covers is
+/// usually the button that commits the form being typed into. The rows simply
+/// are not there, so nothing in the catalog hints that closing it would reveal
+/// one — and a run pressing submit at a form whose Continue is behind the
+/// keyboard repeats itself until its own guard stops it. Measured on a
+/// transfer form: keyboard up gave five rows and no commit; keyboard down gave
+/// the same five and `Continue`.
+#[test]
+fn the_state_says_when_the_keyboard_is_covering_the_screen() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    // `Fake` raises the keyboard on every other observation.
+    let mut pilot = Pilot::new(Fake::default(), judge, &Android);
+
+    pilot.pursue("fill the form in").expect("the run completes");
+
+    let seen = seen.borrow();
+    assert_eq!(seen[0]["keyboard_open"], false);
+    assert_eq!(seen[1]["keyboard_open"], true);
+}

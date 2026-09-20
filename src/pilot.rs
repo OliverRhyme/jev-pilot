@@ -771,6 +771,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                         previous.as_deref(),
                         snapshot.app(),
                         origin.as_deref(),
+                        snapshot.keyboard_open(),
                     ),
                     &questions,
                 )
@@ -944,6 +945,7 @@ fn describe(
     previous: Option<&str>,
     app: Option<&str>,
     origin: Option<&str>,
+    keyboard_open: bool,
 ) -> serde_json::Value {
     // Rows are keyed the way the Choice offers them, so its options can be
     // bare keys and the text travels once rather than twice.
@@ -955,6 +957,11 @@ fn describe(
     let mut state = serde_json::json!({
         "platform": platform.name(),
         "previous_action": previous,
+        // The keyboard covers the bottom of the screen, and what it covers is
+        // usually the button that commits the form being typed into. Those
+        // rows are absent from the catalog rather than marked unavailable, so
+        // without this the screen looks like one that simply has no way on.
+        "keyboard_open": keyboard_open,
         "rows": keyed(&mut catalog.rows()),
     });
     if let Some(app) = app {
