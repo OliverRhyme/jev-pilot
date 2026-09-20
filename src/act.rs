@@ -283,9 +283,10 @@ pub enum Act {
     Peek(ElementRef),
     /// Type into an element that accepts text.
     ///
-    /// Not yet enumerated by [`Catalog::for_screen`]: offering it needs
-    /// candidate values, and a System One model selects rather than generates,
-    /// so the text has to come from the task rather than from the model.
+    /// Offered only when [`Catalog::accepting_text`] was called and the screen
+    /// has a field. A System One model selects rather than generates, so the
+    /// words come from [`crate::pilot::Compose`] — a reasoning model, or a
+    /// person — after Jev has chosen whether and where to type.
     TypeText {
         /// The field receiving the text.
         into: ElementRef,
