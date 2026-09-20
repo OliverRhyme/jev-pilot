@@ -227,8 +227,14 @@ fn notices_of(document: &roxmltree::Document) -> Vec<Box<str>> {
         // worth saying as switched off. Named bare it reads as a way forward
         // that the catalog does not offer, and the run goes looking for a row
         // that is not there instead of doing the thing that enables it.
+        //
+        // Marked plainly rather than described. A login form disables its own
+        // Log in button until a password is typed, and wording that reads as
+        // an obstruction turns that ordinary state into an error screen:
+        // measured, `is_error_screen` went from 0.03 to 0.59 on one, purely
+        // on how the disabled controls were worded.
         let label = if is_switched_off(&node) {
-            format!("{label} — not available yet").into_boxed_str()
+            format!("{label} (disabled)").into_boxed_str()
         } else {
             label
         };

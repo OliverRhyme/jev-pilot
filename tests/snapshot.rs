@@ -586,7 +586,7 @@ fn a_control_that_is_switched_off_is_named_as_switched_off() {
     let notices: Vec<&str> = screen.notices().collect();
 
     assert!(
-        notices.contains(&"Continue — not available yet"),
+        notices.contains(&"Continue (disabled)"),
         "{notices:?}",
     );
     assert!(!notices.contains(&"Continue"), "{notices:?}");
