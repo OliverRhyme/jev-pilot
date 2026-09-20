@@ -67,7 +67,18 @@ class PilotAccessibilityService : AccessibilityService() {
         // of it, so the flags that matter are re-asserted here.
         runCatching {
             val info = serviceInfo ?: AccessibilityServiceInfo()
-            info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            // Content-changed matters as much as state-changed, and not for
+            // the events themselves: the framework's node cache is invalidated
+            // by them. Subscribing to state changes alone left a screen that
+            // navigated *within* one window — which is every screen of a
+            // Flutter app — serving the tree of a screen already left, while
+            // `uiautomator` showed the real one. Taps then looked like they
+            // did nothing, and a loop watching for the screen to change saw it
+            // never change.
+            info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                AccessibilityEvent.TYPE_WINDOWS_CHANGED or
+                AccessibilityEvent.TYPE_VIEW_SCROLLED
             info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             info.notificationTimeout = 100
             info.flags = info.flags or
@@ -164,6 +175,11 @@ class PilotAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * Only window-state changes say what is in front; the rest are subscribed
+     * to for their effect on the framework's node cache rather than for
+     * anything they carry.
+     */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         event.packageName?.let { currentPackageName = it.toString() }
