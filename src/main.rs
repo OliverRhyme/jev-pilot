@@ -314,6 +314,7 @@ fn observe(named: Option<&str>) -> Result<(), Box<dyn core::error::Error>> {
         "keyboard: {}",
         if screen.keyboard_open() { "up" } else { "down" }
     );
+    println!("app     : {}", screen.app().unwrap_or("unknown"));
 
     let catalog = Catalog::for_screen(&screen, &Android);
     println!("\noperations offered:");

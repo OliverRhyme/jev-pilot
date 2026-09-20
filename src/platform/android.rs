@@ -78,6 +78,7 @@ impl Platform for Android {
 
         Snapshot::new(elements)
             .map(|snapshot| snapshot.with_keyboard_open(shows_input_method(&document)))
+            .map(|snapshot| snapshot.in_app(app_of(&document)))
             .map_err(HierarchyError::from)
     }
 }
@@ -102,6 +103,46 @@ fn shows_input_method(document: &roxmltree::Document) -> bool {
 fn is_input_method_window(node: &roxmltree::Node) -> bool {
     node.attribute("window-type") == Some("input_method")
 }
+
+/// Which application this screen belongs to.
+///
+/// A helper dump labels its windows, and exactly one of them is the
+/// application — so the answer is read rather than guessed, and neither the
+/// status bar drawn over every screen nor the keyboard drawn over half of them
+/// can claim it.
+///
+/// `uiautomator` dumps carry no window metadata and hold only the active
+/// window, so there the answer is whichever package owns most of the tree,
+/// with system chrome set aside for the same reason.
+fn app_of(document: &roxmltree::Document) -> Option<Box<str>> {
+    if let Some(package) = document
+        .descendants()
+        .find(|node| node.attribute("window-type") == Some("application"))
+        .and_then(|node| node.attribute("package"))
+    {
+        return Some(package.into());
+    }
+
+    let mut tally: Vec<(&str, usize)> = Vec::new();
+    for package in document
+        .descendants()
+        .filter_map(|node| node.attribute("package"))
+        .filter(|package| *package != SYSTEM_CHROME)
+    {
+        match tally.iter_mut().find(|(seen, _)| *seen == package) {
+            Some((_, count)) => *count += 1,
+            None => tally.push((package, 1)),
+        }
+    }
+    tally
+        .into_iter()
+        .max_by_key(|&(_, count)| count)
+        .map(|(package, _)| package.into())
+}
+
+/// The status bar, navigation bar and notification shade, which are drawn over
+/// every screen and belong to none of them.
+const SYSTEM_CHROME: &str = "com.android.systemui";
 
 /// A row a person could act on.
 ///

@@ -58,6 +58,12 @@ pub enum Command {
     },
     /// Press firmly at a point to preview.
     Peek(Point),
+    /// Bring an application to the foreground by its platform identifier.
+    ///
+    /// Not a gesture: there is no sequence of taps that reliably returns to a
+    /// named app from an arbitrary screen, and hunting one across a launcher
+    /// is how a run ends up in the wrong app entirely.
+    Launch(Box<str>),
     /// Let the screen finish whatever it is doing, then look again.
     ///
     /// Carries no duration: how long a screen needs is a property of the
@@ -90,6 +96,7 @@ pub fn command_for(act: &Act, snapshot: &Snapshot) -> Result<Option<Command>, Ta
             text: text.clone(),
         }),
         Act::System(gesture) => Some(Command::System(*gesture)),
+        Act::Return(app) => Some(Command::Launch(app.clone())),
         Act::Scroll(direction) => Some(Command::Scroll(*direction)),
         Act::Wait => Some(Command::Settle),
         Act::Finish(_) => None,

@@ -636,7 +636,11 @@ impl Action {
             // does not. The shell path refuses it, and a command that works on
             // one backend and errors on the other differs by an accident of
             // what happens to be installed.
-            Command::Settle | Command::Peek(_) => return None,
+            //
+            // Launching an app is neither: an accessibility service may not
+            // start an arbitrary activity, so it goes through the shell like
+            // any other thing the helper is not allowed to do.
+            Command::Settle | Command::Peek(_) | Command::Launch(_) => return None,
         };
         Some(Self {
             body: body.to_string(),

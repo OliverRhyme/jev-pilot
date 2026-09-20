@@ -175,6 +175,24 @@ impl Adb {
         self.targeted(&["shell", "input", "keyevent", keycode])
     }
 
+    /// Bring an installed package to the foreground.
+    ///
+    /// Through `monkey` rather than `am start`: it resolves the launchable
+    /// activity itself, and the activity name is something a run driving an
+    /// arbitrary app has no way to know.
+    #[must_use]
+    pub fn launch_args(&self, package: &str) -> Vec<String> {
+        self.targeted(&[
+            "shell",
+            "monkey",
+            "-p",
+            package,
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "1",
+        ])
+    }
+
     /// Read the display size.
     #[must_use]
     pub fn size_args(&self) -> Vec<String> {
@@ -1461,6 +1479,7 @@ impl super::Device for AdbDevice {
                 self.adb.app_switcher_swipe_args(width, height)
             }
             super::Command::System(gesture) => self.adb.system_args(*gesture),
+            super::Command::Launch(package) => self.adb.launch_args(package),
             super::Command::Scroll(direction) => {
                 let (width, height) = self.size()?;
                 self.adb.scroll_args(*direction, width, height)

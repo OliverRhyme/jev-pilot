@@ -332,3 +332,25 @@ fn a_document_with_no_window_metadata_is_not_treated_as_withheld() {
 
     assert!(Adb::shows_an_application(cli_shaped));
 }
+
+/// Returning to an app is a launch, not a gesture. `monkey` is used rather
+/// than `am start` because it needs only the package: the launchable activity
+/// is the device's business, and naming one means knowing it for every app a
+/// goal might be about.
+#[test]
+fn returning_to_an_app_launches_it_by_package() {
+    assert_eq!(
+        adb().launch_args("com.example.wallet"),
+        [
+            "-s",
+            "SERIAL123",
+            "shell",
+            "monkey",
+            "-p",
+            "com.example.wallet",
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "1",
+        ],
+    );
+}

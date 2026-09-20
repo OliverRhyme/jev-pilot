@@ -1,6 +1,6 @@
 //! Enumerating actions and turning a model's choice back into one.
 
-use jev_pilot::act::Catalog;
+use jev_pilot::act::{Catalog, Consequence, Operation};
 use jev_pilot::judgment::Confidence;
 use jev_pilot::platform::{Android, Platform};
 
@@ -66,4 +66,19 @@ fn target_options_are_keys_only_with_the_text_left_in_the_state() {
     );
     // And the question says where to look.
     assert!(wire["instructions"].to_string().contains("rows"));
+}
+
+/// `Home` is not recoverable by going back. It discards the app's navigation
+/// stack, and an app that guards a session tears it down — so the screen a run
+/// returns to is not the screen it left. Measured: a run chose `home` at 0.48
+/// on its first step, was handed a launcher, and spent the rest of its budget
+/// picking plausible-looking icons in a different app entirely.
+#[test]
+fn leaving_the_app_costs_more_than_an_ordinary_gesture() {
+    assert_eq!(
+        Operation::Home.consequence(),
+        Consequence::Destructive,
+        "pressing home cannot be undone by going back",
+    );
+    assert_eq!(Operation::Back.consequence(), Consequence::Ordinary);
 }

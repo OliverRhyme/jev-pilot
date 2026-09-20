@@ -497,3 +497,35 @@ fn the_keyboard_coming_up_counts_as_a_change() {
 
     assert_ne!(closed.fingerprint(), open.fingerprint());
 }
+
+/// A run that presses Home, follows a notification, or is bounced into a
+/// browser is no longer driving the app it was asked about — and until the
+/// screen says whose it is, nothing downstream can tell. The launcher looks
+/// like any other list of rows.
+#[test]
+fn the_screen_says_which_app_it_belongs_to() {
+    const SETTINGS: &str = include_str!("fixtures/settings.xml");
+
+    assert_eq!(
+        Android
+            .parse_hierarchy(SETTINGS)
+            .expect("a screen")
+            .app(),
+        Some("com.android.settings"),
+    );
+}
+
+/// Status bar and navigation bar belong to the system and are drawn over every
+/// app. Naming the screen after them would call every screen the same one.
+#[test]
+fn system_chrome_does_not_get_to_name_the_screen() {
+    const HOME: &str = include_str!("fixtures/helper-home.xml");
+
+    assert_ne!(
+        Android
+            .parse_hierarchy(HOME)
+            .expect("a screen")
+            .app(),
+        Some("com.android.systemui"),
+    );
+}

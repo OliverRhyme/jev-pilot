@@ -106,6 +106,11 @@ pub enum Operation {
     Back,
     /// Leave for the home screen.
     Home,
+    /// Go back into the app this goal is about.
+    ///
+    /// Offered only on a screen belonging to some other app, so it is never a
+    /// way of standing still. See [`Catalog::returning_to`].
+    Return,
     /// Show the running apps.
     AppSwitcher,
     /// Commit what has been typed into the focused field.
@@ -134,6 +139,7 @@ impl Operation {
             Self::ScrollDown => "scroll_down",
             Self::Back => "back",
             Self::Home => "home",
+            Self::Return => "return_to_app",
             Self::AppSwitcher => "app_switcher",
             Self::Submit => "submit",
             Self::Wait => "wait",
@@ -161,6 +167,9 @@ impl Operation {
             Self::ScrollDown => "Scroll down to reveal rows below the current view",
             Self::Back => "Go back to the previous screen",
             Self::Home => "Leave the app and return to the home screen",
+            Self::Return => {
+                "Go back into the app this goal is about — this screen belongs to another app"
+            }
             Self::AppSwitcher => "Open the list of running apps",
             Self::Submit => "Submit what has been typed, as pressing enter or search",
             Self::Wait => "Wait for the screen to finish loading, then look again",
@@ -177,7 +186,13 @@ impl Operation {
             Self::Done | Self::Blocked => Consequence::Terminal,
             // Swipe-to-delete and swipe-to-archive are the whole point of these
             // gestures; going back does not bring the row back.
-            Self::SwipeLeft | Self::SwipeRight => Consequence::Destructive,
+            //
+            // Home belongs with them, for the same reason rather than an
+            // obvious one: it does not merely move the view, it discards the
+            // app's navigation stack, and an app holding a session tears that
+            // down too. Coming back lands on a different screen than the one
+            // left, and everything typed on the way there is gone.
+            Self::SwipeLeft | Self::SwipeRight | Self::Home => Consequence::Destructive,
             _ => Consequence::Ordinary,
         }
     }
@@ -230,6 +245,7 @@ impl<'de> serde::Deserialize<'de> for Operation {
             Self::ScrollDown,
             Self::Back,
             Self::Home,
+            Self::Return,
             Self::AppSwitcher,
             Self::Submit,
             Self::Wait,
@@ -295,6 +311,11 @@ pub enum Act {
     },
     /// Perform a system gesture.
     System(SystemAct),
+    /// Bring the named application back to the foreground.
+    ///
+    /// Carries the identifier rather than reading it from the screen: the
+    /// screen the run is looking at is precisely the one it does not want.
+    Return(Box<str>),
     /// Scroll the screen.
     Scroll(Direction),
     /// Let the screen settle and observe again.
@@ -463,6 +484,8 @@ impl core::error::Error for Indecision {}
 /// question map in parallel — and saves a second round trip when it does.
 #[derive(Debug)]
 pub struct Catalog {
+    app: Option<Box<str>>,
+    return_to: Option<Box<str>>,
     supported: Vec<Operation>,
     operations: Options,
     targets: Vec<(OptionId, ElementRef, Box<str>)>,
@@ -506,6 +529,8 @@ impl Catalog {
         }
 
         Self {
+            app: snapshot.app().map(Box::from),
+            return_to: None,
             supported,
             operations,
             targets,
@@ -528,6 +553,34 @@ impl Catalog {
                 .is_ok()
         {
             self.supported.push(Operation::TypeText);
+        }
+        self
+    }
+
+    /// Also offer going back into `app`, when this screen belongs to another.
+    ///
+    /// A goal is given about one application, and nothing on a screen says
+    /// which — a launcher, a browser opened by a link and the app itself all
+    /// present rows that read as equally legitimate. Naming the app the run
+    /// started in turns "I am somewhere else" into a fact the judge is told
+    /// and a single action that fixes it.
+    ///
+    /// Passing `None`, or the app this screen already belongs to, changes
+    /// nothing: returning to where you are is not an action, and offering it
+    /// would give the model a way to stand still.
+    #[must_use]
+    pub fn returning_to(mut self, app: Option<&str>) -> Self {
+        let Some(app) = app else { return self };
+        if self.app.as_deref() == Some(app) {
+            return self;
+        }
+        if self
+            .operations
+            .push_named(Operation::Return.key(), Operation::Return.rubric())
+            .is_ok()
+        {
+            self.supported.push(Operation::Return);
+            self.return_to = Some(app.into());
         }
         self
     }
@@ -684,6 +737,10 @@ impl Catalog {
             return Ok(Decision::NeedsText { into });
         }
 
+        if operation == Operation::Return {
+            let app = self.return_to.clone().ok_or(Indecision::NoTarget)?;
+            return Ok(Decision::Ready(Act::Return(app)));
+        }
         if !operation.needs_tap_target() {
             return Self::untargeted(operation).map(Decision::Ready);
         }
@@ -739,6 +796,10 @@ impl Catalog {
                     what: format!("field {position}").into_boxed_str(),
                 })?;
             return Ok(Decision::NeedsText { into });
+        }
+        if operation == Operation::Return {
+            let app = self.return_to.clone().ok_or(Indecision::NoTarget)?;
+            return Ok(Decision::Ready(Act::Return(app)));
         }
         if !operation.needs_tap_target() {
             return Self::untargeted(operation).map(Decision::Ready);

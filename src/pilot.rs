@@ -703,9 +703,17 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         let mut previous: Option<String> = None;
         // How many actions in a row have left the screen exactly as it was.
         let mut ineffective: u32 = 0;
+        // The app the goal is about: whichever one was in front when the run
+        // was given it. A run can only tell it has wandered off by comparing
+        // against somewhere, and nothing else in a run names an app.
+        let mut origin: Option<Box<str>> = None;
         for index in 1..=self.limit {
             let snapshot = self.device.observe().map_err(RunError::Device)?;
-            let mut catalog = Catalog::for_screen(&snapshot, self.platform);
+            if origin.is_none() {
+                origin = snapshot.app().map(Box::from);
+            }
+            let mut catalog = Catalog::for_screen(&snapshot, self.platform)
+                .returning_to(origin.as_deref());
             if self.types {
                 catalog = catalog.accepting_text();
             }
@@ -714,7 +722,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             let answers = self
                 .judge
                 .evaluate(
-                    describe(&catalog, self.platform, previous.as_deref()),
+                    describe(
+                        &catalog,
+                        self.platform,
+                        previous.as_deref(),
+                        snapshot.app(),
+                        origin.as_deref(),
+                    ),
                     &questions,
                 )
                 .map_err(RunError::Judge)?;
@@ -885,6 +899,8 @@ fn describe(
     catalog: &Catalog,
     platform: &dyn Platform,
     previous: Option<&str>,
+    app: Option<&str>,
+    origin: Option<&str>,
 ) -> serde_json::Value {
     // Rows are keyed the way the Choice offers them, so its options can be
     // bare keys and the text travels once rather than twice.
@@ -898,6 +914,15 @@ fn describe(
         "previous_action": previous,
         "rows": keyed(&mut catalog.rows()),
     });
+    if let Some(app) = app {
+        state["app"] = app.into();
+        // Said only when it differs. On the app the goal is about, repeating
+        // the name twice invites the model to reason about a discrepancy that
+        // is not there; the absence is the signal that nothing is wrong.
+        if origin.is_some_and(|origin| origin != app) {
+            state["started_in"] = origin.into();
+        }
+    }
     let fields = keyed(&mut catalog.fields_offered());
     if !fields.is_empty() {
         state["fields"] = serde_json::Value::Object(fields);
@@ -923,6 +948,7 @@ fn recount(act: &Act, snapshot: &Snapshot) -> String {
         Act::TypeText { into, text } => format!("Typed {text:?} into {}", named(*into)),
         Act::Scroll(direction) => format!("Scrolled {direction:?}"),
         Act::System(gesture) => format!("Pressed {gesture:?}"),
+        Act::Return(app) => format!("Returned to {app}"),
         Act::Wait => "Waited for the screen to settle".to_owned(),
         Act::Finish(outcome) => format!("Declared {outcome:?}"),
     }

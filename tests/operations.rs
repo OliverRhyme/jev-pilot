@@ -191,3 +191,39 @@ fn typing_carries_the_point_that_focuses_the_field() {
         "the point must land in the field: {at:?} not inside {bounds:?}"
     );
 }
+
+const LAUNCHER: &str = include_str!("fixtures/helper-home.xml");
+
+/// A run that has wandered out of the app it was asked about needs one action
+/// that puts it back. Without it the way home is a hunt across a launcher, and
+/// every icon there looks as plausible as the right one — which is how a
+/// banking goal ends up opening a wallet.
+#[test]
+fn leaving_the_app_offers_a_way_back_into_it() {
+    let launcher = Android.parse_hierarchy(LAUNCHER).expect("fixture parses");
+    let catalog = Catalog::for_screen(&launcher, &Android).returning_to(Some("com.android.settings"));
+
+    assert!(catalog.operations().contains(&Operation::Return));
+
+    let Decision::Ready(act) = catalog
+        .act_from(Operation::Return, None)
+        .expect("return is offered")
+    else {
+        panic!("return needs no text");
+    };
+    assert_eq!(
+        command_for(&act, &launcher).expect("return resolves"),
+        Some(Command::Launch("com.android.settings".into())),
+    );
+}
+
+/// On the app it was asked about, going "back into" it is not an action — it
+/// is a no-op the model can pick over doing the work.
+#[test]
+fn a_run_that_has_not_left_is_not_offered_a_way_back() {
+    let settings = Android.parse_hierarchy(SETTINGS).expect("fixture parses");
+    let catalog =
+        Catalog::for_screen(&settings, &Android).returning_to(Some("com.android.settings"));
+
+    assert!(!catalog.operations().contains(&Operation::Return));
+}

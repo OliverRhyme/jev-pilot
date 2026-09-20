@@ -221,6 +221,7 @@ const fn over_covers(over: Bounds, top: i32, bottom: i32) -> bool {
 pub struct Snapshot {
     generation: Generation,
     keyboard_open: bool,
+    app: Option<Box<str>>,
     elements: Box<[Element]>,
 }
 
@@ -240,6 +241,7 @@ impl Snapshot {
         Ok(Self {
             generation: Generation::next(),
             keyboard_open: false,
+            app: None,
             elements: elements.into_boxed_slice(),
         })
     }
@@ -260,6 +262,25 @@ impl Snapshot {
     #[must_use]
     pub const fn keyboard_open(&self) -> bool {
         self.keyboard_open
+    }
+
+    /// Note which application this screen belongs to.
+    #[must_use]
+    pub fn in_app(mut self, app: Option<Box<str>>) -> Self {
+        self.app = app;
+        self
+    }
+
+    /// Which application this screen belongs to, when the reader could say.
+    ///
+    /// The identifier the platform uses — a package name on Android, a bundle
+    /// identifier on iOS — not anything a person would read. It exists so a
+    /// run can tell that it is no longer where it started: a launcher, a
+    /// browser opened by a link, or another app entirely presents rows that
+    /// look exactly as legitimate as the ones it was asked about.
+    #[must_use]
+    pub fn app(&self) -> Option<&str> {
+        self.app.as_deref()
     }
 
     /// What is on this screen, as one number.

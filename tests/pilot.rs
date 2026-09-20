@@ -324,3 +324,65 @@ fn declaring_the_goal_unreachable_ends_the_run() {
         Ending::Finished(Outcome::Blocked)
     );
 }
+
+const LAUNCHER: &str = include_str!("fixtures/helper-home.xml");
+
+/// A device that starts in Settings and is in the launcher from then on, as a
+/// run that pressed Home is.
+#[derive(Default)]
+struct Wandered {
+    performed: Vec<Command>,
+}
+
+impl Device for Wandered {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        let raw = if self.performed.is_empty() {
+            SETTINGS
+        } else {
+            LAUNCHER
+        };
+        Ok(Android.parse_hierarchy(raw).expect("fixture parses"))
+    }
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        self.performed.push(command.clone());
+        Ok(())
+    }
+}
+
+/// Pressing Home, following a notification or being bounced into a browser all
+/// leave the run somewhere its goal does not apply. The state has to say so:
+/// without it the launcher is just another list of rows, and every icon on it
+/// reads as plausible as the right one.
+#[test]
+fn a_run_that_has_left_its_app_is_told_so_and_offered_the_way_back() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("home", None, 0.99, 0.02),
+            answer("return_to_app", None, 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    let mut pilot = Pilot::new(Wandered::default(), judge, &Android);
+
+    pilot.pursue("open wifi settings").expect("the run completes");
+
+    let seen = seen.borrow();
+    let first = &seen[0];
+    assert_eq!(first["app"], "com.android.settings");
+    assert!(
+        first.get("started_in").is_none(),
+        "a run that has not left has nothing to say about where it started: {first}",
+    );
+
+    let second = &seen[1];
+    assert_eq!(second["started_in"], "com.android.settings");
+    assert_eq!(second["app"], "com.google.android.apps.nexuslauncher");
+
+    assert_eq!(
+        pilot.device().performed.last(),
+        Some(&Command::Launch("com.android.settings".into())),
+    );
+}
