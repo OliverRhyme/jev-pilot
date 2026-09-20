@@ -386,3 +386,56 @@ fn a_run_that_has_left_its_app_is_told_so_and_offered_the_way_back() {
         Some(&Command::Launch("com.android.settings".into())),
     );
 }
+
+/// A run launched from the home screen is not "in" the launcher — the launcher
+/// is how you reach an app, never the app a goal is about. Pinning it would
+/// make entering the right app read as leaving, and offer going back out to
+/// the icons as a way to make progress.
+#[test]
+fn the_home_launcher_is_never_the_app_a_goal_is_about() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    // Starts on the launcher, and is in Settings from the first tap onward.
+    let mut pilot = Pilot::new(Arrived::default(), judge, &Android);
+
+    pilot.pursue("open wifi settings").expect("the run completes");
+
+    let seen = seen.borrow();
+    assert_eq!(seen[1]["app"], "com.android.settings");
+    assert!(
+        seen[1].get("started_in").is_none(),
+        "reaching the app is not leaving it: {}",
+        seen[1],
+    );
+}
+
+/// A device on the launcher until something is tapped, and in Settings after.
+#[derive(Default)]
+struct Arrived {
+    performed: Vec<Command>,
+}
+
+impl Device for Arrived {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        let raw = if self.performed.is_empty() {
+            LAUNCHER
+        } else {
+            SETTINGS
+        };
+        Ok(Android.parse_hierarchy(raw).expect("fixture parses"))
+    }
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        self.performed.push(command.clone());
+        Ok(())
+    }
+    fn home_screen_app(&mut self) -> Option<Box<str>> {
+        Some("com.google.android.apps.nexuslauncher".into())
+    }
+}

@@ -175,6 +175,41 @@ impl Adb {
         self.targeted(&["shell", "input", "keyevent", keycode])
     }
 
+    /// Ask the device which application draws the home screen.
+    ///
+    /// Resolved rather than recognised: a list of known launcher packages is
+    /// wrong on the first device with a vendor launcher, and wrong again on
+    /// any device where someone has installed their own.
+    #[must_use]
+    pub fn home_screen_args(&self) -> Vec<String> {
+        self.targeted(&[
+            "shell",
+            "cmd",
+            "package",
+            "resolve-activity",
+            "--brief",
+            "-c",
+            "android.intent.category.HOME",
+            "-a",
+            "android.intent.action.MAIN",
+        ])
+    }
+
+    /// The package of the component `resolve-activity --brief` settled on.
+    ///
+    /// The component is the last non-empty line; everything above it is the
+    /// resolution's own reporting. A device with no home activity at all, or
+    /// one answering something that is not a component, gives `None`.
+    #[must_use]
+    pub fn parse_home_screen(raw: &str) -> Option<Box<str>> {
+        raw.lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())?
+            .split_once('/')
+            .map(|(package, _)| package.into())
+    }
+
     /// Bring an installed package to the foreground.
     ///
     /// Through `monkey` rather than `am start`: it resolves the launchable
@@ -682,6 +717,12 @@ pub struct AdbDevice {
     platform: crate::platform::Android,
     navigation: Option<Navigation>,
     size: Option<(i32, i32)>,
+    /// Which package draws the home screen, asked for at most once.
+    ///
+    /// A cell rather than a plain field so that "asked, and the device would
+    /// not say" is remembered: the answer cannot change under a running loop,
+    /// and an unremembered negative costs an `adb` round trip every step.
+    home_screen: std::cell::OnceCell<Option<Box<str>>>,
     dump_attempts: u32,
 }
 
@@ -797,6 +838,7 @@ impl AdbDevice {
             platform: crate::platform::Android,
             navigation: None,
             size: None,
+            home_screen: std::cell::OnceCell::new(),
             dump_attempts: Self::DUMP_ATTEMPTS,
         }
     }
@@ -1419,6 +1461,19 @@ impl super::Device for AdbDevice {
             return Ok(via_cli);
         }
         Ok(blank)
+    }
+
+    fn home_screen_app(&mut self) -> Option<Box<str>> {
+        // Asked once. A device that will not say is not asked again: the
+        // answer cannot change under a running loop, and the question costs an
+        // `adb` round trip on every step if the negative is not remembered.
+        self.home_screen
+            .get_or_init(|| {
+                Self::run(&self.adb.home_screen_args())
+                    .ok()
+                    .and_then(|raw| Adb::parse_home_screen(&raw))
+            })
+            .clone()
     }
 
     fn perform(&mut self, command: &super::Command) -> Result<(), Self::Error> {

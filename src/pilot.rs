@@ -707,10 +707,14 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         // was given it. A run can only tell it has wandered off by comparing
         // against somewhere, and nothing else in a run names an app.
         let mut origin: Option<Box<str>> = None;
+        let launcher = self.device.home_screen_app();
         for index in 1..=self.limit {
             let snapshot = self.device.observe().map_err(RunError::Device)?;
-            if origin.is_none() {
-                origin = snapshot.app().map(Box::from);
+            if origin.is_none()
+                && let Some(app) = snapshot.app()
+                && launcher.as_deref() != Some(app)
+            {
+                origin = Some(app.into());
             }
             let mut catalog = Catalog::for_screen(&snapshot, self.platform)
                 .returning_to(origin.as_deref());

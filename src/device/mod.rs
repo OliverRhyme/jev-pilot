@@ -122,4 +122,18 @@ pub trait Device {
     /// # Errors
     /// Returns [`Self::Error`] when the device rejects or fails the command.
     fn perform(&mut self, command: &Command) -> Result<(), Self::Error>;
+
+    /// Which application draws the home screen, when the device can say.
+    ///
+    /// The launcher is how an app is reached and never the app a goal is
+    /// about, so a run that starts there has not yet arrived anywhere. Without
+    /// this, entering the right app reads as leaving the one it started in.
+    ///
+    /// Defaulted to `None` because it is a convenience, not a requirement: an
+    /// adapter that cannot answer costs a run one confusing comparison on the
+    /// launcher, not its correctness. Failures are swallowed rather than
+    /// returned for the same reason.
+    fn home_screen_app(&mut self) -> Option<Box<str>> {
+        None
+    }
 }

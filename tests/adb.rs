@@ -354,3 +354,40 @@ fn returning_to_an_app_launches_it_by_package() {
         ],
     );
 }
+
+/// Asking the device which app draws the home screen, rather than carrying a
+/// list of launcher package names that is wrong on the first device with a
+/// vendor launcher or a replacement one.
+#[test]
+fn the_home_screen_app_is_resolved_from_the_device() {
+    assert_eq!(
+        adb().home_screen_args(),
+        [
+            "-s",
+            "SERIAL123",
+            "shell",
+            "cmd",
+            "package",
+            "resolve-activity",
+            "--brief",
+            "-c",
+            "android.intent.category.HOME",
+            "-a",
+            "android.intent.action.MAIN",
+        ],
+    );
+}
+
+/// `resolve-activity --brief` answers with a component on its last line, and
+/// preamble above it. Only the package is wanted.
+#[test]
+fn the_home_screen_package_is_read_from_the_component_it_resolves_to() {
+    let answer = "priority=0 preferredOrder=0 match=0x108000 isDefault=true\n\
+                  com.example.launcher/.MainActivity\n";
+
+    assert_eq!(
+        Adb::parse_home_screen(answer).as_deref(),
+        Some("com.example.launcher"),
+    );
+    assert_eq!(Adb::parse_home_screen("No activity found\n"), None);
+}
