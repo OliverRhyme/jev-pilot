@@ -22,14 +22,38 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
     println!("state   : {provision:?} — {}", provision.advice());
 
     if provision.is_ready() {
-        let mut device = device.through_jev_helper()?;
-        let started = std::time::Instant::now();
-        let screen = device.observe()?;
+        let mut device = device.with_helper()?;
         println!(
-            "\nreading through the helper: {} elements in {}ms",
-            screen.refs().count(),
-            started.elapsed().as_millis()
+            "reader  : {}",
+            if device.reader().uses_helper() {
+                "helper"
+            } else {
+                "uiautomator CLI"
+            }
         );
+        // Read repeatedly, so that switching the helper off part way through
+        // shows the fallback happening rather than the run ending.
+        let rounds: u32 = std::env::var("ROUNDS")
+            .ok()
+            .and_then(|r| r.parse().ok())
+            .unwrap_or(4);
+        for round in 1..=rounds {
+            let started = std::time::Instant::now();
+            let screen = device.observe()?;
+            println!(
+                "read {round}: {:>3} elements  {:>5}ms  via {}",
+                screen.refs().count(),
+                started.elapsed().as_millis(),
+                if device.reader().uses_helper() {
+                    "helper"
+                } else {
+                    "CLI"
+                },
+            );
+        }
+        if let Some(why) = device.reader().why() {
+            println!("\nfell back: {why}");
+        }
         return Ok(());
     }
 

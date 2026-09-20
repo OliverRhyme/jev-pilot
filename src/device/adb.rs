@@ -515,6 +515,7 @@ pub enum Hierarchy {
 #[derive(Debug)]
 pub struct AdbDevice {
     hierarchy: Hierarchy,
+    reader: crate::device::helper::Reader,
     adb: Adb,
     platform: crate::platform::Android,
     navigation: Option<Navigation>,
@@ -605,6 +606,7 @@ impl AdbDevice {
     pub fn new(serial: impl Into<Box<str>>) -> Self {
         Self {
             hierarchy: Hierarchy::Cli,
+            reader: crate::device::helper::Reader::cli("the helper was not asked for"),
             adb: Adb::new(serial),
             platform: crate::platform::Android,
             navigation: None,
@@ -777,10 +779,52 @@ impl AdbDevice {
         Self::run(&self.adb.push_token_args(&token))?;
 
         let endpoint = format!("{base}{DUMP_PATH}").into_boxed_str();
-        Ok(self.reading_from(Hierarchy::Helper {
+        let mut device = self.reading_from(Hierarchy::Helper {
             endpoint,
             token: Some(Box::from(token.expose())),
-        }))
+        });
+        device.reader = crate::device::helper::Reader::helper();
+        Ok(device)
+    }
+
+    /// Read through the helper when this device has a usable one, and through
+    /// the CLI when it does not.
+    ///
+    /// Never fails for the helper's absence: the helper is an optimisation,
+    /// and a run without one is slower rather than broken. [`Self::reader`]
+    /// afterwards says which was chosen, and why.
+    ///
+    /// # Errors
+    /// Returns [`AdbError`] only when the device itself cannot be reached.
+    #[cfg(feature = "http")]
+    pub fn with_helper(self) -> Result<Self, AdbError> {
+        use crate::device::helper::Reader;
+
+        let provision = self.helper_provision()?;
+        if !provision.is_ready() {
+            let why = provision.advice();
+            return Ok(Self {
+                reader: Reader::cli(why),
+                ..self
+            });
+        }
+        let serial = self.adb.serial().to_owned();
+        match self.through_jev_helper() {
+            Ok(attached) => Ok(attached),
+            Err(error) => {
+                let why = format!("helper did not answer: {error}");
+                Ok(Self {
+                    reader: Reader::cli(why),
+                    ..AdbDevice::new(serial)
+                })
+            }
+        }
+    }
+
+    /// Where this device is reading screens from, and why.
+    #[must_use]
+    pub const fn reader(&self) -> &crate::device::helper::Reader {
+        &self.reader
     }
 
     /// Fetch a screen from a helper over the tunnel.
@@ -870,14 +914,26 @@ impl super::Device for AdbDevice {
     fn observe(&mut self) -> Result<crate::snapshot::Snapshot, Self::Error> {
         use crate::platform::Platform as _;
 
+        // A helper that stops answering - killed by the ROM, switched off, or
+        // cut off by a replug - must not end a run the CLI could finish. The
+        // switch is permanent: see `Reader` for why going back is worse than
+        // staying.
         #[cfg(feature = "http")]
         if let Hierarchy::Helper { endpoint, token } = &self.hierarchy {
-            let raw = Self::read_helper(endpoint, token.as_deref())?;
-            let document = Adb::extract_hierarchy(&raw).ok_or(AdbError::NoActiveWindow)?;
-            return self
-                .platform
-                .parse_hierarchy(document)
-                .map_err(AdbError::Hierarchy);
+            match Self::read_helper(endpoint, token.as_deref()) {
+                Ok(raw) => {
+                    let document = Adb::extract_hierarchy(&raw).ok_or(AdbError::NoActiveWindow)?;
+                    return self
+                        .platform
+                        .parse_hierarchy(document)
+                        .map_err(AdbError::Hierarchy);
+                }
+                Err(error) => {
+                    self.reader
+                        .degrade(format!("helper stopped answering: {error}"));
+                    self.hierarchy = Hierarchy::Cli;
+                }
+            }
         }
 
         let args = self.adb.dump_args();

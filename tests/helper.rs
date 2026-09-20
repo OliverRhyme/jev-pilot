@@ -198,3 +198,53 @@ fn the_token_is_delivered_by_an_explicitly_targeted_broadcast() {
     );
     assert!(parts.iter().any(|p| p.contains("'abc123'")), "{parts:?}");
 }
+
+// ---------------------------------------------------------------- //
+// Falling back
+// ---------------------------------------------------------------- //
+
+use jev_pilot::device::helper::Reader;
+
+/// The helper is an optimisation, never a requirement. A device without one
+/// reads screens through the CLI and every other part of a run is unchanged.
+#[test]
+fn a_device_without_a_helper_still_reads_screens() {
+    let reader = Reader::cli("no helper installed");
+
+    assert!(!reader.uses_helper());
+    assert_eq!(reader.why(), Some("no helper installed"));
+}
+
+/// A helper can stop answering mid-run: the service is killed by the ROM, the
+/// phone is unplugged and replugged, someone turns it off in settings. None of
+/// those should end a run that the CLI could finish.
+#[test]
+fn losing_the_helper_mid_run_falls_back_rather_than_failing() {
+    let mut reader = Reader::helper();
+    assert!(reader.uses_helper());
+
+    let changed = reader.degrade("helper stopped answering");
+
+    assert!(changed);
+    assert!(!reader.uses_helper());
+    assert_eq!(reader.why(), Some("helper stopped answering"));
+}
+
+/// Falling back is a one-way door, and deliberately so. `uiautomator dump`
+/// opens a UiAutomation connection, and Android unbinds every accessibility
+/// service while one is alive, so the first CLI read silences the helper.
+/// Going back to it would fail, degrade, and pay both costs on every
+/// observation for the rest of the run.
+#[test]
+fn falling_back_never_reverses() {
+    let mut reader = Reader::helper();
+    reader.degrade("first cause");
+    let changed = reader.degrade("a later symptom");
+
+    assert!(!changed, "already fallen back");
+    assert_eq!(
+        reader.why(),
+        Some("first cause"),
+        "the first cause is what explains the run, not what it led to"
+    );
+}

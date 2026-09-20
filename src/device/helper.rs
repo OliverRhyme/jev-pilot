@@ -328,3 +328,67 @@ const fn starts_with_at(bytes: &[u8], at: usize, needle: &[u8]) -> bool {
 const fn unsafe_free_slice(bytes: &[u8], start: usize, end: usize) -> &[u8] {
     bytes.split_at(end).0.split_at(start).1
 }
+
+/// Where a run reads screens from, and why.
+///
+/// The helper is an optimisation. Everything works without it — slower, and
+/// with `uiautomator`'s occasional malformed boxes — so nothing here ever
+/// fails a run for its absence.
+///
+/// Falling back is **one way**. `uiautomator dump` opens a `UiAutomation`
+/// connection, and Android unbinds every accessibility service while one is
+/// alive: the first CLI read silences the helper for about 1.5s. A reader that
+/// tried to return would fail, fall back, and pay both costs on every
+/// observation for the rest of the run. So the first failure settles it, and
+/// the reason kept is the first one — what explains the run, rather than what
+/// it led to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reader {
+    uses_helper: bool,
+    why: Option<Box<str>>,
+}
+
+impl Reader {
+    /// Reading through the helper.
+    #[must_use]
+    pub const fn helper() -> Self {
+        Self {
+            uses_helper: true,
+            why: None,
+        }
+    }
+
+    /// Reading through `uiautomator dump`, for the stated reason.
+    #[must_use]
+    pub fn cli(why: impl Into<Box<str>>) -> Self {
+        Self {
+            uses_helper: false,
+            why: Some(why.into()),
+        }
+    }
+
+    /// Whether screens are coming from the helper.
+    #[must_use]
+    pub const fn uses_helper(&self) -> bool {
+        self.uses_helper
+    }
+
+    /// Why the CLI is being used, when it is.
+    #[must_use]
+    pub fn why(&self) -> Option<&str> {
+        self.why.as_deref()
+    }
+
+    /// Give up on the helper for the rest of this run.
+    ///
+    /// Returns whether this call was the one that changed it, so a caller can
+    /// report the switch once rather than on every observation after it.
+    pub fn degrade(&mut self, why: impl Into<Box<str>>) -> bool {
+        if !self.uses_helper {
+            return false;
+        }
+        self.uses_helper = false;
+        self.why = Some(why.into());
+        true
+    }
+}
