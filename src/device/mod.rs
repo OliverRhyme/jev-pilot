@@ -26,8 +26,18 @@ use crate::snapshot::{Point, Snapshot, TapError};
 pub enum Command {
     /// Tap at a point.
     Tap(Point),
-    /// Type text into whatever currently has focus.
-    TypeText(Box<str>),
+    /// Focus the field at this point, and type text into it.
+    ///
+    /// Carries the point because text goes to whatever holds focus, and a
+    /// field that has not been tapped holds none. Measured on a Flutter form:
+    /// setting the text with nothing focused left the field empty, while
+    /// tapping it first and then setting the text filled it.
+    TypeText {
+        /// Where the field is, for focusing it.
+        at: Point,
+        /// What to put in it.
+        text: Box<str>,
+    },
     /// Perform a system gesture.
     System(SystemAct),
     /// Scroll the screen one view in this direction.
@@ -75,12 +85,10 @@ pub fn command_for(act: &Act, snapshot: &Snapshot) -> Result<Option<Command>, Ta
             direction: *direction,
         }),
         Act::Peek(handle) => Some(Command::Peek(snapshot.tap_point(*handle)?)),
-        Act::TypeText { into, text } => {
-            // Resolved for its side effect: typing goes to the focused field,
-            // but the field must be proven live and reachable before committing.
-            snapshot.tap_point(*into)?;
-            Some(Command::TypeText(text.clone()))
-        }
+        Act::TypeText { into, text } => Some(Command::TypeText {
+            at: snapshot.tap_point(*into)?,
+            text: text.clone(),
+        }),
         Act::System(gesture) => Some(Command::System(*gesture)),
         Act::Scroll(direction) => Some(Command::Scroll(*direction)),
         Act::Wait => Some(Command::Settle),

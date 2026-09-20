@@ -286,7 +286,10 @@ fn every_gesture_has_a_helper_form() {
         Command::Tap(at),
         Command::DoubleTap(at),
         Command::LongPress(at),
-        Command::TypeText("hello".into()),
+        Command::TypeText {
+            at,
+            text: "hello".into(),
+        },
         Command::Scroll(Direction::Down),
         Command::SwipeFrom {
             from: at,
@@ -332,7 +335,10 @@ fn a_tap_carries_the_point_it_was_given() {
 /// helper sets the field's text directly, so there is nothing to refuse.
 #[test]
 fn text_the_shell_could_not_type_goes_through_unchanged() {
-    let body = body_of(&Command::TypeText("こんにちは 🎉".into()));
+    let body = body_of(&Command::TypeText {
+        at: Point { x: 1, y: 1 },
+        text: "こんにちは 🎉".into(),
+    });
 
     assert!(body.contains("\"cmd\":\"type\""), "{body}");
     assert!(body.contains("こんにちは 🎉"), "{body}");
@@ -341,7 +347,10 @@ fn text_the_shell_could_not_type_goes_through_unchanged() {
 /// A quote or a backslash in a label must not end the JSON string early.
 #[test]
 fn text_with_json_punctuation_is_escaped() {
-    let body = body_of(&Command::TypeText(r#"say "hi" \ bye"#.into()));
+    let body = body_of(&Command::TypeText {
+        at: Point { x: 1, y: 1 },
+        text: r#"say "hi" \ bye"#.into(),
+    });
 
     assert!(body.contains(r#"\"hi\""#), "{body}");
     assert!(
@@ -597,4 +606,27 @@ fn reviving_the_only_service_does_not_leave_a_stray_separator() {
 
     assert_eq!(without, "null");
     assert_eq!(with, Provision::SERVICE_COMPONENT);
+}
+
+/// The helper answers 200 with `success: false` for a gesture the app refused,
+/// which is a different thing from the helper being gone and wants different
+/// handling: the reader is fine, this one action is not supported here.
+///
+/// Measured on a Flutter form: `ACTION_SET_TEXT` returns false and the field
+/// stays empty, while typing into the same focused field through the shell
+/// fills it. Reading that refusal as a lost helper abandoned a working reader
+/// for the rest of the run, and reading it as success left a form the run
+/// believed it had filled.
+#[test]
+fn a_refused_gesture_is_told_apart_from_a_performed_one() {
+    assert!(Action::was_performed(r#"{"success":true}"#));
+    assert!(!Action::was_performed(r#"{"success":false}"#));
+    assert!(
+        !Action::was_performed(r#"{"success":false,"error":"Invalid coordinates"}"#),
+        "a reason does not make it a success"
+    );
+    assert!(
+        !Action::was_performed("not json at all"),
+        "an answer that cannot be read is not a performed gesture"
+    );
 }

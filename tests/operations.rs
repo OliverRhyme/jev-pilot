@@ -1,6 +1,7 @@
 //! The two-dimensional action space: what to do, and what to do it to.
 
 use jev_pilot::act::{Act, Catalog, Decision, Direction, Floors, Operation, Outcome};
+use jev_pilot::device::{Command, command_for};
 use jev_pilot::judgment::Confidence;
 use jev_pilot::platform::{Android, Ios, Platform};
 use jev_pilot::step::StepAnswers;
@@ -149,5 +150,44 @@ fn the_target_question_states_the_goal_it_is_serving() {
     assert!(
         rendered.contains("Open the Storage screen"),
         "the target head must carry the goal: {rendered}"
+    );
+}
+
+/// Typing has to say *where*, because a field that is not focused does not
+/// receive it.
+///
+/// The point was being resolved to prove the field was reachable and then
+/// thrown away, so the text went to whatever happened to hold focus — nothing,
+/// on a freshly opened form. Measured on a Flutter app: setting the text with
+/// nothing focused left the field empty, while tapping it first and then
+/// setting the text filled it.
+#[test]
+fn typing_carries_the_point_that_focuses_the_field() {
+    let snapshot = Android
+        .parse_hierarchy(include_str!("fixtures/flutter-form.xml"))
+        .expect("a screen");
+    let (field, element) = snapshot
+        .refs()
+        .find(|(_, element)| element.editable)
+        .expect("the form's field");
+    let bounds = element.bounds;
+
+    let command = command_for(
+        &Act::TypeText {
+            into: field,
+            text: "09171234567".into(),
+        },
+        &snapshot,
+    )
+    .expect("reachable")
+    .expect("a command");
+
+    let Command::TypeText { at, text } = command else {
+        panic!("expected typing, got {command:?}");
+    };
+    assert_eq!(&*text, "09171234567");
+    assert!(
+        at.x > bounds.left && at.x < bounds.right && at.y > bounds.top && at.y < bounds.bottom,
+        "the point must land in the field: {at:?} not inside {bounds:?}"
     );
 }

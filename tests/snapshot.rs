@@ -251,3 +251,162 @@ fn a_screen_with_nothing_on_it_is_not_worth_acting_on() {
     .expect("one row");
     assert!(occupied.worth_acting_on());
 }
+
+/// An empty text field is the one a form most needs acted on, and it was the
+/// one the reader threw away: a node is kept only if it has text of its own,
+/// and an empty field has none. Taken from a real Flutter form, where the
+/// only input on screen reads
+/// `class="android.widget.EditText" text="" content-desc=""
+///  hint="Number to be loaded" editable="true"` — the name is right there, in
+/// the hint, and was not being read.
+///
+/// Before this, the form parsed to two elements and neither was the field, so
+/// `type_text` had no target and the loop could not say "type into that".
+#[test]
+fn an_empty_text_field_is_surfaced_and_named_by_its_hint() {
+    const FLUTTER_FORM: &str = include_str!("fixtures/flutter-form.xml");
+
+    let snapshot = Android.parse_hierarchy(FLUTTER_FORM).expect("a screen");
+    let field = snapshot
+        .refs()
+        .map(|(_, element)| element)
+        .find(|element| element.editable)
+        .expect("the form's text field");
+
+    assert_eq!(&*field.label, "Number to be loaded");
+    assert_eq!(field.bounds.left, 41, "its own bounds, not a parent's");
+}
+
+/// The hint is what the field is called, not what it contains. A field
+/// showing its hint holds no text, and the two must not be confused or a run
+/// will think a form is already filled.
+#[test]
+fn a_hint_names_a_field_without_pretending_to_be_its_contents() {
+    let raw = r#"<hierarchy rotation="0">
+        <node index="0" text="" content-desc="" class="android.widget.EditText"
+              editable="true" hint="Number to be loaded" clickable="true"
+              bounds="[41,360][967,493]" />
+        <node index="1" text="0917" content-desc="" class="android.widget.EditText"
+              editable="true" hint="Number to be loaded" clickable="true"
+              bounds="[41,560][967,693]" />
+        </hierarchy>"#;
+
+    let snapshot = Android.parse_hierarchy(raw).expect("a screen");
+    let labels: Vec<&str> = snapshot.refs().map(|(_, e)| &*e.label).collect();
+
+    assert_eq!(
+        labels,
+        ["Number to be loaded", "0917"],
+        "an empty field is named by its hint; a filled one by what it holds"
+    );
+}
+
+/// Flutter does not build its accessibility tree out of Android widgets, so a
+/// rule reading class names is a rule about one toolkit. The node says
+/// `editable="true"` outright, and that is what should be believed.
+#[test]
+fn editability_is_taken_from_the_trait_not_from_a_class_name() {
+    let raw = r#"<hierarchy rotation="0">
+        <node index="0" text="typed" class="android.view.View" editable="true"
+              clickable="true" bounds="[0,0][100,50]" />
+        <node index="1" text="Submit" class="android.widget.Button"
+              clickable="true" bounds="[0,60][100,110]" />
+        </hierarchy>"#;
+
+    let snapshot = Android.parse_hierarchy(raw).expect("a screen");
+    let editable: Vec<bool> = snapshot.refs().map(|(_, e)| e.editable).collect();
+
+    assert_eq!(editable, [true, false]);
+}
+
+/// A dump from `uiautomator` carries no `editable` attribute at all, so the
+/// class name is still the only signal there and must keep working.
+#[test]
+fn editability_falls_back_to_the_class_when_the_trait_is_absent() {
+    let raw = r#"<hierarchy rotation="0">
+        <node index="0" text="typed" class="android.widget.EditText"
+              clickable="true" bounds="[0,0][100,50]" />
+        </hierarchy>"#;
+
+    let snapshot = Android.parse_hierarchy(raw).expect("a screen");
+    assert!(snapshot.refs().next().expect("one row").1.editable);
+}
+
+/// A node with nothing to call it and nothing to type into is noise. Keeping
+/// it would put an unnameable row in front of the model.
+#[test]
+fn a_clickable_with_no_name_at_all_is_still_dropped() {
+    let raw = r#"<hierarchy rotation="0">
+        <node index="0" text="" content-desc="" class="android.view.View"
+              clickable="true" bounds="[0,0][100,50]" />
+        </hierarchy>"#;
+
+    let snapshot = Android.parse_hierarchy(raw).expect("a screen");
+    assert_eq!(snapshot.refs().count(), 0);
+}
+
+/// An editable field with no hint either still has to be actable on, so it is
+/// named for what it is rather than dropped.
+#[test]
+fn a_nameless_field_is_described_rather_than_discarded() {
+    let raw = r#"<hierarchy rotation="0">
+        <node index="0" text="" content-desc="" class="android.widget.EditText"
+              editable="true" clickable="true" bounds="[0,0][100,50]" />
+        </hierarchy>"#;
+
+    let snapshot = Android.parse_hierarchy(raw).expect("a screen");
+    let field = snapshot.refs().next().expect("the field").1;
+
+    assert!(field.editable);
+    assert!(
+        !field.label.is_empty(),
+        "it must be nameable to be targetable"
+    );
+}
+
+/// The soft keyboard is a window of its own, and its keys are not rows of the
+/// screen. Measured on a real search field: the input method's window held 54
+/// nodes of which 52 were clickable and labelled, against 7 nodes and 2
+/// clickable in the app's own. Offered as targets they drowned the screen —
+/// `operation` 0.27 and `target` 0.31 against a floor of 0.6, stalling two
+/// consecutive steps on a keyboard the loop had itself opened.
+///
+/// A key is never the thing to act on: it is the rendering of a field the run
+/// already decided to type into, and typing goes through the field.
+#[test]
+fn the_soft_keyboard_is_not_offered_as_rows() {
+    const KEYBOARD: &str = include_str!("fixtures/keyboard.xml");
+
+    let snapshot = Android.parse_hierarchy(KEYBOARD).expect("a screen");
+    let labels: Vec<&str> = snapshot.refs().map(|(_, e)| &*e.label).collect();
+
+    for key in ["q", "w", "e", "Shift", "Delete", "Space"] {
+        assert!(!labels.contains(&key), "a key is on offer: {labels:?}");
+    }
+    assert!(
+        labels.len() < 10,
+        "the app's own rows, not 52 keys: {labels:?}"
+    );
+}
+
+/// Whether the keyboard is up is worth knowing in itself — it is the
+/// difference between a form that is being filled and one that is not — so it
+/// is reported rather than left to be inferred from a pile of single letters.
+#[test]
+fn the_screen_says_whether_the_keyboard_is_open() {
+    const KEYBOARD: &str = include_str!("fixtures/keyboard.xml");
+    const SETTLED: &str = include_str!("fixtures/settings.xml");
+
+    assert!(
+        Android
+            .parse_hierarchy(KEYBOARD)
+            .expect("a screen")
+            .keyboard_open()
+    );
+    assert!(
+        !Android
+            .parse_hierarchy(SETTLED)
+            .expect("a screen")
+            .keyboard_open()
+    );
+}

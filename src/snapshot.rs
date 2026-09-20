@@ -220,6 +220,7 @@ const fn over_covers(over: Bounds, top: i32, bottom: i32) -> bool {
 #[derive(Debug)]
 pub struct Snapshot {
     generation: Generation,
+    keyboard_open: bool,
     elements: Box<[Element]>,
 }
 
@@ -238,8 +239,27 @@ impl Snapshot {
         }
         Ok(Self {
             generation: Generation::next(),
+            keyboard_open: false,
             elements: elements.into_boxed_slice(),
         })
+    }
+
+    /// Note that a soft keyboard is covering part of this screen.
+    ///
+    /// Worth carrying rather than inferring: it is the difference between a
+    /// form that is being filled and one that is not, and the alternative is
+    /// for a reader to guess it from a pile of single-letter rows — which is
+    /// exactly what this crate stops offering.
+    #[must_use]
+    pub fn with_keyboard_open(mut self, open: bool) -> Self {
+        self.keyboard_open = open;
+        self
+    }
+
+    /// Whether a soft keyboard is covering part of this screen.
+    #[must_use]
+    pub const fn keyboard_open(&self) -> bool {
+        self.keyboard_open
     }
 
     /// Whether this screen offers anything to act on.

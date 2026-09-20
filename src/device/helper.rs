@@ -589,7 +589,9 @@ impl Action {
             Command::LongPress(at) => {
                 json!({"cmd": "long_press", "x": at.x, "y": at.y, "duration": 800})
             }
-            Command::TypeText(text) => json!({"cmd": "type", "text": text.as_ref()}),
+            // Focusing is a separate gesture, sent first by the caller: a
+            // field that has not been tapped does not receive the text.
+            Command::TypeText { text, .. } => json!({"cmd": "type", "text": text.as_ref()}),
             Command::Scroll(direction) => {
                 let x = width / 2;
                 // Inset from both edges: a drag that starts at one is claimed
@@ -639,6 +641,20 @@ impl Action {
         Some(Self {
             body: body.to_string(),
         })
+    }
+
+    /// Whether the helper's answer says the gesture actually happened.
+    ///
+    /// It answers 200 either way: `success: false` means the app refused the
+    /// action, not that the helper is unwell. Flutter refuses
+    /// `ACTION_SET_TEXT` this way — measured — so a caller that read the status
+    /// alone would report a form filled that is still empty.
+    #[must_use]
+    pub fn was_performed(answer: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(answer)
+            .ok()
+            .and_then(|body| body.get("success")?.as_bool())
+            .unwrap_or(false)
     }
 
     /// The JSON to POST to `/action`.

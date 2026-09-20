@@ -45,22 +45,62 @@ impl Platform for Android {
                 detail: error.to_string().into_boxed_str(),
             })?;
 
+        // The soft keyboard is a window of its own, and its keys are not rows
+        // of the screen: they are the rendering of a field the run already
+        // decided to type into, and typing goes through the field. Offered as
+        // targets they drown everything — 52 of 54 nodes in one measured case
+        // — and flatten the judgement across them.
         let elements = document
             .descendants()
-            .filter(is_actionable)
+            .filter(|node| !within_input_method(node))
+            .filter(|node| is_actionable(node))
             .filter_map(|node| {
+                let editable = is_editable(&node);
                 let mut texts = own_texts(&node).into_iter();
+                // An empty field has no text of its own, and is exactly the
+                // row a form needs acted on. It is named by its hint, or
+                // failing that for what it is, rather than thrown away for
+                // having nothing to say. A node that is neither nameable nor
+                // typeable is noise and still goes.
+                let label = match texts.next() {
+                    Some(label) => label,
+                    None if editable => hint_of(&node).unwrap_or_else(|| Box::from("text field")),
+                    None => return None,
+                };
                 Some(Element {
-                    label: texts.next()?,
+                    label,
                     detail: texts.next(),
-                    editable: is_editable(&node),
+                    editable,
                     bounds: parse_bounds(node.attribute("bounds")?)?,
                 })
             })
             .collect();
 
-        Snapshot::new(elements).map_err(HierarchyError::from)
+        Snapshot::new(elements)
+            .map(|snapshot| snapshot.with_keyboard_open(shows_input_method(&document)))
+            .map_err(HierarchyError::from)
     }
+}
+
+/// Whether this node belongs to the soft keyboard's window.
+///
+/// Only the window's root carries `window-type`, so the question is really
+/// about ancestry. `uiautomator` dumps carry no window metadata and contain
+/// only the active window, so the keyboard does not arise there.
+fn within_input_method(node: &roxmltree::Node) -> bool {
+    node.ancestors()
+        .any(|ancestor| is_input_method_window(&ancestor))
+}
+
+/// Whether a screen has the soft keyboard up.
+fn shows_input_method(document: &roxmltree::Document) -> bool {
+    document
+        .descendants()
+        .any(|node| is_input_method_window(&node))
+}
+
+fn is_input_method_window(node: &roxmltree::Node) -> bool {
+    node.attribute("window-type") == Some("input_method")
 }
 
 /// A row a person could act on.
@@ -85,9 +125,32 @@ fn is_actionable(node: &roxmltree::Node) -> bool {
         || is_editable(node)
 }
 
+/// Whether text can be typed into this node.
+///
+/// The `editable` trait is the node's own answer and is what the helper
+/// reports, whatever toolkit drew the screen — Flutter builds its
+/// accessibility tree itself and does not use Android's widgets. `uiautomator`
+/// dumps carry no such attribute, so there the class name is still the only
+/// signal there is.
 fn is_editable(node: &roxmltree::Node) -> bool {
-    node.attribute("class")
-        .is_some_and(|class| class.contains("EditText"))
+    match node.attribute("editable") {
+        Some(trait_) => trait_ == "true",
+        None => node
+            .attribute("class")
+            .is_some_and(|class| class.contains("EditText")),
+    }
+}
+
+/// What an empty field is called, as opposed to what it holds.
+///
+/// A field showing its hint contains nothing, so this is deliberately not part
+/// of [`label_of`]: treating a hint as content would tell a run that a form was
+/// already filled.
+fn hint_of(node: &roxmltree::Node) -> Option<Box<str>> {
+    node.attribute("hint")
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())
+        .map(Box::from)
 }
 
 /// Every label under `node` that no nested actionable row has already claimed.

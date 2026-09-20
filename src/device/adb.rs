@@ -732,6 +732,9 @@ impl AdbDevice {
     /// How long a deliberate wait lasts.
     pub const SETTLE_MS: u64 = 600;
 
+    /// How long a tapped field is given to take focus before text is sent.
+    pub const FOCUS_MS: u64 = 400;
+
     /// How many times enabling the helper is attempted before giving up.
     pub const ENABLE_ATTEMPTS: u32 = 4;
 
@@ -1026,32 +1029,27 @@ impl AdbDevice {
     }
 
     /// Send a gesture to the helper over the tunnel.
+    ///
+    /// `Ok(true)` when it happened, `Ok(false)` when the app refused it, and an
+    /// error only when the helper itself could not be reached. Those are three
+    /// different things: a refusal says this gesture is unsupported on this
+    /// screen and says nothing about the reader.
     #[cfg(feature = "http")]
-    fn post_action(endpoint: &str, token: Option<&str>, body: &str) -> Result<(), AdbError> {
+    fn post_action(endpoint: &str, token: Option<&str>, body: &str) -> Result<bool, AdbError> {
         let mut request = ureq::post(endpoint).header("Content-Type", "application/json");
         if let Some(token) = token {
             request = request.header(crate::device::helper::TOKEN_HEADER, token);
         }
-        let mut response = request.send(body).map_err(|error| AdbError::Failed {
+        let failed = |error: &dyn core::fmt::Display| AdbError::Failed {
             args: "helper action".into(),
             stderr: error.to_string().into_boxed_str(),
-        })?;
+        };
+        let mut response = request.send(body).map_err(|error| failed(&error))?;
         let answered = response
             .body_mut()
             .read_to_string()
-            .map_err(|error| AdbError::Failed {
-                args: "helper action".into(),
-                stderr: error.to_string().into_boxed_str(),
-            })?;
-        // The helper answers 200 with `success: false` for a gesture the
-        // system refused, so the status alone does not say whether it happened.
-        if answered.contains("\"success\":true") {
-            return Ok(());
-        }
-        Err(AdbError::Failed {
-            args: "helper action".into(),
-            stderr: format!("the helper did not perform it: {answered}").into_boxed_str(),
-        })
+            .map_err(|error| failed(&error))?;
+        Ok(crate::device::helper::Action::was_performed(&answered))
     }
 
     /// Fetch a screen from a helper over the tunnel.
@@ -1370,6 +1368,16 @@ impl super::Device for AdbDevice {
     }
 
     fn perform(&mut self, command: &super::Command) -> Result<(), Self::Error> {
+        // Text goes to whatever holds focus, and a field that has not been
+        // tapped holds none. Measured on a Flutter form: setting the text with
+        // nothing focused left the field empty; tapping it first and then
+        // setting the text filled it. The pause is for the field to take focus
+        // and the keyboard to come up, which is a transition like any other.
+        if let super::Command::TypeText { at, .. } = command {
+            self.perform(&super::Command::Tap(*at))?;
+            std::thread::sleep(std::time::Duration::from_millis(Self::FOCUS_MS));
+        }
+
         // A gesture through the helper is dispatched in-process; through the
         // shell it spawns a process on the device, which measures at about
         // 220ms. Text goes to the field directly rather than through the IME's
@@ -1387,7 +1395,13 @@ impl super::Device for AdbDevice {
             let size = self.size()?;
             if let Some(action) = crate::device::helper::Action::for_command(command, size) {
                 match Self::post_action(&endpoint, token.as_deref(), action.body()) {
-                    Ok(()) => return Ok(()),
+                    Ok(true) => return Ok(()),
+                    // Refused by the app, not by the helper. Flutter refuses
+                    // `ACTION_SET_TEXT` this way and the field stays empty,
+                    // while the same text typed through the shell into the
+                    // same focused field lands. The reader is left alone: it
+                    // is reading this screen perfectly well.
+                    Ok(false) => {}
                     Err(error) => {
                         self.reader
                             .degrade(format!("helper would not act: {error}"));
@@ -1399,7 +1413,7 @@ impl super::Device for AdbDevice {
 
         let args = match command {
             super::Command::Tap(point) => self.adb.tap_args(*point),
-            super::Command::TypeText(text) => {
+            super::Command::TypeText { text, .. } => {
                 self.adb.type_text_args(text).map_err(AdbError::Text)?
             }
             // Gesture navigation has no recents key binding, so the key event
