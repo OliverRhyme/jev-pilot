@@ -37,6 +37,15 @@ pub const ACTION_PATH: &str = "/action";
 /// The loopback port the privileged reader listens on, on the device.
 pub const DEEP_PORT: u16 = 18878;
 
+/// The package holding the privileged reader.
+///
+/// A package of its own, and not a second entry point in the helper's: an
+/// instrumentation runs in its target package's process, so stopping it kills
+/// whatever shares that package. When that was the accessibility service,
+/// every stop left it enabled, unbound, and never rebound by Android. Apart,
+/// stopping the reader leaves the service answering — measured.
+pub const READER_PACKAGE: &str = "dev.jevpilot.reader";
+
 /// The instrumentation that reads the screen through `UiAutomation`.
 ///
 /// Started only when a screen turns out to need it. It is refused no window,
@@ -49,7 +58,7 @@ pub const DEEP_PORT: u16 = 18878;
 /// only one `UiAutomation` exists at a time, and the command answers `Killed`
 /// for as long as this is running. It replaces that path rather than joining
 /// it.
-pub const DEEP_READER: &str = "dev.jevpilot.helper/.PilotInstrumentation";
+pub const DEEP_READER: &str = "dev.jevpilot.reader/dev.jevpilot.reader.PilotInstrumentation";
 
 /// The name the privileged reader reports for itself.
 const DEEP_SERVICE_NAME: &str = "PilotInstrumentation";
@@ -81,22 +90,30 @@ pub struct Bundled {
     pub sha256: &'static str,
 }
 
-/// What `helper/helper_manifest.json` said when this crate was compiled.
+/// What `helper/service_manifest.json` said when this crate was compiled.
 pub const BUNDLED: Bundled = Bundled {
     package: PACKAGE,
-    version_code: bundled_u32(
-        include_str!("../../helper/helper_manifest.json"),
-        "version_code",
-    ),
-    version_name: bundled_str(
-        include_str!("../../helper/helper_manifest.json"),
-        "version_name",
-    ),
-    sha256: bundled_str(include_str!("../../helper/helper_manifest.json"), "sha256"),
+    version_code: bundled_u32(SERVICE_MANIFEST, "version_code"),
+    version_name: bundled_str(SERVICE_MANIFEST, "version_name"),
+    sha256: bundled_str(SERVICE_MANIFEST, "sha256"),
 };
 
-/// The bytes of the bundled APK, for writing somewhere `adb install` can read.
+/// What `helper/reader_manifest.json` said when this crate was compiled.
+pub const BUNDLED_READER: Bundled = Bundled {
+    package: READER_PACKAGE,
+    version_code: bundled_u32(READER_MANIFEST, "version_code"),
+    version_name: bundled_str(READER_MANIFEST, "version_name"),
+    sha256: bundled_str(READER_MANIFEST, "sha256"),
+};
+
+const SERVICE_MANIFEST: &str = include_str!("../../helper/service_manifest.json");
+const READER_MANIFEST: &str = include_str!("../../helper/reader_manifest.json");
+
+/// The bytes of the bundled service APK, for `adb install` to read.
 pub const BUNDLED_APK: &[u8] = include_bytes!("../../helper/JevPilotHelper.apk");
+
+/// The bytes of the bundled reader APK.
+pub const BUNDLED_READER_APK: &[u8] = include_bytes!("../../helper/JevPilotReader.apk");
 
 /// What a device needs before the helper can be read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

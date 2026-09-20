@@ -1,5 +1,6 @@
 package dev.jevpilot.helper
 
+import android.accessibilityservice.AccessibilityService
 import android.os.Build
 import android.util.Log
 import org.json.JSONObject
@@ -59,7 +60,7 @@ class CommandServer(
      * the screen and does not act on it: acting stays with the accessibility
      * service, which is bound the whole time and needs no process started.
      */
-    private val gestures: PilotAccessibilityService? = null,
+    private val gestures: AccessibilityService? = null,
 ) : Thread("JevPilotCommandServer") {
 
     @Volatile
@@ -324,12 +325,13 @@ class CommandServer(
                 "type" -> withGestures(resp) { service ->
                     resp.put("success", GestureController.setText(
                         service,
+                        source,
                         params.optString("text", ""),
                         params.optBoolean("append", false),
                     ))
                 }
                 "clear" -> withGestures(resp) { service ->
-                    resp.put("success", GestureController.clearText(service))
+                    resp.put("success", GestureController.clearText(service, source))
                 }
                 "clipboard" -> withGestures(resp) { service ->
                     resp.put("success", GestureController.setClipboard(service, params.optString("text", "")))
@@ -360,7 +362,7 @@ class CommandServer(
      * belongs to the accessibility service, which is bound the whole time and
      * needs no process started to reach it.
      */
-    private inline fun withGestures(resp: JSONObject, act: (PilotAccessibilityService) -> Unit) {
+    private inline fun withGestures(resp: JSONObject, act: (AccessibilityService) -> Unit) {
         val service = gestures
         if (service == null) {
             resp.put("success", false)
@@ -418,7 +420,7 @@ class CommandServer(
         put("service", source.label)
         put("version_code", versionCode)
         put("version_name", versionName)
-        put("protocol_version", PilotAccessibilityService.PROTOCOL_VERSION)
+        put("protocol_version", PROTOCOL_VERSION)
         put("port", port)
         put("auth_required", true)
         put("token_set", TokenStore.isSet)
@@ -437,6 +439,13 @@ class CommandServer(
 
     private companion object {
         const val TAG = "JevPilotCommandServer"
+
+        /**
+         * Bumped whenever the wire contract changes in a way an older host
+         * cannot use. 2: token authentication, byte-accurate bodies,
+         * visible-only dumps, `fields=`.
+         */
+        const val PROTOCOL_VERSION = 2
 
         const val MAX_HEADER_LINE = 16 * 1024
         const val MAX_HEADERS = 64

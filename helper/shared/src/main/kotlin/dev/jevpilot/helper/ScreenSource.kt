@@ -58,7 +58,11 @@ interface ScreenSource {
 }
 
 /** Reading through the accessibility service. */
-class ServiceSource(private val service: PilotAccessibilityService) : ScreenSource {
+class ServiceSource(
+    private val service: AccessibilityService,
+    /** What the service last saw come to the front. */
+    private val foreground: () -> Pair<String, String> = { "" to "" },
+) : ScreenSource {
 
     override fun windows(): List<AccessibilityWindowInfo> =
         runCatching { service.windows.orEmpty() }.getOrDefault(emptyList())
@@ -70,8 +74,8 @@ class ServiceSource(private val service: PilotAccessibilityService) : ScreenSour
         runCatching { service.findFocus(focusType) }.getOrNull()
 
     override val context: Context get() = service
-    override val currentPackage: String get() = service.currentPackageName
-    override val currentActivity: String get() = service.currentActivityName
+    override val currentPackage: String get() = foreground().first
+    override val currentActivity: String get() = foreground().second
     override val label: String get() = "PilotAccessibilityService"
 
     /**

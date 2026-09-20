@@ -7,15 +7,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Reading the screen through UiAutomation, for the windows an
-         accessibility service is not served. Started on demand with
-         `am instrument`; it takes FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES so
-         the helper service keeps running while it does. -->
-    <instrumentation
-        android:name=".PilotInstrumentation"
-        android:targetPackage="dev.jevpilot.helper"
-        android:label="Jev Pilot screen reader" />
-
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -47,7 +38,7 @@
              ordinary app on the device can set a token of its own and then
              talk to the loopback server. -->
         <receiver
-            android:name=".TokenReceiver"
+            android:name="dev.jevpilot.helper.TokenReceiver"
             android:exported="true"
             android:permission="android.permission.WRITE_SECURE_SETTINGS">
             <intent-filter>

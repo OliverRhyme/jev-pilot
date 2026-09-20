@@ -83,8 +83,13 @@ object GestureController {
      * content would prepend the placeholder to what was typed.
      */
     @JvmOverloads
-    fun setText(service: PilotAccessibilityService, text: String?, append: Boolean = false): Boolean {
-        val inputNode = HierarchyDumper.findInputNode(ServiceSource(service))
+    fun setText(
+        service: AccessibilityService,
+        source: ScreenSource,
+        text: String?,
+        append: Boolean = false,
+    ): Boolean {
+        val inputNode = HierarchyDumper.findInputNode(source)
         if (inputNode == null) {
             Log.w(TAG, "No editable/focused input node found for setText")
             return false
@@ -111,7 +116,8 @@ object GestureController {
         }
     }
 
-    fun clearText(service: PilotAccessibilityService): Boolean = setText(service, "")
+    fun clearText(service: AccessibilityService, source: ScreenSource): Boolean =
+        setText(service, source, "")
 
     /** Maps a name to one of the system-wide actions, or refuses it. */
     fun performGlobalAction(service: AccessibilityService, actionName: String?): Boolean {

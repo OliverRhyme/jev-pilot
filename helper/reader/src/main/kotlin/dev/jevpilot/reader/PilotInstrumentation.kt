@@ -1,4 +1,7 @@
-package dev.jevpilot.helper
+package dev.jevpilot.reader
+
+import dev.jevpilot.helper.AutomationSource
+import dev.jevpilot.helper.CommandServer
 
 import android.app.Instrumentation
 import android.app.UiAutomation

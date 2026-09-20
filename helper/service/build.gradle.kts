@@ -71,7 +71,5 @@ kotlin {
 }
 
 dependencies {
-    // The Android SDK alone: android.accessibilityservice, android.view.accessibility
-    // and org.json. No third-party code runs inside a process that can read every
-    // screen on the device.
+    implementation(project(":shared"))
 }

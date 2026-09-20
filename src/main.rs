@@ -372,7 +372,7 @@ fn pursue(
     match (reader.uses_helper(), reader.borrowed(), reader.why()) {
         (true, 0, _) => println!("screens: accessibility helper throughout"),
         (true, borrowed, Some(why)) => println!(
-            "screens: accessibility helper, with {borrowed} screen(s) read through the CLI\n\
+            "screens: accessibility helper, and {borrowed} screen(s) it could not see\n\
              reason : {why}"
         ),
         (_, _, Some(why)) => println!("screens: uiautomator CLI ({why})"),

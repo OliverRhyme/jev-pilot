@@ -89,7 +89,7 @@ fn adb() -> Adb {
 /// what it produced is checked against the file it read.
 #[test]
 fn the_bundled_helper_matches_its_manifest() {
-    const MANIFEST: &str = include_str!("../helper/helper_manifest.json");
+    const MANIFEST: &str = include_str!("../helper/service_manifest.json");
 
     assert_eq!(BUNDLED.package, "dev.jevpilot.helper");
     assert_eq!(BUNDLED.sha256.len(), 64, "a sha256 is 64 hex digits");
@@ -183,20 +183,32 @@ fn enabling_on_a_device_with_no_services_yields_just_the_helper() {
 /// The token is delivered by a broadcast only a sender holding
 /// WRITE_SECURE_SETTINGS can make, and it is shell-quoted like any other
 /// argument that crosses into the device's shell.
+///
+/// The two packages are handed tokens separately, each under its own action,
+/// so a broadcast meant for one cannot give the other's away.
 #[test]
-fn the_token_is_delivered_by_an_explicitly_targeted_broadcast() {
-    let args = adb().push_token_args(&Token::from("abc123".to_owned()));
-    let parts: Vec<&str> = args.iter().map(String::as_str).collect();
+fn each_package_is_handed_its_own_token_by_a_targeted_broadcast() {
+    let token = Token::from("abc123".to_owned());
+    let to_service = adb().push_token_args(&token);
+    let to_reader = adb().push_token_to(jev_pilot::device::helper::READER_PACKAGE, &token);
 
-    assert_eq!(&parts[2..5], &["shell", "am", "broadcast"]);
-    assert!(parts.contains(&"-n"), "{parts:?}");
-    assert!(
-        parts
-            .iter()
-            .any(|p| p.contains("dev.jevpilot.helper/.TokenReceiver")),
-        "the receiver is named, so no other app can be handed the token: {parts:?}"
-    );
-    assert!(parts.iter().any(|p| p.contains("'abc123'")), "{parts:?}");
+    for (args, package) in [
+        (&to_service, "dev.jevpilot.helper"),
+        (&to_reader, "dev.jevpilot.reader"),
+    ] {
+        let parts: Vec<&str> = args.iter().map(String::as_str).collect();
+        assert_eq!(&parts[2..5], &["shell", "am", "broadcast"]);
+        assert!(
+            parts.contains(&format!("{package}/dev.jevpilot.helper.TokenReceiver").as_str()),
+            "the receiver is named, so no other app can be handed the token: {parts:?}"
+        );
+        assert!(
+            parts.contains(&format!("{package}.SET_TOKEN").as_str()),
+            "each package answers to its own action: {parts:?}"
+        );
+        assert!(parts.iter().any(|p| p.contains("'abc123'")), "{parts:?}");
+    }
+    assert_ne!(to_service, to_reader);
 }
 
 // ---------------------------------------------------------------- //
@@ -500,7 +512,7 @@ fn the_helper_is_given_time_after_a_borrow_and_not_otherwise() {
 // The privileged reader
 // ---------------------------------------------------------------- //
 
-use jev_pilot::device::helper::{DEEP_PORT, DEEP_READER};
+use jev_pilot::device::helper::{DEEP_PORT, DEEP_READER, READER_PACKAGE};
 
 /// `UiAutomation` is refused no window, where an accessibility service is
 /// refused several. It costs a process to hold open, so it is started only
@@ -538,15 +550,22 @@ fn the_privileged_reader_is_started_with_the_flag_that_makes_it_work() {
 
 /// Killing the adb child on this side leaves the instrumentation running on
 /// the device — measured — so stopping it has to be asked of the device.
+///
+/// By package, not by class: an app process is named after its package, so
+/// matching on `PilotInstrumentation` found nothing and left the reader
+/// running after every run. Stopping the whole package is safe precisely
+/// because the reader has one of its own, with no accessibility service in it.
 #[test]
-fn the_privileged_reader_is_stopped_on_the_device() {
+fn the_privileged_reader_is_stopped_by_its_own_package() {
     let args = adb().stop_instrument_args();
     let parts: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    assert_eq!(&parts[2..3], &["shell"]);
-    assert!(
-        parts.iter().any(|p| p.contains("PilotInstrumentation")),
-        "{parts:?}"
+    assert_eq!(&parts[2..5], &["shell", "am", "force-stop"]);
+    assert_eq!(parts.last(), Some(&READER_PACKAGE));
+    assert_ne!(
+        parts.last(),
+        Some(&jev_pilot::device::helper::PACKAGE),
+        "stopping the reader must never stop the service"
     );
 }
 

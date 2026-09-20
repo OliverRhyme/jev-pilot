@@ -410,14 +410,27 @@ impl Adb {
     /// hold.
     #[must_use]
     pub fn push_token_args(&self, token: &crate::device::helper::Token) -> Vec<String> {
+        self.push_token_to(crate::device::helper::PACKAGE, token)
+    }
+
+    /// Hand one of the two packages its session token.
+    ///
+    /// The action is the receiving package's own, so neither can be given the
+    /// other's token by a broadcast meant for it.
+    #[must_use]
+    pub fn push_token_to(
+        &self,
+        package: &str,
+        token: &crate::device::helper::Token,
+    ) -> Vec<String> {
         self.targeted(&[
             "shell",
             "am",
             "broadcast",
             "-n",
-            &format!("{}/.TokenReceiver", crate::device::helper::PACKAGE),
+            &format!("{package}/dev.jevpilot.helper.TokenReceiver"),
             "-a",
-            &format!("{}.SET_TOKEN", crate::device::helper::PACKAGE),
+            &format!("{package}.SET_TOKEN"),
             "--es",
             "token",
             &shell_quote(token.expose()),
@@ -444,10 +457,20 @@ impl Adb {
     /// Stop the privileged reader.
     ///
     /// Asked of the device, because killing the adb child on this side leaves
-    /// the instrumentation running there.
+    /// the instrumentation running there. By package, not by class: an app
+    /// process is named after its package, so matching on the class name found
+    /// nothing and left the reader running after every run.
+    ///
+    /// Stopping the whole package is safe only because the reader has one of
+    /// its own; the accessibility service is not in it.
     #[must_use]
     pub fn stop_instrument_args(&self) -> Vec<String> {
-        self.targeted(&["shell", "pkill", "-f", "PilotInstrumentation"])
+        self.targeted(&[
+            "shell",
+            "am",
+            "force-stop",
+            crate::device::helper::READER_PACKAGE,
+        ])
     }
 
     /// Whether a hierarchy shows an application, rather than only the
@@ -593,9 +616,6 @@ struct DeepReader {
     token: Box<str>,
     child: std::process::Child,
     stop: Vec<String>,
-    /// The two settings writes that bind the helper service again.
-    revive: (Vec<String>, Vec<String>),
-    settle_on: Vec<String>,
 }
 
 /// Stopping it is asked of the device.
@@ -604,6 +624,9 @@ struct DeepReader {
 /// held rather than waited on — but killing that child leaves the
 /// instrumentation running on the device, measured, and a `UiAutomation` left
 /// alive keeps `uiautomator dump` answering `Killed` for every later run.
+///
+/// Stopping it kills its process, which is why it has a package of its own:
+/// the accessibility service is not in it, and goes on answering.
 #[cfg(feature = "http")]
 impl Drop for DeepReader {
     fn drop(&mut self) {
@@ -617,18 +640,6 @@ impl Drop for DeepReader {
         quietly(&self.stop);
         let _ = self.child.kill();
         let _ = self.child.wait();
-
-        // Stopping the reader kills the whole app process, because the
-        // instrumentation and the accessibility service share one. That leaves
-        // the service enabled and unbound, and Android does not bind it again
-        // on its own — so the thing that broke it puts it back, rather than
-        // leaving the next run to discover it.
-        quietly(&self.revive.0);
-        std::thread::sleep(std::time::Duration::from_millis(
-            AdbDevice::ENABLE_SETTLE_MS,
-        ));
-        quietly(&self.revive.1);
-        quietly(&self.settle_on);
     }
 }
 
@@ -837,15 +848,18 @@ impl AdbDevice {
     /// Returns [`AdbError`] when the APK cannot be staged, installed, or
     /// enabled.
     pub fn install_helper(&self) -> Result<(), AdbError> {
-        use crate::device::helper::{BUNDLED, BUNDLED_APK, Provision};
+        use crate::device::helper::{
+            BUNDLED, BUNDLED_APK, BUNDLED_READER, BUNDLED_READER_APK, Provision,
+        };
 
-        let staged =
-            std::env::temp_dir().join(format!("{}-{}.apk", BUNDLED.package, BUNDLED.version_code));
-        std::fs::write(&staged, BUNDLED_APK).map_err(AdbError::Spawn)?;
-        let staged = staged.to_string_lossy().into_owned();
-
-        Self::run(&self.adb.install_args(&staged))?;
-        let _ = std::fs::remove_file(&staged);
+        self.install(BUNDLED.package, BUNDLED.version_code, BUNDLED_APK)?;
+        // The reader goes on alongside, and is started only when a screen
+        // turns out to need it.
+        self.install(
+            BUNDLED_READER.package,
+            BUNDLED_READER.version_code,
+            BUNDLED_READER_APK,
+        )?;
 
         // Right after `pm install` the accessibility subsystem has not yet
         // resolved the new component, and it prunes what it cannot resolve
@@ -893,6 +907,15 @@ impl AdbDevice {
         Self::run(&self.adb.enable_accessibility_args())?;
         std::thread::sleep(std::time::Duration::from_millis(Self::ENABLE_SETTLE_MS));
         Ok(())
+    }
+
+    /// Write one bundled APK somewhere adb can read it, and install it.
+    fn install(&self, package: &str, version: u32, apk: &[u8]) -> Result<(), AdbError> {
+        let staged = std::env::temp_dir().join(format!("{package}-{version}.apk"));
+        std::fs::write(&staged, apk).map_err(AdbError::Spawn)?;
+        let outcome = Self::run(&self.adb.install_args(&staged.to_string_lossy()));
+        let _ = std::fs::remove_file(&staged);
+        outcome.map(|_| ())
     }
 
     /// Read screens through the helper for the rest of this run.
@@ -1235,23 +1258,17 @@ impl AdbDevice {
         }
 
         let token = Token::random().map_err(AdbError::Spawn)?;
-        Self::run(&self.adb.push_token_args(&token))?;
-
-        // Worked out now, while the settings can still be read: by the time
-        // this is dropped the reader may be the reason a read would fail.
-        let enabled = Self::run(&self.adb.enabled_services_args()).unwrap_or_default();
-        let (without, with) = crate::device::helper::Provision::revival_of(&enabled);
+        Self::run(
+            &self
+                .adb
+                .push_token_to(crate::device::helper::READER_PACKAGE, &token),
+        )?;
 
         Ok(DeepReader {
             endpoint: format!("{base}{DUMP_PATH}").into_boxed_str(),
             token: Box::from(token.expose()),
             child,
             stop: self.adb.stop_instrument_args(),
-            revive: (
-                self.adb.set_enabled_services_args(&without),
-                self.adb.set_enabled_services_args(&with),
-            ),
-            settle_on: self.adb.enable_accessibility_args(),
         })
     }
 
