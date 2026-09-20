@@ -326,6 +326,98 @@ impl Adb {
             .and_then(|(_, local, _)| local.strip_prefix("tcp:")?.parse().ok())
     }
 
+    /// What `dumpsys package` says about the helper, to read its version from.
+    #[must_use]
+    pub fn package_info_args(&self, package: &str) -> Vec<String> {
+        self.targeted(&["shell", "dumpsys", "package", package])
+    }
+
+    /// The `versionCode` in a `dumpsys package` report.
+    ///
+    /// The word appears in several unrelated lines, so the number is taken
+    /// from the first `versionCode=` and nothing else.
+    #[must_use]
+    pub fn parse_version_code(raw: &str) -> Option<u32> {
+        raw.split("versionCode=")
+            .nth(1)?
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    /// Read the accessibility services the device has switched on.
+    #[must_use]
+    pub fn enabled_services_args(&self) -> Vec<String> {
+        self.targeted(&[
+            "shell",
+            "settings",
+            "get",
+            "secure",
+            "enabled_accessibility_services",
+        ])
+    }
+
+    /// Write the accessibility services the device should have switched on.
+    ///
+    /// The value must already include everything that was there: see
+    /// [`Provision::enabled_services_with_helper`].
+    ///
+    /// [`Provision::enabled_services_with_helper`]: crate::device::helper::Provision::enabled_services_with_helper
+    #[must_use]
+    pub fn set_enabled_services_args(&self, services: &str) -> Vec<String> {
+        self.targeted(&[
+            "shell",
+            "settings",
+            "put",
+            "secure",
+            "enabled_accessibility_services",
+            &shell_quote(services),
+        ])
+    }
+
+    /// Switch the accessibility subsystem on, which `put` alone does not do.
+    #[must_use]
+    pub fn enable_accessibility_args(&self) -> Vec<String> {
+        self.targeted(&[
+            "shell",
+            "settings",
+            "put",
+            "secure",
+            "accessibility_enabled",
+            "1",
+        ])
+    }
+
+    /// Install an APK, replacing any older build of the same package.
+    #[must_use]
+    pub fn install_args(&self, apk_path: &str) -> Vec<String> {
+        self.targeted(&["install", "-r", apk_path])
+    }
+
+    /// Hand the helper the session token for this run.
+    ///
+    /// The receiver is named explicitly rather than left to the action alone,
+    /// so the broadcast cannot be picked up by another app that registered the
+    /// same action. On the device side the receiver is guarded by
+    /// `WRITE_SECURE_SETTINGS`, which only the adb shell user and the system
+    /// hold.
+    #[must_use]
+    pub fn push_token_args(&self, token: &crate::device::helper::Token) -> Vec<String> {
+        self.targeted(&[
+            "shell",
+            "am",
+            "broadcast",
+            "-n",
+            &format!("{}/.TokenReceiver", crate::device::helper::PACKAGE),
+            "-a",
+            &format!("{}.SET_TOKEN", crate::device::helper::PACKAGE),
+            "--es",
+            "token",
+            &shell_quote(token.expose()),
+        ])
+    }
+
     /// Read the device's navigation mode.
     #[must_use]
     pub fn navigation_args(&self) -> Vec<String> {
@@ -412,7 +504,9 @@ pub enum Hierarchy {
     Helper {
         /// Where to GET the document, e.g. `http://127.0.0.1:18899/dump_xml`.
         endpoint: Box<str>,
-        /// Sent as `X-Artemis-Token`, when the helper requires one.
+        /// Sent as [`helper::TOKEN_HEADER`], when the helper requires one.
+        ///
+        /// [`helper::TOKEN_HEADER`]: crate::device::helper::TOKEN_HEADER
         token: Option<Box<str>>,
     },
 }
@@ -500,6 +594,12 @@ impl AdbDevice {
     /// How long a deliberate wait lasts.
     pub const SETTLE_MS: u64 = 600;
 
+    /// How many times enabling the helper is attempted before giving up.
+    pub const ENABLE_ATTEMPTS: u32 = 4;
+
+    /// How long to wait before believing the accessibility setting stuck.
+    pub const ENABLE_SETTLE_MS: u64 = 500;
+
     /// Drive the device with this serial.
     #[must_use]
     pub fn new(serial: impl Into<Box<str>>) -> Self {
@@ -565,12 +665,130 @@ impl AdbDevice {
         })
     }
 
+    /// What this device needs before the helper can serve it.
+    ///
+    /// # Errors
+    /// Returns [`AdbError`] when the device cannot be questioned.
+    pub fn helper_provision(&self) -> Result<crate::device::helper::Provision, AdbError> {
+        use crate::device::helper::{BUNDLED, Provision};
+        let installed =
+            Adb::parse_version_code(&Self::run(&self.adb.package_info_args(BUNDLED.package))?);
+        let enabled = Self::run(&self.adb.enabled_services_args())?;
+        Ok(Provision::assess(installed, &enabled))
+    }
+
+    /// Put the bundled helper on the device and switch it on.
+    ///
+    /// This installs a service that can read every screen on someone's phone,
+    /// so it is never called as a side effect of anything else: a caller asks
+    /// for it, having told the person what it is.
+    ///
+    /// Every accessibility service already enabled stays enabled — a device
+    /// may be running a screen reader that someone depends on.
+    ///
+    /// # Errors
+    /// Returns [`AdbError`] when the APK cannot be staged, installed, or
+    /// enabled.
+    pub fn install_helper(&self) -> Result<(), AdbError> {
+        use crate::device::helper::{BUNDLED, BUNDLED_APK, Provision};
+
+        let staged =
+            std::env::temp_dir().join(format!("{}-{}.apk", BUNDLED.package, BUNDLED.version_code));
+        std::fs::write(&staged, BUNDLED_APK).map_err(AdbError::Spawn)?;
+        let staged = staged.to_string_lossy().into_owned();
+
+        Self::run(&self.adb.install_args(&staged))?;
+        let _ = std::fs::remove_file(&staged);
+
+        // Right after `pm install` the accessibility subsystem has not yet
+        // resolved the new component, and it prunes what it cannot resolve
+        // back out of the setting. The write returns success either way, and
+        // an immediate read sees a value that is gone a moment later, so each
+        // attempt waits and re-reads before believing it.
+        for _ in 0..Self::ENABLE_ATTEMPTS {
+            let current = Self::run(&self.adb.enabled_services_args())?;
+            let merged = Provision::enabled_services_with_helper(&current);
+            Self::run(&self.adb.set_enabled_services_args(&merged))?;
+            Self::run(&self.adb.enable_accessibility_args())?;
+            std::thread::sleep(std::time::Duration::from_millis(Self::ENABLE_SETTLE_MS));
+            if Self::run(&self.adb.enabled_services_args())?.contains(Provision::SERVICE_COMPONENT)
+            {
+                return Ok(());
+            }
+        }
+        Err(AdbError::Failed {
+            args: "settings put secure enabled_accessibility_services".into(),
+            stderr: format!(
+                "the helper would not stay enabled after {} attempts; \
+                 enable it by hand in Settings > Accessibility",
+                Self::ENABLE_ATTEMPTS,
+            )
+            .into_boxed_str(),
+        })
+    }
+
+    /// Read screens through the helper for the rest of this run.
+    ///
+    /// Opens the tunnel, checks that what answers is our own helper speaking a
+    /// protocol this crate understands, gives it a fresh session token, and
+    /// confirms the token took.
+    ///
+    /// The reader is chosen here and held. Falling back to the CLI for a
+    /// single observation would unbind the helper — Android suppresses every
+    /// accessibility service while a `UiAutomation` connection is alive — and
+    /// the next observation would fall back too, paying both costs for the
+    /// rest of the run.
+    ///
+    /// # Errors
+    /// Returns [`AdbError`] when the helper is absent, is something else, or
+    /// speaks another protocol.
+    #[cfg(feature = "http")]
+    pub fn through_jev_helper(self) -> Result<Self, AdbError> {
+        use crate::device::helper::{DEVICE_PORT, DUMP_PATH, HelperInfo, Token};
+
+        let local = match Self::run(&self.adb.forward_list_args())
+            .ok()
+            .and_then(|listing| self.adb.parse_forward_reuse(&listing, DEVICE_PORT))
+        {
+            Some(port) => port,
+            None => Self::open_forward(&self.adb, DEVICE_PORT)?,
+        };
+        let base = format!("http://127.0.0.1:{local}");
+
+        let ping = Self::read_helper(&format!("{base}/ping"), None)?;
+        let info = HelperInfo::parse(&ping).ok_or_else(|| AdbError::Failed {
+            args: "helper ping".into(),
+            stderr: "the loopback port answered with something that is not a helper ping".into(),
+        })?;
+        if !info.usable() {
+            return Err(AdbError::Failed {
+                args: "helper ping".into(),
+                stderr: format!(
+                    "refusing to read screens from what answered on port {DEVICE_PORT}: \
+                     it reports protocol {} where this crate speaks {}",
+                    info.protocol_version(),
+                    crate::device::helper::PROTOCOL_VERSION,
+                )
+                .into_boxed_str(),
+            });
+        }
+
+        let token = Token::random().map_err(AdbError::Spawn)?;
+        Self::run(&self.adb.push_token_args(&token))?;
+
+        let endpoint = format!("{base}{DUMP_PATH}").into_boxed_str();
+        Ok(self.reading_from(Hierarchy::Helper {
+            endpoint,
+            token: Some(Box::from(token.expose())),
+        }))
+    }
+
     /// Fetch a screen from a helper over the tunnel.
     #[cfg(feature = "http")]
     fn read_helper(endpoint: &str, token: Option<&str>) -> Result<String, AdbError> {
         let mut request = ureq::get(endpoint);
         if let Some(token) = token {
-            request = request.header("X-Artemis-Token", token);
+            request = request.header(crate::device::helper::TOKEN_HEADER, token);
         }
         let mut response = request.call().map_err(|error| AdbError::Failed {
             args: "helper".into(),

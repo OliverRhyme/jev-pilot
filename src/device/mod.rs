@@ -9,6 +9,7 @@
 #[cfg(feature = "android")]
 #[cfg_attr(docsrs, doc(cfg(feature = "android")))]
 pub mod adb;
+pub mod helper;
 
 use crate::act::{Act, Direction, Swipe, SystemAct};
 use crate::snapshot::{Point, Snapshot, TapError};
