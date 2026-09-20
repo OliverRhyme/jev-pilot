@@ -41,6 +41,11 @@ pub enum Invocation {
     },
     /// List the attached devices.
     Devices,
+    /// Print what the next step would be offered, without acting.
+    Observe {
+        /// Which device, when more than one is attached.
+        device: Option<String>,
+    },
     /// Explain the usage.
     Help,
 }
@@ -105,6 +110,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
         Some("devices") => {
             let _ = args.next();
             return Ok(Invocation::Devices);
+        }
+        Some("observe") => {
+            let _ = args.next();
+            let mut device = None;
+            while let Some(word) = args.next() {
+                match word.as_str() {
+                    "--device" | "-d" => device = Some(value(&mut args, "--device")?),
+                    other => return Err(CliError::UnknownFlag(other.to_owned())),
+                }
+            }
+            return Ok(Invocation::Observe { device });
         }
         Some("helper") => {
             let _ = args.next();
@@ -188,6 +204,7 @@ jev-pilot — drive an Android device toward a goal
 USAGE
   jev-pilot [options] \"<goal>\"       pursue a goal
   jev-pilot devices                   list attached devices
+  jev-pilot observe                   print what the next step would be offered
   jev-pilot helper [install]          report on, or install, the on-device helper
 
 OPTIONS

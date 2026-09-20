@@ -630,3 +630,25 @@ fn a_refused_gesture_is_told_apart_from_a_performed_one() {
         "an answer that cannot be read is not a performed gesture"
     );
 }
+
+/// The helper keeps one token, so whoever pushed last owns it. A second tool
+/// looking at the same device — another run, a diagnostic dump — takes it
+/// away, and the first hears about it as a 401 in the middle of its work.
+///
+/// That is not a lost helper. The session is recoverable by pushing a token
+/// again, and treating it as a loss drops a run onto the 2.5s path for
+/// nothing. Seen for real: diagnostics run alongside a transfer knocked the
+/// run onto the CLI for its remaining steps.
+#[test]
+fn losing_the_token_is_told_apart_from_losing_the_helper() {
+    assert!(Action::was_unauthorized("http status: 401"));
+    assert!(Action::was_unauthorized(
+        "adb helper failed: http status: 401 Unauthorized"
+    ));
+    assert!(!Action::was_unauthorized("io: Peer disconnected"));
+    assert!(!Action::was_unauthorized("http status: 404"));
+    assert!(
+        !Action::was_unauthorized("http status: 500"),
+        "a helper in trouble is not a helper that forgot us"
+    );
+}

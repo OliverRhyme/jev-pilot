@@ -118,3 +118,26 @@ fn a_goal_can_follow_the_end_of_options() {
     };
     assert_eq!(&*goal, "--not-a-flag");
 }
+
+/// Seeing what the loop believes is on screen had no route but provoking a
+/// stall or leaving the tool for `uiautomator dump` — the slow reader the
+/// helper exists to replace. It is the first thing wanted when a run behaves
+/// oddly, and it costs no model call.
+#[test]
+fn the_catalog_can_be_looked_at_without_running_anything() {
+    assert!(matches!(
+        parsed(&["observe"]),
+        Invocation::Observe { device: None }
+    ));
+    assert!(matches!(
+        parsed(&["observe", "--device", "abc123"]),
+        Invocation::Observe { device: Some(_) }
+    ));
+}
+
+/// Looking is not driving: it takes no goal and refuses one, so a mistyped
+/// command cannot quietly start acting on a phone.
+#[test]
+fn looking_at_a_screen_takes_no_goal() {
+    assert!(parse(["observe".to_owned(), "Turn Wi-Fi on".to_owned()]).is_err());
+}

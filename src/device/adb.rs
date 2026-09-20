@@ -653,6 +653,13 @@ pub struct AdbDevice {
     /// The privileged reader, once a screen has needed one.
     #[cfg(feature = "http")]
     deep: Option<DeepReader>,
+    /// This run's session token, kept so it can be pushed again.
+    ///
+    /// The helper holds one token and the last push wins, so another tool
+    /// looking at the same device takes this run's session away. Pushing again
+    /// is the whole recovery.
+    #[cfg(feature = "http")]
+    session: Option<crate::device::helper::Token>,
     adb: Adb,
     platform: crate::platform::Android,
     navigation: Option<Navigation>,
@@ -766,6 +773,8 @@ impl AdbDevice {
             saw_an_application: true,
             #[cfg(feature = "http")]
             deep: None,
+            #[cfg(feature = "http")]
+            session: None,
             adb: Adb::new(serial),
             platform: crate::platform::Android,
             navigation: None,
@@ -975,6 +984,7 @@ impl AdbDevice {
             endpoint,
             token: Some(Box::from(token.expose())),
         });
+        device.session = Some(token);
         device.reader = crate::device::helper::Reader::helper();
         Ok(device)
     }
@@ -1143,6 +1153,20 @@ impl AdbDevice {
                     }
                     return self.parse(&raw);
                 }
+                // Another tool took the session. Push ours again rather than
+                // giving up a helper that is working perfectly well.
+                Err(error)
+                    if crate::device::helper::Action::was_unauthorized(&error.to_string())
+                        && self.push_session().is_ok() =>
+                {
+                    if let Ok(raw) = Self::read_helper(&endpoint, token.as_deref()) {
+                        self.saw_an_application = Adb::shows_an_application(&raw);
+                        return self.parse(&raw);
+                    }
+                    self.reader
+                        .degrade("the helper would not accept a fresh token");
+                    self.hierarchy = Hierarchy::Cli;
+                }
                 // A dump we ourselves just did silences the helper for about
                 // 1.5s, so the read right after one finds it mid-rebind. That
                 // failure means "not yet", and waiting it out is cheaper than
@@ -1172,6 +1196,18 @@ impl AdbDevice {
             }
         }
         self.read_via_cli()
+    }
+
+    /// Give the helper this run's token again.
+    #[cfg(feature = "http")]
+    fn push_session(&self) -> Result<(), AdbError> {
+        let Some(token) = self.session.as_ref() else {
+            return Err(AdbError::Failed {
+                args: "helper token".into(),
+                stderr: "no session token to push".into(),
+            });
+        };
+        Self::run(&self.adb.push_token_args(token)).map(|_| ())
     }
 
     /// Parse a hierarchy document as this platform describes screens.

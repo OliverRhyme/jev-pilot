@@ -522,10 +522,19 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// go, which are slower than an ordinary screen transition, and short
     /// enough that an action which genuinely changed nothing is noticed rather
     /// than waited on.
-    pub const CHANGE_BUDGET_MS: u64 = 2_000;
+    ///
+    /// The whole budget is only ever spent when nothing changes, and that is
+    /// what sets it: measured, three scrolls at the end of a list cost this
+    /// each before the run gave up on them. A screen that is going to move
+    /// does so in a fraction of it.
+    pub const CHANGE_BUDGET_MS: u64 = 1_200;
 
     /// How often to look while waiting.
-    pub const CHANGE_POLL_MS: u64 = 100;
+    ///
+    /// A read through the helper is about 60ms, so looking this often costs
+    /// little and returns as soon as the screen moves rather than at the end
+    /// of a fixed delay.
+    pub const CHANGE_POLL_MS: u64 = 80;
 
     /// How many actions in a row may leave the screen untouched before a run
     /// stops repeating itself and asks.

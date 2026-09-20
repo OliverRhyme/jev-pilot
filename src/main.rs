@@ -22,10 +22,11 @@
 //! the platform lacks, a row that is not on screen, or a coordinate.
 use core::fmt::Write as _;
 use jev_pilot::{
-    act::Operation,
+    act::{Catalog, Operation},
     cli::{self, Invocation},
     client::http::SystemOne,
     credential::ApiKey,
+    device::Device as _,
     device::adb::{Adb, AdbDevice},
     device::helper::BUNDLED,
     judgment::Confidence,
@@ -239,6 +240,7 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
             Ok(())
         }
         Invocation::Devices => list_devices(),
+        Invocation::Observe { device } => observe(device.as_deref()),
         Invocation::Helper { device, install } => manage_helper(device.as_deref(), install),
         Invocation::Run {
             goal,
@@ -290,6 +292,47 @@ fn choose_device(named: Option<&str>) -> Result<String, Box<dyn core::error::Err
         )
         .into()),
     }
+}
+
+/// Print the catalog the next step would be offered, and act on nothing.
+///
+/// The first thing wanted when a run behaves oddly, and it costs no model
+/// call: the alternative was provoking a stall or leaving for `uiautomator
+/// dump`, the slow reader the helper exists to replace.
+fn observe(named: Option<&str>) -> Result<(), Box<dyn core::error::Error>> {
+    let mut device = AdbDevice::new(choose_device(named)?).with_helper()?;
+    let started = std::time::Instant::now();
+    let screen = device.observe()?;
+    let read_in = started.elapsed();
+
+    match device.reader().why() {
+        None => println!("read by : accessibility helper"),
+        Some(why) => println!("read by : uiautomator CLI ({why})"),
+    }
+    println!("took    : {}ms", read_in.as_millis());
+    println!(
+        "keyboard: {}",
+        if screen.keyboard_open() { "up" } else { "down" }
+    );
+
+    let catalog = Catalog::for_screen(&screen, &Android);
+    println!("\noperations offered:");
+    let offered: Vec<&str> = catalog.operations().iter().map(|o| o.key()).collect();
+    println!("  {}", offered.join(" "));
+
+    println!("\n{} rows:", screen.refs().count());
+    for (index, (handle, element)) in screen.refs().enumerate() {
+        let where_it_taps = match screen.tap_point(handle) {
+            Ok(point) => format!("taps {},{}", point.x, point.y),
+            Err(error) => format!("UNREACHABLE: {error}"),
+        };
+        println!(
+            "  [{index:2}] {:<52} {where_it_taps}{}",
+            element.describe().chars().take(52).collect::<String>(),
+            if element.editable { "  [editable]" } else { "" },
+        );
+    }
+    Ok(())
 }
 
 fn manage_helper(named: Option<&str>, install: bool) -> Result<(), Box<dyn core::error::Error>> {

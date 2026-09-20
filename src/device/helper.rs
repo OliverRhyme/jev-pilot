@@ -657,6 +657,17 @@ impl Action {
             .unwrap_or(false)
     }
 
+    /// Whether a failure was the helper refusing the token.
+    ///
+    /// The helper keeps one token and the last push wins, so a second tool
+    /// looking at the same device takes the first one's session away. That is
+    /// recoverable by pushing again, and is not the helper being gone —
+    /// treating it as a loss drops a run onto the 2.5s path for nothing.
+    #[must_use]
+    pub fn was_unauthorized(reason: &str) -> bool {
+        reason.contains("401")
+    }
+
     /// The JSON to POST to `/action`.
     #[must_use]
     pub fn body(&self) -> &str {
