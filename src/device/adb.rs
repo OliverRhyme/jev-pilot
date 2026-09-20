@@ -1299,13 +1299,19 @@ impl AdbDevice {
         }
         let reader = self.deep.as_ref()?;
         let (endpoint, token) = (reader.endpoint.clone(), reader.token.clone());
-        Some(match Self::read_helper(&endpoint, Some(&token)) {
-            Ok(raw) => self.parse(&raw),
+        match Self::read_helper(&endpoint, Some(&token)) {
+            Ok(raw) => Some(self.parse(&raw)),
+            // Not fatal, for the same reason failing to start it is not: the
+            // CLI reads these screens too, slower. The instrumentation is a
+            // child process that the ROM may stop at any time, and a run that
+            // ends because its fastest reader died has thrown away the two
+            // slower ones that were still working.
             Err(error) => {
+                eprintln!("jev-pilot: the privileged reader stopped answering: {error}");
                 self.deep = None;
-                Err(error)
+                None
             }
-        })
+        }
     }
 
     /// Start the instrumentation and wait for it to answer.
