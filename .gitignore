@@ -1,0 +1,8 @@
+target/
+Cargo.lock
+.env
+.DS_Store
+
+# The Python prototype this crate replaced. Kept on disk for reference,
+# not part of the project.
+.python-reference/

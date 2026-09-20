@@ -1,0 +1,45 @@
+[package]
+name = "jev-pilot"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Drive a mobile UI with TypeSafe Jev as the System One decision provider: code enumerates the valid actions, the model only selects one."
+repository = "https://github.com/OliverRhyme/jev-pilot"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["android", "ios", "ui-automation", "testing", "agent"]
+categories = ["development-tools::testing", "api-bindings"]
+exclude = ["/.cargo", "/t", "/.python-reference"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+roxmltree = { version = "0.20", optional = true }
+ureq = { version = "3", optional = true, default-features = false, features = ["rustls", "json"] }
+
+[features]
+default = ["android", "ios", "http"]
+# UIAutomator hierarchy parsing and the Android system gestures.
+android = ["dep:roxmltree"]
+# XCUITest hierarchy parsing and the iOS system gestures.
+ios = ["dep:roxmltree"]
+# A blocking HTTP transport. Without it the crate builds the request and you
+# send it with whatever client you already have.
+http = ["dep:ureq"]
+
+# docs.rs renders every feature, and marks which items need which.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "warn"
+# The documentation names products and platform APIs in prose — TypeSafe,
+# UIAutomator, XCUITest, VoiceOver. Backticking them would imply they are items
+# in this crate rather than things in the world.
+doc_markdown = "allow"

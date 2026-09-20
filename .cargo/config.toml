@@ -1,0 +1,4 @@
+# Stabilised in 1.97: fail the build on any local-crate warning, so CI and a
+# local run agree without threading -D warnings through every invocation.
+[build]
+warnings = "deny"
