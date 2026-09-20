@@ -317,6 +317,14 @@ fn observe(named: Option<&str>) -> Result<(), Box<dyn core::error::Error>> {
     );
     println!("app     : {}", screen.app().unwrap_or("unknown"));
 
+    let says: Vec<&str> = screen.notices().collect();
+    if !says.is_empty() {
+        println!("\nthe screen says:");
+        for notice in says {
+            println!("  {notice}");
+        }
+    }
+
     let catalog = Catalog::for_screen(&screen, &Android);
     println!("\noperations offered:");
     let offered: Vec<&str> = catalog.operations().iter().map(|o| o.key()).collect();

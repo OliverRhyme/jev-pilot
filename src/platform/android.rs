@@ -79,6 +79,7 @@ impl Platform for Android {
         Snapshot::new(elements)
             .map(|snapshot| snapshot.with_keyboard_open(shows_input_method(&document)))
             .map(|snapshot| snapshot.in_app(app_of(&document)))
+            .map(|snapshot| snapshot.saying(notices_of(&document)))
             .map_err(HierarchyError::from)
     }
 }
@@ -201,6 +202,43 @@ fn hint_of(node: &roxmltree::Node) -> Option<Box<str>> {
 /// produce elements that read well and cannot be tapped. Stopping the descent
 /// at a nested actionable node keeps each row's text with that row, so a list
 /// item does not absorb the label of a button sitting inside it.
+/// What the screen says that is not the name of something to act on.
+///
+/// Headings, captions, totals, the count of digits entered so far. A node is a
+/// notice when nothing about it or above it is actionable, because the text
+/// under an actionable node is already that row's label and repeating it would
+/// say everything twice.
+///
+/// The keyboard's own window is left out for the reason its keys are: it is the
+/// rendering of a field, not something the screen is saying.
+fn notices_of(document: &roxmltree::Document) -> Vec<Box<str>> {
+    let mut notices: Vec<Box<str>> = Vec::new();
+    for node in document.descendants() {
+        if notices.len() >= MAX_NOTICES {
+            break;
+        }
+        if within_input_method(&node) || node.ancestors().any(|a| is_actionable(&a)) {
+            continue;
+        }
+        let Some(label) = label_of(&node) else {
+            continue;
+        };
+        // The same caption often appears on a node and on the wrapper drawn
+        // around it. Said once is what a person reads.
+        if !notices.contains(&label) {
+            notices.push(label);
+        }
+    }
+    notices
+}
+
+/// How many notices travel with a screen.
+///
+/// A bound rather than a judgement about what matters: the state is sent to a
+/// model on every step, and a dense screen would otherwise crowd out the rows,
+/// which is the mistake the soft keyboard already taught.
+const MAX_NOTICES: usize = 24;
+
 fn own_texts(node: &roxmltree::Node) -> Vec<Box<str>> {
     let mut texts = Vec::new();
     collect_texts(node, &mut texts, true);

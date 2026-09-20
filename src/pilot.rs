@@ -772,6 +772,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                         snapshot.app(),
                         origin.as_deref(),
                         snapshot.keyboard_open(),
+                        &snapshot.notices().collect::<Vec<_>>(),
                     ),
                     &questions,
                 )
@@ -946,6 +947,7 @@ fn describe(
     app: Option<&str>,
     origin: Option<&str>,
     keyboard_open: bool,
+    says: &[&str],
 ) -> serde_json::Value {
     // Rows are keyed the way the Choice offers them, so its options can be
     // bare keys and the text travels once rather than twice.
@@ -972,6 +974,11 @@ fn describe(
         if origin.is_some_and(|origin| origin != app) {
             state["started_in"] = origin.into();
         }
+    }
+    if !says.is_empty() {
+        // Apart from the rows, and unkeyed: none of it can be chosen, and a
+        // key is an invitation to try. It is here to be read, not picked.
+        state["screen_says"] = says.into();
     }
     let fields = keyed(&mut catalog.fields_offered());
     if !fields.is_empty() {

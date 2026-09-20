@@ -529,3 +529,44 @@ fn system_chrome_does_not_get_to_name_the_screen() {
         Some("com.android.systemui"),
     );
 }
+
+/// What a screen *says* is not what a screen *offers*, and a catalog of
+/// actionable rows alone hands the judge a set of buttons with no account of
+/// the state they act on. Measured on a PIN pad: twelve rows, all keys, while
+/// the screen itself said "4 of 6 digits entered", "Step 3 of 3" and what the
+/// transfer was for. Asked "is the goal met?", the run could only look at the
+/// keys.
+#[test]
+fn the_screen_keeps_the_words_that_are_not_rows() {
+    const PIN_PAD: &str = include_str!("fixtures/pin-pad.xml");
+
+    let screen = Android.parse_hierarchy(PIN_PAD).expect("a screen");
+    let notices: Vec<&str> = screen.notices().collect();
+
+    assert!(
+        notices.contains(&"4 of 6 digits entered, TPIN"),
+        "progress through the PIN is the whole state of this screen: {notices:?}",
+    );
+    assert!(notices.contains(&"Step 3 of 3"), "{notices:?}");
+    assert!(
+        notices.iter().any(|n| n.contains("TEST PAYEE")),
+        "{notices:?}",
+    );
+    // Keys are rows. Repeating them as text would say each one twice.
+    assert!(!notices.contains(&"DEL"), "{notices:?}");
+}
+
+/// A screen whose only change is in its words has still changed. Without this
+/// a PIN pad looks identical after every digit, and a run entering one is
+/// stopped by its own guard against repeating itself.
+#[test]
+fn words_that_are_not_rows_still_make_a_screen_a_different_screen() {
+    const PIN_PAD: &str = include_str!("fixtures/pin-pad.xml");
+
+    let four = Android.parse_hierarchy(PIN_PAD).expect("a screen");
+    let five = Android
+        .parse_hierarchy(&PIN_PAD.replace("4 of 6 digits", "5 of 6 digits"))
+        .expect("a screen");
+
+    assert_ne!(four.fingerprint(), five.fingerprint());
+}

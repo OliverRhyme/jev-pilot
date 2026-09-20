@@ -502,3 +502,38 @@ fn the_state_says_when_the_keyboard_is_covering_the_screen() {
     assert_eq!(seen[0]["keyboard_open"], false);
     assert_eq!(seen[1]["keyboard_open"], true);
 }
+
+/// The words on a screen are most of what "is the goal met?" is a question
+/// about, and none of them are rows. Without them the judge sees a set of
+/// buttons and no account of the state they act on.
+#[test]
+fn the_state_carries_what_the_screen_says() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![answer("done", None, 0.99, 0.97)]),
+    };
+    let mut pilot = Pilot::new(PinPad, judge, &Android);
+
+    pilot.pursue("enter the PIN").expect("the run completes");
+
+    let seen = seen.borrow();
+    let said = seen[0]["screen_says"].to_string();
+    assert!(said.contains("4 of 6 digits entered"), "got {said}");
+    assert!(said.contains("Step 3 of 3"), "got {said}");
+}
+
+/// A screen of keys, and words that say how far through it is.
+struct PinPad;
+
+impl Device for PinPad {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        Ok(Android
+            .parse_hierarchy(include_str!("fixtures/pin-pad.xml"))
+            .expect("fixture parses"))
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        Ok(())
+    }
+}

@@ -222,6 +222,7 @@ pub struct Snapshot {
     generation: Generation,
     keyboard_open: bool,
     app: Option<Box<str>>,
+    notices: Box<[Box<str>]>,
     elements: Box<[Element]>,
 }
 
@@ -242,6 +243,7 @@ impl Snapshot {
             generation: Generation::next(),
             keyboard_open: false,
             app: None,
+            notices: Box::default(),
             elements: elements.into_boxed_slice(),
         })
     }
@@ -269,6 +271,25 @@ impl Snapshot {
     pub fn in_app(mut self, app: Option<Box<str>>) -> Self {
         self.app = app;
         self
+    }
+
+    /// Note what the screen says, beyond what it offers to act on.
+    #[must_use]
+    pub fn saying(mut self, notices: Vec<Box<str>>) -> Self {
+        self.notices = notices.into_boxed_slice();
+        self
+    }
+
+    /// What the screen says, in the order it says it.
+    ///
+    /// Static text: headings, captions, totals, progress through a step. None
+    /// of it can be acted on, which is exactly why it is kept apart from the
+    /// rows — offering it as a target would hand the model choices that do
+    /// nothing. It is here because a catalog of buttons alone is no account of
+    /// the state those buttons act on, and "is the goal met?" is a question
+    /// about the state.
+    pub fn notices(&self) -> impl Iterator<Item = &str> {
+        self.notices.iter().map(|notice| &**notice)
     }
 
     /// Which application this screen belongs to, when the reader could say.
@@ -301,6 +322,13 @@ impl Snapshot {
         // The keyboard changes what can be done without changing the rows
         // behind it, so it belongs in the identity of the screen.
         self.keyboard_open.hash(&mut hasher);
+        // A screen whose only change is in its words has still changed. A PIN
+        // pad is identical after every digit but for the count it reports, and
+        // a run entering one is otherwise stopped by the guard against
+        // repeating itself.
+        for notice in &self.notices {
+            notice.hash(&mut hasher);
+        }
         for element in &self.elements {
             element.label.hash(&mut hasher);
             element.detail.hash(&mut hasher);
