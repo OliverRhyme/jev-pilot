@@ -65,10 +65,16 @@ const OPERATIONS: &[Operation] = &[
 struct Desk {
     dir: PathBuf,
     typed: Receiver<String>,
+    /// Text the caller supplied up front, by the field it belongs in.
+    ///
+    /// Consulted before anyone is asked. A scripted run knows the words it
+    /// means to type — they are in the goal it was given — and stopping to ask
+    /// for each one is what keeps such a run from finishing unattended.
+    texts: Vec<(Box<str>, Box<str>)>,
 }
 
 impl Desk {
-    fn new(dir: PathBuf) -> std::io::Result<Self> {
+    fn new(dir: PathBuf, texts: Vec<(Box<str>, Box<str>)>) -> std::io::Result<Self> {
         std::fs::create_dir_all(&dir)?;
         let (sender, typed) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -79,7 +85,20 @@ impl Desk {
                 }
             }
         });
-        Ok(Self { dir, typed })
+        Ok(Self { dir, typed, texts })
+    }
+
+    /// Text supplied for a field, matched by name.
+    ///
+    /// Contains rather than equals: a field is named by whatever the screen
+    /// calls it, which is a hint, a label or a caption, and rarely the short
+    /// name a caller would type. Case is ignored for the same reason.
+    fn supplied(&self, field: &str) -> Option<&str> {
+        let field = field.to_lowercase();
+        self.texts
+            .iter()
+            .find(|(name, _)| field.contains(&name.to_lowercase()))
+            .map(|(_, text)| &**text)
     }
 
     /// Put a question to both channels and wait for the first answer.
@@ -155,6 +174,14 @@ impl Desk {
 
     /// Ask what belongs in a field.
     fn compose(&self, request: &Writing<'_>) -> Result<Box<str>, std::io::Error> {
+        if let Some(text) = self.supplied(&request.field.describe()) {
+            println!(
+                "\n  \u{2500}\u{2500} step {}: typing the text given for {}",
+                request.step,
+                request.field.describe(),
+            );
+            return Ok(text.into());
+        }
         let prompt = format!(
             "\n  \u{2500}\u{2500} step {}: what should go in {}?\n     goal: {}\n     text: ",
             request.step,
@@ -249,8 +276,9 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
             steps,
             floors,
             app,
+            texts,
             desk,
-        } => pursue(&goal, device.as_deref(), accept, steps, floors, app, desk),
+        } => pursue(&goal, device.as_deref(), accept, steps, floors, app, texts, desk),
     }
 }
 
@@ -385,10 +413,11 @@ fn pursue(
     steps: u32,
     floors: jev_pilot::act::Floors,
     app: Option<Box<str>>,
+    texts: Vec<(Box<str>, Box<str>)>,
     desk_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn core::error::Error>> {
     let dir = desk_dir.unwrap_or_else(|| std::env::temp_dir().join("jev-pilot-desk"));
-    let desk = Rc::new(Desk::new(dir.clone())?);
+    let desk = Rc::new(Desk::new(dir.clone(), texts)?);
 
     let device = AdbDevice::new(choose_device(named)?).with_helper()?;
     println!("device : {}", device.serial());

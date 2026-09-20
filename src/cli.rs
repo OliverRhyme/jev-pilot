@@ -31,6 +31,8 @@ pub enum Invocation {
         floors: crate::act::Floors,
         /// The application the goal is about, when the caller named one.
         app: Option<Box<str>>,
+        /// Text to type, by the field it belongs in.
+        texts: Vec<(Box<str>, Box<str>)>,
         /// Where questions are written for another decider to answer.
         desk: Option<std::path::PathBuf>,
     },
@@ -148,6 +150,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
     let mut floor = Confidence::new(DEFAULT_FLOOR).unwrap_or(Confidence::ZERO);
     let mut desk = None;
     let mut app: Option<Box<str>> = None;
+    let mut texts: Vec<(Box<str>, Box<str>)> = Vec::new();
     let mut options_ended = false;
 
     while let Some(word) = args.next() {
@@ -174,6 +177,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
                     })?;
             }
             "--app" => app = Some(value(&mut args, "--app")?.into_boxed_str()),
+            "--text" => {
+                let got = value(&mut args, "--text")?;
+                // Split once: a value may hold an `=` and a field name that
+                // does is not worth the ambiguity.
+                let (field, text) = got.split_once('=').ok_or(CliError::BadValue {
+                    flag: "--text",
+                    got: got.clone(),
+                })?;
+                texts.push((field.into(), text.into()));
+            }
             "--floor" => {
                 let got = value(&mut args, "--floor")?;
                 let parsed = got.parse::<f64>().ok().and_then(Confidence::new);
@@ -190,6 +203,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
     Ok(Invocation::Run {
         floors: floors_from(floor),
         app,
+        texts,
         goal: goal.into_boxed_str(),
         device,
         accept,
@@ -241,6 +255,10 @@ OPTIONS
       --steps <n>         how many steps before giving up (default 15)
       --app <package>     the app the goal is about; it is brought to the
                           front first, and the run knows when it has left it
+      --text <field>=<words>
+                          what to type into a field whose name contains
+                          <field>; repeatable. Without it, a run stops and
+                          asks for every field it means to fill
       --floor <0..1>      below this confidence the run asks you (default 0.6).
                           Lowering it applies to ordinary gestures only —
                           ending the run, and leaving the app, keep 0.6

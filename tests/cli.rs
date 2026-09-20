@@ -214,3 +214,43 @@ fn naming_the_app_is_optional() {
 
     assert_eq!(app, None);
 }
+
+/// Text to be typed, supplied up front. A System One model selects and does
+/// not write, so the words for a field come from outside the loop — and when
+/// that is a person at a terminal, a scripted run cannot finish unattended.
+#[test]
+fn text_for_a_field_can_be_supplied_on_the_command_line() {
+    let Invocation::Run { texts, .. } = parsed(&[
+        "--text",
+        "Password=hunter2",
+        "--text",
+        "Account Number=0150002954",
+        "Transfer fifty pesos",
+    ]) else {
+        panic!("a goal is a run");
+    };
+
+    assert_eq!(
+        texts,
+        [
+            ("Password".into(), "hunter2".into()),
+            ("Account Number".into(), "0150002954".into()),
+        ],
+    );
+}
+
+/// The value may hold an `=`, so only the first one separates.
+#[test]
+fn only_the_first_equals_separates_a_field_from_its_text() {
+    let Invocation::Run { texts, .. } = parsed(&["--text", "Formula=a=b", "go"]) else {
+        panic!("a goal is a run");
+    };
+
+    assert_eq!(texts, [("Formula".into(), "a=b".into())]);
+}
+
+/// Without one, there is no field to attach the text to.
+#[test]
+fn text_without_a_field_is_rejected() {
+    assert!(parse(["--text".to_owned(), "hunter2".to_owned(), "go".to_owned()]).is_err());
+}
