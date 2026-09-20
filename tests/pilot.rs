@@ -439,3 +439,31 @@ impl Device for Arrived {
         Some("com.google.android.apps.nexuslauncher".into())
     }
 }
+
+/// Naming the app puts the run in it before the first judgement, rather than
+/// hoping a launcher offers a way in. Measured: the icon was in neither the
+/// visible page nor the folder that looked right, and the run spent two
+/// judgements discovering that a screen cannot be reasoned into containing
+/// something it does not contain.
+#[test]
+fn naming_the_app_brings_it_to_the_front_before_anything_is_judged() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![answer("done", None, 0.99, 0.97)]),
+    };
+    let mut pilot = Pilot::new(Arrived::default(), judge, &Android)
+        .about(Some("com.android.settings".into()));
+
+    pilot.pursue("turn wifi on").expect("the run completes");
+
+    assert_eq!(
+        pilot.device().performed.first(),
+        Some(&Command::Launch("com.android.settings".into())),
+        "the named app is brought to the front first",
+    );
+    // Having been launched, the run is in it — not "away from" the launcher it
+    // never belonged to.
+    let seen = seen.borrow();
+    assert!(seen[0].get("started_in").is_none(), "{}", seen[0]);
+}

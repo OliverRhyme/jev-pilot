@@ -186,3 +186,31 @@ fn a_raised_floor_raises_the_costly_actions_too() {
     assert!((floors.for_operation(Operation::Blocked).get() - 0.9).abs() < f64::EPSILON);
     assert!((floors.for_operation(Operation::Tap).get() - 0.9).abs() < f64::EPSILON);
 }
+
+/// Naming the app a goal is about. A launcher is not a reliable way to reach
+/// one — the icon may be in a folder, in the drawer, or on a page that is not
+/// showing — and no amount of judgement fixes a screen that does not contain
+/// the thing being looked for.
+#[test]
+fn the_app_a_goal_is_about_can_be_named_on_the_command_line() {
+    let Invocation::Run { app, .. } = parsed(&[
+        "--app",
+        "com.example.wallet",
+        "Transfer fifty pesos",
+    ]) else {
+        panic!("a goal is a run");
+    };
+
+    assert_eq!(app.as_deref(), Some("com.example.wallet"));
+}
+
+/// Omitting it is the ordinary case: a run started on the app it is about
+/// takes the app from the screen in front of it.
+#[test]
+fn naming_the_app_is_optional() {
+    let Invocation::Run { app, .. } = parsed(&["Transfer fifty pesos"]) else {
+        panic!("a goal is a run");
+    };
+
+    assert_eq!(app, None);
+}

@@ -351,6 +351,8 @@ pub struct Pilot<'p, D, J, X = Halt, C = Mute> {
     certainty: f64,
     criteria: Vec<Criterion>,
     types: bool,
+    /// The application the goal is about, when the caller named one.
+    app: Option<Box<str>>,
     observer: Option<Observer<'p>>,
 }
 
@@ -375,6 +377,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             certainty: self.certainty,
             criteria: self.criteria,
             types: self.types,
+            app: self.app,
             observer: self.observer,
         }
     }
@@ -397,6 +400,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             certainty: self.certainty,
             criteria: self.criteria,
             types: true,
+            app: self.app,
             observer: self.observer,
         }
     }
@@ -416,6 +420,7 @@ impl<'p, D: Device, J: Judge> Pilot<'p, D, J, Halt, Mute> {
             certainty: Self::CERTAINTY,
             criteria: Vec::new(),
             types: false,
+            app: None,
             observer: None,
         }
     }
@@ -490,6 +495,19 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     #[must_use]
     pub const fn requiring(mut self, floor: Confidence) -> Self {
         self.floors = Floors::new(floor);
+        self
+    }
+
+    /// Name the application this goal is about.
+    ///
+    /// Brought to the front before the first judgement, and treated as the app
+    /// the run belongs to from then on. A launcher is not a reliable way to
+    /// reach an app — the icon may be in a folder, in the drawer, or on a page
+    /// that is not showing — and no amount of judgement fixes a screen that
+    /// does not contain the thing being looked for.
+    #[must_use]
+    pub fn about(mut self, app: Option<Box<str>>) -> Self {
+        self.app = app;
         self
     }
 
@@ -713,7 +731,14 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         // The app the goal is about: whichever one was in front when the run
         // was given it. A run can only tell it has wandered off by comparing
         // against somewhere, and nothing else in a run names an app.
-        let mut origin: Option<Box<str>> = None;
+        let mut origin: Option<Box<str>> = self.app.clone();
+        // Named rather than discovered: put the run where it was told to be,
+        // before anything is judged about where it is.
+        if let Some(app) = self.app.clone() {
+            self.device
+                .perform(&Command::Launch(app))
+                .map_err(RunError::Device)?;
+        }
         let launcher = self.device.home_screen_app();
         for index in 1..=self.limit {
             let snapshot = self.device.observe().map_err(RunError::Device)?;

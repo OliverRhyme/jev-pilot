@@ -248,8 +248,9 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
             accept,
             steps,
             floors,
+            app,
             desk,
-        } => pursue(&goal, device.as_deref(), accept, steps, floors, desk),
+        } => pursue(&goal, device.as_deref(), accept, steps, floors, app, desk),
     }
 }
 
@@ -375,6 +376,7 @@ fn pursue(
     accept: Vec<String>,
     steps: u32,
     floors: jev_pilot::act::Floors,
+    app: Option<Box<str>>,
     desk_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn core::error::Error>> {
     let dir = desk_dir.unwrap_or_else(|| std::env::temp_dir().join("jev-pilot-desk"));
@@ -402,6 +404,7 @@ fn pursue(
 
     let mut pilot = Pilot::new(device, judge, &Android)
         .with_floors(floors)
+        .about(app)
         .confirming(accept)
         .limited_to(steps)
         .escalating_to(move |impasse: &Impasse<'_>| choosing.choose(impasse))

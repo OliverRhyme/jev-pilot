@@ -29,6 +29,8 @@ pub enum Invocation {
         steps: u32,
         /// Below these confidences the run asks rather than acts.
         floors: crate::act::Floors,
+        /// The application the goal is about, when the caller named one.
+        app: Option<Box<str>>,
         /// Where questions are written for another decider to answer.
         desk: Option<std::path::PathBuf>,
     },
@@ -145,6 +147,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
     // Checked at construction, so the default is known good.
     let mut floor = Confidence::new(DEFAULT_FLOOR).unwrap_or(Confidence::ZERO);
     let mut desk = None;
+    let mut app: Option<Box<str>> = None;
     let mut options_ended = false;
 
     while let Some(word) = args.next() {
@@ -170,6 +173,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
                         got,
                     })?;
             }
+            "--app" => app = Some(value(&mut args, "--app")?.into_boxed_str()),
             "--floor" => {
                 let got = value(&mut args, "--floor")?;
                 let parsed = got.parse::<f64>().ok().and_then(Confidence::new);
@@ -185,6 +189,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
     let goal = goal.ok_or(CliError::NoGoal)?;
     Ok(Invocation::Run {
         floors: floors_from(floor),
+        app,
         goal: goal.into_boxed_str(),
         device,
         accept,
@@ -234,6 +239,8 @@ OPTIONS
                           accepted; repeatable. Only write claims about text
                           the final screen actually shows.
       --steps <n>         how many steps before giving up (default 15)
+      --app <package>     the app the goal is about; it is brought to the
+                          front first, and the run knows when it has left it
       --floor <0..1>      below this confidence the run asks you (default 0.6).
                           Lowering it applies to ordinary gestures only —
                           ending the run, and leaving the app, keep 0.6
