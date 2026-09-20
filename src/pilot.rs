@@ -493,6 +493,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         self
     }
 
+    /// Use these floors, already scaled per consequence by the caller.
+    #[must_use]
+    pub const fn with_floors(mut self, floors: Floors) -> Self {
+        self.floors = floors;
+        self
+    }
+
     /// Require more certainty for actions of a given consequence.
     ///
     /// A wrong tap on a list row is undone by going back; a wrong verdict ends

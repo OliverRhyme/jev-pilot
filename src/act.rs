@@ -351,7 +351,7 @@ pub enum Consequence {
 }
 
 /// How certain the model must be, per kind of consequence.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Floors {
     ordinary: Confidence,
     terminal: Confidence,

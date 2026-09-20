@@ -27,8 +27,8 @@ pub enum Invocation {
         accept: Vec<String>,
         /// How many steps before giving up.
         steps: u32,
-        /// Below this confidence the run asks rather than acts.
-        floor: Confidence,
+        /// Below these confidences the run asks rather than acts.
+        floors: crate::act::Floors,
         /// Where questions are written for another decider to answer.
         desk: Option<std::path::PathBuf>,
     },
@@ -184,13 +184,34 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
 
     let goal = goal.ok_or(CliError::NoGoal)?;
     Ok(Invocation::Run {
+        floors: floors_from(floor),
         goal: goal.into_boxed_str(),
         device,
         accept,
         steps,
-        floor,
         desk,
     })
+}
+
+/// What one number on the command line means for actions that cost differently.
+///
+/// `--floor` is reached for when a run keeps stopping to ask about ordinary
+/// gestures, and lowering it is the right answer to that. It is never an answer
+/// about the actions that end the run or leave the app: a run that gives up, or
+/// walks out of the app it was asked about, on a 0.41 guess has not been made
+/// cheaper, it has been made wrong. Those keep the default as their minimum.
+///
+/// Raising the floor raises all three. Asking for more care means more care
+/// everywhere, never less of it somewhere.
+fn floors_from(floor: Confidence) -> crate::act::Floors {
+    use crate::act::{Consequence, Floors};
+
+    // Checked at construction, so the default is known good.
+    let default = Confidence::new(DEFAULT_FLOOR).unwrap_or(Confidence::ZERO);
+    let careful = if floor > default { floor } else { default };
+    Floors::new(floor)
+        .requiring_for(Consequence::Terminal, careful)
+        .requiring_for(Consequence::Destructive, careful)
 }
 
 fn value(args: &mut impl Iterator<Item = String>, flag: &'static str) -> Result<String, CliError> {
@@ -213,7 +234,9 @@ OPTIONS
                           accepted; repeatable. Only write claims about text
                           the final screen actually shows.
       --steps <n>         how many steps before giving up (default 15)
-      --floor <0..1>      below this confidence the run asks you (default 0.6)
+      --floor <0..1>      below this confidence the run asks you (default 0.6).
+                          Lowering it applies to ordinary gestures only —
+                          ending the run, and leaving the app, keep 0.6
       --desk <dir>        where questions are written, so another decider can
                           answer them by writing <dir>/answer.json
   -h, --help              this text

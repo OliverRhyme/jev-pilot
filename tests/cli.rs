@@ -1,5 +1,6 @@
 //! Reading a command line. Pure: nothing here touches a device.
 
+use jev_pilot::act::Operation;
 use jev_pilot::cli::{Invocation, parse};
 
 fn parsed(words: &[&str]) -> Invocation {
@@ -39,7 +40,7 @@ fn a_device_and_acceptance_criteria_can_be_named() {
         device,
         accept,
         steps,
-        floor,
+        floors,
         ..
     } = parsed(&[
         "--device",
@@ -62,7 +63,7 @@ fn a_device_and_acceptance_criteria_can_be_named() {
     assert_eq!(device.as_deref(), Some("abc123"));
     assert_eq!(accept, ["Wi-Fi is on", "The network list is showing"]);
     assert_eq!(steps, 20);
-    assert!((floor.get() - 0.75).abs() < f64::EPSILON);
+    assert!((floors.for_operation(Operation::Tap).get() - 0.75).abs() < f64::EPSILON);
 }
 
 /// A floor outside 0..=1 is not a probability, and a step limit of zero would
@@ -140,4 +141,48 @@ fn the_catalog_can_be_looked_at_without_running_anything() {
 #[test]
 fn looking_at_a_screen_takes_no_goal() {
     assert!(parse(["observe".to_owned(), "Turn Wi-Fi on".to_owned()]).is_err());
+}
+
+/// `--floor` lowers what an ordinary gesture needs, because a run driving a
+/// busy screen is asked about every second tap otherwise. It must not lower
+/// what it takes to *end* the run: a verdict of "this cannot be done" is
+/// final, and a run that gives up on a 0.41 guess has answered the question
+/// wrongly rather than cheaply. Observed on a launcher, at step one.
+#[test]
+fn a_lowered_floor_does_not_let_a_run_quit_on_a_guess() {
+    let Invocation::Run { floors, .. } = parse([
+        "--floor".to_owned(),
+        "0.2".to_owned(),
+        "transfer some money".to_owned(),
+    ])
+    .expect("parses") else {
+        panic!("a goal is a run");
+    };
+
+    assert!((floors.for_operation(Operation::Tap).get() - 0.2).abs() < f64::EPSILON);
+    assert!(
+        floors.for_operation(Operation::Blocked).get() >= 0.6,
+        "ending the run keeps its own floor",
+    );
+    assert!(
+        floors.for_operation(Operation::Home).get() >= 0.6,
+        "leaving the app keeps its own floor",
+    );
+}
+
+/// Raising the floor raises all of them: asking for more care means more care
+/// everywhere, never less of it somewhere.
+#[test]
+fn a_raised_floor_raises_the_costly_actions_too() {
+    let Invocation::Run { floors, .. } = parse([
+        "--floor".to_owned(),
+        "0.9".to_owned(),
+        "transfer some money".to_owned(),
+    ])
+    .expect("parses") else {
+        panic!("a goal is a run");
+    };
+
+    assert!((floors.for_operation(Operation::Blocked).get() - 0.9).abs() < f64::EPSILON);
+    assert!((floors.for_operation(Operation::Tap).get() - 0.9).abs() < f64::EPSILON);
 }
