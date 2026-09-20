@@ -69,7 +69,7 @@ fn the_target_matching_the_chosen_operation_is_the_one_used() {
             &answers(serde_json::json!({
                 "operation": { "type": "choice", "choice": "tap", "confidence": 0.99 },
                 "tap_target": { "type": "choice", "choice": "A3", "confidence": 0.99 },
-                "goal_met": { "type": "noul", "noul": 0.02 },
+                "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
                 "is_error_screen": { "type": "noul", "noul": 0.01 }
             })),
             &Floors::new(Confidence::ZERO),
@@ -97,7 +97,7 @@ fn an_operation_without_a_target_ignores_the_speculative_heads() {
                 &answers(serde_json::json!({
                     "operation": { "type": "choice", "choice": choice, "confidence": 0.99 },
                     "tap_target": { "type": "choice", "choice": "A7", "confidence": 0.99 },
-                    "goal_met": { "type": "noul", "noul": 0.02 },
+                    "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
                     "is_error_screen": { "type": "noul", "noul": 0.01 }
                 })),
                 &Floors::new(Confidence::ZERO),
@@ -119,7 +119,7 @@ fn an_uncertain_target_is_refused_even_when_the_operation_is_certain() {
         &answers(serde_json::json!({
             "operation": { "type": "choice", "choice": "tap", "confidence": 0.99 },
             "tap_target": { "type": "choice", "choice": "A3", "confidence": 0.20 },
-            "goal_met": { "type": "noul", "noul": 0.02 },
+            "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
             "is_error_screen": { "type": "noul", "noul": 0.01 }
         })),
         &Floors::new(floor),

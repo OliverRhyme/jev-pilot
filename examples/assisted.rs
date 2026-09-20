@@ -139,7 +139,7 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         })
         .watching(|step| {
             println!(
-                "step {}  {} rows  goal_met {:.2}",
+                "step {}  {} rows  goal_met {}",
                 step.index,
                 step.rows.len(),
                 step.goal_met

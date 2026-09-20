@@ -25,7 +25,7 @@ fn a_step_asks_every_judgment_in_a_single_request() {
 
     assert_eq!(wire["operation"]["type"], "choice");
     assert_eq!(wire["tap_target"]["type"], "choice");
-    assert_eq!(wire["goal_met"]["type"], "noul");
+    assert_eq!(wire["goal_met"]["type"], "score");
     assert_eq!(wire["is_error_screen"]["type"], "noul");
 }
 
@@ -36,13 +36,16 @@ fn step_answers_parse_from_the_documented_response_shape() {
     let answers: StepAnswers = serde_json::from_value(serde_json::json!({
         "operation": { "type": "choice", "choice": "tap", "confidence": 0.88 },
         "tap_target": { "type": "choice", "choice": "A3", "confidence": 0.91 },
-        "goal_met": { "type": "noul", "noul": 0.02 },
+        "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
         "is_error_screen": { "type": "noul", "noul": 0.01 }
     }))
     .expect("answers parse");
 
     assert_eq!(answers.operation.confidence.get(), 0.88);
-    assert_eq!(answers.goal_met.noul, 0.02);
+    assert_eq!(
+        answers.goal_met.progress(),
+        jev_pilot::judgment::Progress::NotStarted
+    );
 }
 
 /// The endpoint wraps answers in an envelope carrying the concrete model
@@ -55,7 +58,7 @@ fn the_response_envelope_is_decoded_around_the_answers() {
         "answers": {
             "operation": { "type": "choice", "choice": "tap", "confidence": 1.0 },
             "tap_target": { "type": "choice", "choice": "A3", "confidence": 1.0 },
-            "goal_met": { "type": "noul", "noul": 0.04 },
+            "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
             "is_error_screen": { "type": "noul", "noul": 0.02 }
         },
         "usage": { "input_tokens": 900, "output_tokens": 189 }
@@ -77,8 +80,8 @@ fn a_probability_that_is_not_one_is_refused_at_the_boundary() {
     let malformed = |value: serde_json::Value| {
         serde_json::from_value::<StepAnswers>(serde_json::json!({
             "operation": { "type": "choice", "choice": "done", "confidence": 0.9 },
-            "goal_met": { "type": "noul", "noul": value },
-            "is_error_screen": { "type": "noul", "noul": 0.01 }
+            "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+            "is_error_screen": { "type": "noul", "noul": value }
         }))
     };
 

@@ -11,7 +11,7 @@ fn answers(operation: &str, confidence: f64) -> StepAnswers {
     serde_json::from_value(serde_json::json!({
         "operation": { "type": "choice", "choice": operation, "confidence": confidence },
         "tap_target": { "type": "choice", "choice": "A3", "confidence": 0.99 },
-        "goal_met": { "type": "noul", "noul": 0.02 },
+        "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
         "is_error_screen": { "type": "noul", "noul": 0.01 }
     }))
     .expect("answers parse")

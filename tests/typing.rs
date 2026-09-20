@@ -92,7 +92,7 @@ fn a_typing_decision_comes_back_needing_words() {
                 "operation": { "type": "choice", "choice": "type_text", "confidence": 0.95 },
                 "tap_target": { "type": "choice", "choice": "A1", "confidence": 0.9 },
                 "type_field": { "type": "choice", "choice": "A1", "confidence": 0.95 },
-                "goal_met": { "type": "noul", "noul": 0.02 },
+                "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
                 "is_error_screen": { "type": "noul", "noul": 0.01 }
             })),
             &Floors::new(Confidence::ZERO),
@@ -120,7 +120,7 @@ fn a_non_typing_decision_is_ready_as_it_stands() {
             &answers(serde_json::json!({
                 "operation": { "type": "choice", "choice": "tap", "confidence": 0.95 },
                 "tap_target": { "type": "choice", "choice": "A2", "confidence": 0.95 },
-                "goal_met": { "type": "noul", "noul": 0.02 },
+                "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
                 "is_error_screen": { "type": "noul", "noul": 0.01 }
             })),
             &Floors::new(Confidence::ZERO),

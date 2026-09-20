@@ -58,7 +58,7 @@ fn answer(
 ) -> serde_json::Value {
     let mut turn = serde_json::json!({
         "operation": { "type": "choice", "choice": operation, "confidence": confidence },
-        "goal_met": { "type": "noul", "noul": goal_met },
+        "goal_met": { "type": "score", "score": goal_met, "confidence": 0.9 },
         "is_error_screen": { "type": "noul", "noul": 0.01 },
     });
     if let Some(row) = target {

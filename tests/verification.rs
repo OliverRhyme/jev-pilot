@@ -2,6 +2,7 @@
 
 use jev_pilot::act::Outcome;
 use jev_pilot::device::{Command, Device};
+use jev_pilot::judgment::Criterion;
 use jev_pilot::pilot::{Ending, Judge, Pilot};
 use jev_pilot::platform::{Android, Platform};
 use jev_pilot::snapshot::Snapshot;
@@ -61,7 +62,7 @@ impl Judge for Scripted {
 fn verdict(check: f64) -> serde_json::Value {
     serde_json::json!({
         "operation": { "type": "choice", "choice": "done", "confidence": 0.99 },
-        "goal_met": { "type": "noul", "noul": 0.95 },
+        "goal_met": { "type": "score", "score": 1.9, "confidence": 0.9 },
         "is_error_screen": { "type": "noul", "noul": 0.01 },
         "check_0": { "type": "noul", "noul": check },
     })
@@ -70,7 +71,7 @@ fn verdict(check: f64) -> serde_json::Value {
 fn keep_going() -> serde_json::Value {
     serde_json::json!({
         "operation": { "type": "choice", "choice": "back", "confidence": 0.99 },
-        "goal_met": { "type": "noul", "noul": 0.05 },
+        "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
         "is_error_screen": { "type": "noul", "noul": 0.01 },
         "check_0": { "type": "noul", "noul": 0.02 },
     })
@@ -167,7 +168,7 @@ fn a_verdict_on_an_empty_screen_is_not_accepted() {
     let confident = || {
         serde_json::json!({
             "operation": { "type": "choice", "choice": "done", "confidence": 0.99 },
-            "goal_met": { "type": "noul", "noul": 0.99 },
+            "goal_met": { "type": "score", "score": 1.9, "confidence": 0.9 },
             "is_error_screen": { "type": "noul", "noul": 0.01 },
             "check_0": { "type": "noul", "noul": 0.99 },
         })
@@ -186,4 +187,49 @@ fn a_verdict_on_an_empty_screen_is_not_accepted() {
         Ending::OutOfSteps { limit: 2 },
         "nothing on screen cannot confirm anything"
     );
+}
+
+/// A criterion may say what a yes and a no look like for it specifically.
+///
+/// The generic pair ("the screen plainly shows this to be so" / "it is not so,
+/// or cannot be told") is a fallback, not a good answer: the guidance is to put
+/// the boundary cases in the criteria, and only the caller knows where the
+/// boundary of their own claim lies.
+#[test]
+fn a_criterion_may_carry_its_own_boundary_cases() {
+    let judge = Scripted::new(vec![verdict(0.97)]);
+    let mut pilot = Pilot::new(Fake::default(), judge, &Android).confirming([Criterion::that(
+        "The thing playing is a full-length video",
+    )
+    .where_true("A player is open on an item lasting minutes, with a scrubber")
+    .where_false("A Short, a preview, a thumbnail, or a still results list")]);
+
+    pilot.pursue("Play a video").expect("completes");
+
+    let asked = &pilot.judge().asked.borrow()[0];
+    let poles = &asked["check_0"]["criteria"];
+    assert!(
+        poles["true"].as_str().unwrap_or("").contains("scrubber"),
+        "{poles}"
+    );
+    assert!(
+        poles["false"].as_str().unwrap_or("").contains("Short"),
+        "{poles}"
+    );
+}
+
+/// A bare string still works, and gets the generic pair.
+#[test]
+fn a_plain_string_is_still_a_criterion() {
+    let judge = Scripted::new(vec![verdict(0.97)]);
+    let mut pilot = Pilot::new(Fake::default(), judge, &Android).confirming(["A video is playing"]);
+
+    pilot.pursue("Play a video").expect("completes");
+
+    let asked = &pilot.judge().asked.borrow()[0];
+    assert_eq!(
+        asked["check_0"]["instructions"]["criterion"],
+        "A video is playing"
+    );
+    assert!(asked["check_0"]["criteria"]["true"].is_string());
 }

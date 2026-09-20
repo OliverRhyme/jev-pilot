@@ -194,6 +194,84 @@ pub struct Poles {
     pub no: Box<str>,
 }
 
+/// One claim that must hold before success is accepted.
+///
+/// A bare string is enough and gets a generic pair of poles. Supplying your own
+/// is better where the claim has a boundary: the guidance is to state the exact
+/// condition in the instructions and put the boundary cases in the criteria,
+/// and only the caller knows where the edge of their own claim lies.
+#[derive(Debug, Clone)]
+pub struct Criterion {
+    claim: Box<str>,
+    when_true: Option<Box<str>>,
+    when_false: Option<Box<str>>,
+}
+
+impl Criterion {
+    /// A claim, with the generic poles.
+    #[must_use]
+    pub fn that(claim: impl Into<Box<str>>) -> Self {
+        Self {
+            claim: claim.into(),
+            when_true: None,
+            when_false: None,
+        }
+    }
+
+    /// What a yes looks like for this claim.
+    #[must_use]
+    pub fn where_true(mut self, meaning: impl Into<Box<str>>) -> Self {
+        self.when_true = Some(meaning.into());
+        self
+    }
+
+    /// What a no looks like for this claim.
+    #[must_use]
+    pub fn where_false(mut self, meaning: impl Into<Box<str>>) -> Self {
+        self.when_false = Some(meaning.into());
+        self
+    }
+
+    /// The claim itself.
+    #[must_use]
+    pub fn claim(&self) -> &str {
+        &self.claim
+    }
+
+    /// The poles to send, falling back to a generic pair.
+    #[must_use]
+    pub fn poles(&self) -> Poles {
+        Poles {
+            yes: self
+                .when_true
+                .clone()
+                .unwrap_or_else(|| "The screen plainly shows this to be so".into()),
+            no: self
+                .when_false
+                .clone()
+                .unwrap_or_else(|| "It is not so, or cannot be told from this screen".into()),
+        }
+    }
+}
+
+impl From<&str> for Criterion {
+    fn from(claim: &str) -> Self {
+        Self::that(claim)
+    }
+}
+
+impl From<String> for Criterion {
+    fn from(claim: String) -> Self {
+        Self::that(claim)
+    }
+}
+
+impl From<Box<str>> for Criterion {
+    fn from(claim: Box<str>) -> Self {
+        Self::that(claim)
+    }
+}
+
 /// A question the model is asked to answer.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -212,6 +290,13 @@ pub enum Question<I: Serialize> {
         /// The options to choose between.
         criteria: Options,
     },
+    /// A position along a described spectrum.
+    Score {
+        /// The question being asked.
+        instructions: I,
+        /// The levels, lowest first. Their order is what the answer means.
+        criteria: Vec<Box<str>>,
+    },
 }
 
 /// The answer to a Choice.
@@ -228,6 +313,80 @@ pub struct Chosen {
     /// useful thing anyone deciding next can be told.
     #[serde(default)]
     pub probabilities: BTreeMap<Box<str>, f64>,
+}
+
+/// How far along something is, as a Score answers it.
+///
+/// A yes/no forces three situations into two answers: the screen has nothing
+/// to do with the goal, the screen is a step along the way, and the goal is
+/// done. The first two both come back near zero, and a loop reading that
+/// cannot tell a wrong turn from progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Progress {
+    /// Nothing here relates to the goal.
+    NotStarted,
+    /// A step towards the goal, but not the goal.
+    UnderWay,
+    /// The goal is done.
+    Achieved,
+}
+
+impl fmt::Display for Progress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NotStarted => "not started",
+            Self::UnderWay => "under way",
+            Self::Achieved => "achieved",
+        })
+    }
+}
+
+impl Progress {
+    /// The levels, lowest first, as the question offers them.
+    ///
+    /// Written as concrete situations rather than labels: a level description
+    /// has to stand on its own for the position between them to mean anything.
+    #[must_use]
+    pub fn levels() -> Vec<Box<str>> {
+        vec![
+            "Nothing on this screen relates to the goal".into(),
+            "This screen is a step towards the goal, but the goal is not done".into(),
+            "This screen shows the finished result the goal describes".into(),
+        ]
+    }
+
+    /// Read a level from the probability-weighted position the API returns.
+    ///
+    /// The value lands between levels, so each is claimed by the half-interval
+    /// around it rather than by an exact match.
+    #[must_use]
+    pub fn from_score(score: f64) -> Self {
+        if score >= 1.5 {
+            Self::Achieved
+        } else if score >= 0.75 {
+            Self::UnderWay
+        } else {
+            Self::NotStarted
+        }
+    }
+}
+
+/// The answer to a Score.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Graded {
+    /// The probability-weighted position across the levels.
+    pub score: f64,
+    /// How concentrated the distribution was.
+    pub confidence: Confidence,
+}
+
+impl Graded {
+    /// Which level this lands on.
+    #[must_use]
+    pub fn progress(&self) -> Progress {
+        Progress::from_score(self.score)
+    }
 }
 
 /// The answer to a Noul: the probability that the answer is yes.

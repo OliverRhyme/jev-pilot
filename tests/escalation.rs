@@ -46,7 +46,7 @@ fn unsure() -> serde_json::Value {
     serde_json::json!({
         "operation": { "type": "choice", "choice": "tap", "confidence": 0.30 },
         "tap_target": { "type": "choice", "choice": "A8", "confidence": 0.30 },
-        "goal_met": { "type": "noul", "noul": 0.02 },
+        "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
         "is_error_screen": { "type": "noul", "noul": 0.01 },
     })
 }
@@ -90,7 +90,7 @@ fn an_escalation_may_choose_from_the_same_options_jev_had() {
             unsure(),
             serde_json::json!({
                 "operation": { "type": "choice", "choice": "done", "confidence": 0.99 },
-                "goal_met": { "type": "noul", "noul": 0.99 },
+                "goal_met": { "type": "score", "score": 1.9, "confidence": 0.9 },
                 "is_error_screen": { "type": "noul", "noul": 0.01 },
             }),
         ])),
@@ -225,7 +225,7 @@ fn the_impasse_carries_what_jev_was_torn_between() {
                 "type": "choice", "choice": "A3", "confidence": 0.28,
                 "probabilities": { "A3": 0.40, "A4": 0.38 }
             },
-            "goal_met": { "type": "noul", "noul": 0.02 },
+            "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
             "is_error_screen": { "type": "noul", "noul": 0.01 },
         })])),
         &Android,
@@ -256,4 +256,50 @@ fn the_impasse_carries_what_jev_was_torn_between() {
             .any(|(name, p)| &**name == "scroll_down" && (*p - 0.41).abs() < 1e-9),
         "the near miss must be visible: {alternatives:?}"
     );
+}
+
+/// A row that turns out to be covered is a reason to choose something else,
+/// not a reason to abandon the run. Observed live: a tap resolved to an element
+/// hidden behind a bar, and the whole run ended with an error mid-task.
+#[test]
+fn a_covered_row_is_an_impasse_rather_than_a_failure() {
+    use jev_pilot::snapshot::{Bounds, Element};
+
+    struct Covered;
+    impl Device for Covered {
+        type Error = Infallible;
+        fn observe(&mut self) -> Result<Snapshot, Infallible> {
+            let at = |t, b| Element {
+                label: "row".into(),
+                detail: None,
+                editable: false,
+                bounds: Bounds {
+                    left: 0,
+                    top: t,
+                    right: 100,
+                    bottom: b,
+                },
+            };
+            // The first row is entirely beneath the second.
+            Ok(Snapshot::new(vec![at(50, 60), at(0, 200)]).expect("a screen"))
+        }
+        fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+            Ok(())
+        }
+    }
+
+    let turn = serde_json::json!({
+        "operation": { "type": "choice", "choice": "tap", "confidence": 0.99 },
+        "tap_target": { "type": "choice", "choice": "A1", "confidence": 0.99 },
+        "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+        "is_error_screen": { "type": "noul", "noul": 0.01 },
+    });
+
+    let mut pilot = Pilot::new(Covered, Scripted(RefCell::new(vec![turn])), &Android);
+
+    let ending = pilot
+        .pursue("Tap the hidden row")
+        .expect("the run must not fail");
+
+    assert!(matches!(ending, Ending::Uncertain { .. }), "got {ending:?}");
 }

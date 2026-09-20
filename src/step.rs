@@ -10,7 +10,9 @@
 //! step asking three narrow things costs the round trip of one.
 
 use crate::act::{Catalog, Deciding, Operation};
-use crate::judgment::{Chosen, Confidence, Likelihood, Poles, Question};
+use crate::judgment::{
+    Chosen, Confidence, Criterion, Graded, Likelihood, Poles, Progress, Question,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -25,8 +27,11 @@ pub struct Checking<'a> {
     /// otherwise judged against whatever the reader takes the goal to mean. A
     /// Short about the right subject satisfies "play a video about Jev" on a
     /// loose reading and fails it on the one that was intended.
-    #[serde(skip_serializing_if = "<[Box<str>]>::is_empty")]
-    pub must_also: &'a [Box<str>],
+    #[serde(
+        serialize_with = "claims",
+        skip_serializing_if = "<[Criterion]>::is_empty"
+    )]
+    pub must_also: &'a [Criterion],
     /// The judgment being asked.
     pub question: &'static str,
 }
@@ -59,7 +64,7 @@ pub struct StepQuestions<'a> {
     /// Which field to type into, when the screen has one and typing is offered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_field: Option<Question<Deciding<'a>>>,
-    /// Whether the goal is already satisfied.
+    /// How far along the goal is.
     pub goal_met: Question<Checking<'a>>,
     /// Whether the screen is an error state.
     pub is_error_screen: Question<&'static str>,
@@ -91,7 +96,7 @@ impl<'a> StepQuestions<'a> {
 
     /// Build the questions, with acceptance criteria to confirm alongside.
     #[must_use]
-    pub fn checked(goal: &'a str, catalog: &Catalog, criteria: &'a [Box<str>]) -> Self {
+    pub fn checked(goal: &'a str, catalog: &Catalog, criteria: &'a [Criterion]) -> Self {
         let checks = criteria
             .iter()
             .enumerate()
@@ -101,13 +106,10 @@ impl<'a> StepQuestions<'a> {
                     Question::Noul {
                         instructions: Confirming {
                             goal,
-                            criterion,
+                            criterion: criterion.claim(),
                             question: "Is `criterion` true of the current screen?",
                         },
-                        criteria: Poles {
-                            yes: "The screen plainly shows this to be so".into(),
-                            no: "It is not so, or cannot be told from this screen".into(),
-                        },
+                        criteria: criterion.poles(),
                     },
                 )
             })
@@ -118,7 +120,7 @@ impl<'a> StepQuestions<'a> {
     fn assembled(
         goal: &'a str,
         catalog: &Catalog,
-        criteria: &'a [Box<str>],
+        criteria: &'a [Criterion],
         checks: BTreeMap<Box<str>, Question<Confirming<'a>>>,
     ) -> Self {
         Self {
@@ -129,17 +131,14 @@ impl<'a> StepQuestions<'a> {
                 .contains(&Operation::TypeText)
                 .then(|| catalog.type_field_question(goal))
                 .flatten(),
-            goal_met: Question::Noul {
+            goal_met: Question::Score {
                 instructions: Checking {
                     goal,
                     must_also: criteria,
-                    question: "Is `goal` already fully accomplished on the current screen, \
-                               including everything in `must_also`?",
+                    question: "How far towards `goal` does the current screen get, \
+                               counting everything in `must_also` as part of it?",
                 },
-                criteria: Poles {
-                    yes: "The screen shows the finished result the goal describes".into(),
-                    no: "The goal is unstarted, partially done, or not visible here".into(),
-                },
+                criteria: Progress::levels(),
             },
             checks,
             is_error_screen: Question::Noul {
@@ -165,8 +164,8 @@ pub struct StepAnswers {
     /// The field it would type into, if the operation is typing.
     #[serde(default)]
     pub type_field: Option<Chosen>,
-    /// How likely the goal is already met.
-    pub goal_met: Likelihood,
+    /// How far along the goal is.
+    pub goal_met: Graded,
     /// How likely the screen is an error state.
     pub is_error_screen: Likelihood,
     /// One answer per acceptance criterion, keyed to match the questions.
@@ -180,15 +179,25 @@ impl StepAnswers {
     /// A verdict that passes `goal_met` can still fail here: that is the whole
     /// point of asking separately.
     #[must_use]
-    pub fn unmet<'c>(&self, criteria: &'c [Box<str>], certainty: f64) -> Option<&'c str> {
+    pub fn unmet<'c>(&self, criteria: &'c [Criterion], certainty: f64) -> Option<&'c str> {
         criteria.iter().enumerate().find_map(|(index, criterion)| {
             let key = format!("check_{index}");
             match self.checks.get(key.as_str()) {
                 Some(answer) if answer.noul > certainty => None,
                 // A missing answer counts as unmet: a criterion nobody
                 // confirmed is not a criterion that was met.
-                _ => Some(&**criterion),
+                _ => Some(criterion.claim()),
             }
         })
     }
+}
+
+/// Serialise criteria as the claims they make, not as their whole shape.
+fn claims<S: serde::Serializer>(criteria: &[Criterion], serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(criteria.len()))?;
+    for criterion in criteria {
+        seq.serialize_element(criterion.claim())?;
+    }
+    seq.end()
 }

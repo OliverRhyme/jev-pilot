@@ -6,7 +6,7 @@
 
 use crate::act::{Act, Catalog, Consequence, Decision, Floors, Indecision, Operation, Outcome};
 use crate::device::{Command, Device, command_for};
-use crate::judgment::Confidence;
+use crate::judgment::{Confidence, Criterion, Progress};
 use crate::platform::Platform;
 use crate::snapshot::{Element, Snapshot, TapError};
 use crate::step::{StepAnswers, StepQuestions};
@@ -276,8 +276,8 @@ pub struct StepReport<'s> {
     pub operation_confidence: Confidence,
     /// How sure it was about *which row*, when it named one.
     pub target_confidence: Option<Confidence>,
-    /// How likely the goal was already met.
-    pub goal_met: f64,
+    /// How far along the goal was judged to be.
+    pub goal_met: Progress,
     /// How likely the screen was an error state.
     pub is_error_screen: f64,
 }
@@ -295,6 +295,35 @@ pub type RunResult<D, J, X, C> = Result<Ending, Failure<D, J, X, C>>;
 
 /// Something told about each step as it happens.
 type Observer<'p> = Box<dyn FnMut(&StepReport<'_>) + 'p>;
+
+/// What came of turning a decision into something the device can do.
+enum Reached {
+    /// Carry this out.
+    Command(Command),
+    /// There is nothing to carry out; the act does not touch the device.
+    Nothing,
+    /// The row is covered and no alternative was offered.
+    Unreachable,
+}
+
+/// Gather one step's context for whatever has to decide about it.
+const fn taken_at<'s>(
+    goal: &'s str,
+    step: u32,
+    snapshot: &'s Snapshot,
+    catalog: &'s Catalog,
+    answers: &'s StepAnswers,
+    previous: Option<&'s str>,
+) -> Taken<'s> {
+    Taken {
+        goal,
+        step,
+        snapshot,
+        catalog,
+        answers,
+        previous,
+    }
+}
 
 /// One step, as everything that decides about it needs to see it.
 struct Taken<'s> {
@@ -320,7 +349,7 @@ pub struct Pilot<'p, D, J, X = Halt, C = Mute> {
     floors: Floors,
     limit: u32,
     certainty: f64,
-    criteria: Vec<Box<str>>,
+    criteria: Vec<Criterion>,
     types: bool,
     observer: Option<Observer<'p>>,
 }
@@ -437,7 +466,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// about three things at once has no coherent yes. Splitting costs nothing,
     /// because they are evaluated in the same parallel pass.
     #[must_use]
-    pub fn confirming<S: Into<Box<str>>>(mut self, criteria: impl IntoIterator<Item = S>) -> Self {
+    pub fn confirming<K: Into<Criterion>>(mut self, criteria: impl IntoIterator<Item = K>) -> Self {
         self.criteria = criteria.into_iter().map(Into::into).collect();
         self
     }
@@ -507,9 +536,31 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             chosen,
             operation_confidence: answers.operation.confidence,
             target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),
-            goal_met: answers.goal_met.noul,
+            goal_met: answers.goal_met.progress(),
             is_error_screen: answers.is_error_screen.noul,
         });
+    }
+
+    /// Turn an act into something the device can do, recovering from a covered row.
+    ///
+    /// A row that turns out to be hidden behind what is drawn over it is a
+    /// reason to choose something else, not to abandon the run: the screen is
+    /// fine, this one row is simply not reachable. `None` means even the second
+    /// opinion had nothing to offer.
+    fn reach(&mut self, act: &Act, at: &Taken<'_>) -> Result<Reached, Failure<D, J, X, C>> {
+        fn settle(command: Option<Command>) -> Reached {
+            command.map_or(Reached::Nothing, Reached::Command)
+        }
+        match command_for(act, at.snapshot) {
+            Ok(command) => Ok(settle(command)),
+            Err(TapError::Obscured(_)) => match self.consult(at, &Indecision::Covered)? {
+                Some(Decision::Ready(instead)) => command_for(&instead, at.snapshot)
+                    .map(settle)
+                    .map_err(RunError::Unreachable),
+                _ => Ok(Reached::Unreachable),
+            },
+            Err(stale) => Err(RunError::Unreachable(stale)),
+        }
     }
 
     /// Why a verdict of success should not be taken at face value, if it should not.
@@ -602,6 +653,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// Returns [`RunError`] when the device or the judge fails. A run that
     /// merely does not succeed — uncertain, blocked, out of steps — is an
     /// [`Ending`], not an error.
+    // The loop reads as one sequence — observe, judge, guard, decide, act —
+    // and splitting it further scatters an order that has to be followed.
+    #[allow(clippy::too_many_lines)]
     pub fn pursue(&mut self, goal: &str) -> RunResult<D, J, X, C> {
         let mut previous: Option<String> = None;
         for index in 1..=self.limit {
@@ -631,8 +685,10 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // nothing, and a confident yes is a judgement about an empty room.
             let blind = snapshot.is_empty();
 
+            let reached = answers.goal_met.progress();
+
             if !blind
-                && answers.goal_met.noul > self.certainty
+                && reached == Progress::Achieved
                 && let Some(unmet) = answers.unmet(&self.criteria, self.certainty)
             {
                 // Reached something that passes for the goal without being it.
@@ -643,7 +699,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 ));
                 continue;
             }
-            if !blind && answers.goal_met.noul > self.certainty {
+            if !blind && reached == Progress::Achieved {
                 self.report(index, &snapshot, &answers, None);
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
@@ -714,9 +770,28 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             }
 
             previous = Some(recount(&act, &snapshot));
-            let command = command_for(&act, &snapshot).map_err(RunError::Unreachable)?;
-            if let Some(command) = command {
-                self.device.perform(&command).map_err(RunError::Device)?;
+            let resolved = self.reach(
+                &act,
+                &taken_at(
+                    goal,
+                    index,
+                    &snapshot,
+                    &catalog,
+                    &answers,
+                    previous.as_deref(),
+                ),
+            )?;
+            match resolved {
+                Reached::Command(command) => {
+                    self.device.perform(&command).map_err(RunError::Device)?;
+                }
+                Reached::Nothing => {}
+                Reached::Unreachable => {
+                    self.report(index, &snapshot, &answers, None);
+                    return Ok(Ending::Uncertain {
+                        because: Indecision::Covered,
+                    });
+                }
             }
         }
         Ok(Ending::OutOfSteps { limit: self.limit })

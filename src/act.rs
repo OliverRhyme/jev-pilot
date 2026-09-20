@@ -416,6 +416,8 @@ pub enum Indecision {
     },
     /// The operation needs a row to act on and none was chosen.
     NoTarget,
+    /// The row chosen is covered by whatever is drawn over it.
+    Covered,
 }
 
 impl fmt::Display for Indecision {
@@ -429,6 +431,7 @@ impl fmt::Display for Indecision {
             ),
             Self::NotOffered { what } => write!(f, "{what} was not offered"),
             Self::NoTarget => write!(f, "the operation needs a target and none was chosen"),
+            Self::Covered => write!(f, "the row chosen is covered by what is drawn over it"),
         }
     }
 }
