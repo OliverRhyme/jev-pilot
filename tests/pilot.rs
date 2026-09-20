@@ -619,7 +619,7 @@ struct Oscillating {
 impl Device for Oscillating {
     type Error = Infallible;
     fn observe(&mut self) -> Result<Snapshot, Infallible> {
-        Ok(if self.acts % 2 == 0 {
+        Ok(if self.acts.is_multiple_of(2) {
             screen_of(&["Go Back", "Select a method"])
         } else {
             screen_of(&["Go Back"])

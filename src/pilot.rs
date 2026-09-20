@@ -824,12 +824,14 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     describe(
                         &catalog,
                         self.platform,
-                        previous.as_deref(),
-                        snapshot.app(),
-                        origin.as_deref(),
-                        snapshot.keyboard_open(),
-                        &snapshot.notices().collect::<Vec<_>>(),
-                        seen_before,
+                        &Standing {
+                            previous: previous.as_deref(),
+                            app: snapshot.app(),
+                            origin: origin.as_deref(),
+                            keyboard_open: snapshot.keyboard_open(),
+                            says: &snapshot.notices().collect::<Vec<_>>(),
+                            seen_before,
+                        },
                     ),
                     &questions,
                 )
@@ -997,16 +999,34 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
 /// "is the goal met?" is made by something with no memory: it cannot tell a
 /// screen it has just reached from one it has been stuck on for five turns,
 /// nor whether its last action changed anything at all.
+struct Standing<'s> {
+    /// What the previous step did, if there was one.
+    previous: Option<&'s str>,
+    /// Which application this screen belongs to.
+    app: Option<&'s str>,
+    /// The application the goal is about, when it is a different one.
+    origin: Option<&'s str>,
+    /// Whether the soft keyboard is covering part of the screen.
+    keyboard_open: bool,
+    /// What the screen says, beyond what it offers to act on.
+    says: &'s [&'s str],
+    /// How many steps ago this screen was last judged, if it was.
+    seen_before: Option<u32>,
+}
+
 fn describe(
     catalog: &Catalog,
     platform: &dyn Platform,
-    previous: Option<&str>,
-    app: Option<&str>,
-    origin: Option<&str>,
-    keyboard_open: bool,
-    says: &[&str],
-    seen_before: Option<u32>,
+    where_it_stands: &Standing<'_>,
 ) -> serde_json::Value {
+    let &Standing {
+        previous,
+        app,
+        origin,
+        keyboard_open,
+        says,
+        seen_before,
+    } = where_it_stands;
     // Rows are keyed the way the Choice offers them, so its options can be
     // bare keys and the text travels once rather than twice.
     let keyed = |pairs: &mut dyn Iterator<Item = (crate::judgment::OptionId, &str)>| {
