@@ -278,7 +278,18 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
             app,
             texts,
             desk,
-        } => pursue(&goal, device.as_deref(), accept, steps, floors, app, texts, desk),
+        } => pursue(
+            device.as_deref(),
+            Plan {
+                goal,
+                accept,
+                steps,
+                floors,
+                app,
+                texts,
+                desk_dir: desk,
+            },
+        ),
     }
 }
 
@@ -406,16 +417,32 @@ device. It answers only on loopback, only to a caller holding a token this
 host generates per run, and it sends nothing anywhere. The source is in
 `helper/` and it is built from that source, not downloaded.";
 
-fn pursue(
-    goal: &str,
-    named: Option<&str>,
+/// Everything a run needs beyond the device it is pointed at.
+///
+/// One value rather than eight arguments: they arrive together from the
+/// command line and travel together to the loop, and a list this long is read
+/// by position, which is how the wrong two get swapped.
+struct Plan {
+    goal: Box<str>,
     accept: Vec<String>,
     steps: u32,
     floors: jev_pilot::act::Floors,
     app: Option<Box<str>>,
     texts: Vec<(Box<str>, Box<str>)>,
     desk_dir: Option<PathBuf>,
-) -> Result<(), Box<dyn core::error::Error>> {
+}
+
+fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Error>> {
+    let Plan {
+        goal,
+        accept,
+        steps,
+        floors,
+        app,
+        texts,
+        desk_dir,
+    } = plan;
+    let goal = &*goal;
     let dir = desk_dir.unwrap_or_else(|| std::env::temp_dir().join("jev-pilot-desk"));
     let desk = Rc::new(Desk::new(dir.clone(), texts)?);
 
