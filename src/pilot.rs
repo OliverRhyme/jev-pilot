@@ -4,11 +4,11 @@
 //! client, so the loop's control flow — the guards, the confidence floor, the
 //! step limit — is tested against scripted answers instead of against a model.
 
-use crate::act::{Act, Catalog, Decision, Indecision, Operation, Outcome};
+use crate::act::{Act, Catalog, Consequence, Decision, Floors, Indecision, Operation, Outcome};
 use crate::device::{Command, Device, command_for};
 use crate::judgment::Confidence;
 use crate::platform::Platform;
-use crate::snapshot::{Element, Snapshot, StaleRef};
+use crate::snapshot::{Element, Snapshot, TapError};
 use crate::step::{StepAnswers, StepQuestions};
 use core::fmt;
 
@@ -223,8 +223,8 @@ pub enum RunError<D, J, X, C> {
     Escalation(X),
     /// The text to type could not be written.
     Composition(C),
-    /// An action named a screen that had already been replaced.
-    Stale(StaleRef),
+    /// An action could not be turned into a point on the screen.
+    Unreachable(TapError),
 }
 
 impl<D: fmt::Display, J: fmt::Display, X: fmt::Display, C: fmt::Display> fmt::Display
@@ -236,7 +236,7 @@ impl<D: fmt::Display, J: fmt::Display, X: fmt::Display, C: fmt::Display> fmt::Di
             Self::Judge(inner) => write!(f, "judge: {inner}"),
             Self::Escalation(inner) => write!(f, "escalation: {inner}"),
             Self::Composition(inner) => write!(f, "composing text: {inner}"),
-            Self::Stale(inner) => write!(f, "{inner}"),
+            Self::Unreachable(inner) => write!(f, "{inner}"),
         }
     }
 }
@@ -254,7 +254,7 @@ where
             Self::Judge(inner) => Some(inner),
             Self::Escalation(inner) => Some(inner),
             Self::Composition(inner) => Some(inner),
-            Self::Stale(inner) => Some(inner),
+            Self::Unreachable(inner) => Some(inner),
         }
     }
 }
@@ -317,9 +317,10 @@ pub struct Pilot<'p, D, J, X = Halt, C = Mute> {
     escalation: X,
     composer: C,
     platform: &'p dyn Platform,
-    floor: Confidence,
+    floors: Floors,
     limit: u32,
     certainty: f64,
+    criteria: Vec<Box<str>>,
     types: bool,
     observer: Option<Observer<'p>>,
 }
@@ -340,9 +341,10 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             escalation,
             composer: self.composer,
             platform: self.platform,
-            floor: self.floor,
+            floors: self.floors,
             limit: self.limit,
             certainty: self.certainty,
+            criteria: self.criteria,
             types: self.types,
             observer: self.observer,
         }
@@ -361,9 +363,10 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             escalation: self.escalation,
             composer,
             platform: self.platform,
-            floor: self.floor,
+            floors: self.floors,
             limit: self.limit,
             certainty: self.certainty,
+            criteria: self.criteria,
             types: true,
             observer: self.observer,
         }
@@ -379,9 +382,10 @@ impl<'p, D: Device, J: Judge> Pilot<'p, D, J, Halt, Mute> {
             escalation: Halt,
             composer: Mute,
             platform,
-            floor: Confidence::ZERO,
+            floors: Floors::new(Confidence::ZERO),
             limit: Self::STEP_LIMIT,
             certainty: Self::CERTAINTY,
+            criteria: Vec::new(),
             types: false,
             observer: None,
         }
@@ -398,7 +402,7 @@ impl<D: fmt::Debug, J: fmt::Debug, X: fmt::Debug, C: fmt::Debug> fmt::Debug
             .field("escalation", &self.escalation)
             .field("composer", &self.composer)
             .field("platform", &self.platform.name())
-            .field("floor", &self.floor)
+            .field("floors", &self.floors)
             .field("limit", &self.limit)
             .field("certainty", &self.certainty)
             .field("observed", &self.observer.is_some())
@@ -407,6 +411,42 @@ impl<D: fmt::Debug, J: fmt::Debug, X: fmt::Debug, C: fmt::Debug> fmt::Debug
 }
 
 impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
+    /// Require these to be true before a verdict of success is accepted.
+    ///
+    /// A general "is the goal met?" is judged against whatever the goal seems
+    /// to mean, and something that merely resembles the goal can satisfy it —
+    /// a short clip about the right subject passes "play a video about X" on a
+    /// loose reading. Each criterion is asked as its own judgment in the same
+    /// parallel request, so confirming costs nothing, and a verdict that fails
+    /// any of them is refused rather than reported as success.
+    ///
+    /// # Write one claim per criterion
+    ///
+    /// This matters more than it looks, and getting it wrong looks like the
+    /// model being wrong. Measured against a real player screen:
+    ///
+    /// | criterion | answer |
+    /// |---|---|
+    /// | `"A full-length video is playing, not a Short and not a search results page"` | 0.31 |
+    /// | `"A video is currently playing"` | 0.86 |
+    /// | `"The thing playing is a full-length video rather than a Short"` | 0.86 |
+    /// | `"This screen is a list of search results"` | 0.18 |
+    ///
+    /// The three narrow questions each answer correctly; the one that bundles
+    /// them answers 0.31 and rejects a verdict that was right. A judgment asked
+    /// about three things at once has no coherent yes. Splitting costs nothing,
+    /// because they are evaluated in the same parallel pass.
+    #[must_use]
+    pub fn confirming<S: Into<Box<str>>>(mut self, criteria: impl IntoIterator<Item = S>) -> Self {
+        self.criteria = criteria.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The thing answering the questions.
+    pub const fn judge(&self) -> &J {
+        &self.judge
+    }
+
     /// Report every step as it happens.
     #[must_use]
     pub fn watching(mut self, observer: impl FnMut(&StepReport<'_>) + 'p) -> Self {
@@ -415,9 +455,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     }
 
     /// Refuse to act on an answer less certain than this.
+    ///
+    /// Applies to every action. To gate a verdict or a destructive gesture more
+    /// strictly than an ordinary tap, follow it with [`Self::requiring_for`].
     #[must_use]
     pub const fn requiring(mut self, floor: Confidence) -> Self {
-        self.floor = floor;
+        self.floors = Floors::new(floor);
+        self
+    }
+
+    /// Require more certainty for actions of a given consequence.
+    ///
+    /// A wrong tap on a list row is undone by going back; a wrong verdict ends
+    /// the run with the wrong answer. Gating both at one number means either
+    /// acting on guesses or refusing sound decisions.
+    #[must_use]
+    pub const fn requiring_for(mut self, consequence: Consequence, floor: Confidence) -> Self {
+        self.floors = self.floors.requiring_for(consequence, floor);
         self
     }
 
@@ -456,6 +510,34 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             goal_met: answers.goal_met.noul,
             is_error_screen: answers.is_error_screen.noul,
         });
+    }
+
+    /// Why a verdict of success should not be taken at face value, if it should not.
+    ///
+    /// Two ways it can be wrong. The screen may have been empty, in which case
+    /// every judgment about it was made from nothing. Or an acceptance
+    /// criterion may not hold, in which case something that resembles the goal
+    /// was reached rather than the goal. Either way the reason is handed to the
+    /// next step, so the same wrong thing is not chosen again.
+    fn refuse_verdict(
+        &self,
+        outcome: Outcome,
+        blind: bool,
+        answers: &StepAnswers,
+    ) -> Option<String> {
+        if outcome != Outcome::Achieved {
+            return None;
+        }
+        if blind {
+            return Some(
+                "Declared the goal done, but the screen was empty, so there was nothing \
+                 to have judged it against"
+                    .to_owned(),
+            );
+        }
+        answers.unmet(&self.criteria, self.certainty).map(|unmet| {
+            format!("Declared the goal done, but that was rejected: {unmet:?} was not true")
+        })
     }
 
     /// Ask a second opinion what to do about an impasse.
@@ -528,23 +610,40 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             if self.types {
                 catalog = catalog.accepting_text();
             }
-            let questions = StepQuestions::new(goal, &catalog);
+            let questions = StepQuestions::checked(goal, &catalog, &self.criteria);
 
             let answers = self
                 .judge
                 .evaluate(
-                    describe(&snapshot, self.platform, previous.as_deref()),
+                    describe(&catalog, self.platform, previous.as_deref()),
                     &questions,
                 )
                 .map_err(RunError::Judge)?;
 
-            let decided = catalog.resolve(&answers, self.floor);
+            let decided = catalog.resolve(&answers, &self.floors);
 
             if answers.is_error_screen.noul > self.certainty {
                 self.report(index, &snapshot, &answers, None);
                 return Ok(Ending::ErrorScreen);
             }
-            if answers.goal_met.noul > self.certainty {
+            // A screen with nothing on it is not evidence. Mid-transition the
+            // hierarchy comes back empty, every question is then answered from
+            // nothing, and a confident yes is a judgement about an empty room.
+            let blind = snapshot.is_empty();
+
+            if !blind
+                && answers.goal_met.noul > self.certainty
+                && let Some(unmet) = answers.unmet(&self.criteria, self.certainty)
+            {
+                // Reached something that passes for the goal without being it.
+                // Saying so in the next state stops the same wrong thing being
+                // chosen again.
+                previous = Some(format!(
+                    "Judged the goal met, but that was rejected: {unmet:?} was not true"
+                ));
+                continue;
+            }
+            if !blind && answers.goal_met.noul > self.certainty {
                 self.report(index, &snapshot, &answers, None);
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
@@ -578,7 +677,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                         .refs()
                         .map(|(_, element)| element.describe())
                         .collect();
-                    let field = snapshot.resolve(into).map_err(RunError::Stale)?;
+                    let field = snapshot
+                        .resolve(into)
+                        .map_err(|stale| RunError::Unreachable(TapError::Stale(stale)))?;
                     let text = self
                         .composer
                         .compose(&Writing {
@@ -603,11 +704,17 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // finished — and the goal-met guard hides that whenever the two
             // happen to agree.
             if let Act::Finish(outcome) = act {
-                return Ok(Ending::Finished(outcome));
+                match self.refuse_verdict(outcome, blind, &answers) {
+                    Some(reason) => {
+                        previous = Some(reason);
+                        continue;
+                    }
+                    None => return Ok(Ending::Finished(outcome)),
+                }
             }
 
             previous = Some(recount(&act, &snapshot));
-            let command = command_for(&act, &snapshot).map_err(RunError::Stale)?;
+            let command = command_for(&act, &snapshot).map_err(RunError::Unreachable)?;
             if let Some(command) = command {
                 self.device.perform(&command).map_err(RunError::Device)?;
             }
@@ -627,18 +734,27 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
 /// screen it has just reached from one it has been stuck on for five turns,
 /// nor whether its last action changed anything at all.
 fn describe(
-    snapshot: &Snapshot,
+    catalog: &Catalog,
     platform: &dyn Platform,
     previous: Option<&str>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    // Rows are keyed the way the Choice offers them, so its options can be
+    // bare keys and the text travels once rather than twice.
+    let keyed = |pairs: &mut dyn Iterator<Item = (crate::judgment::OptionId, &str)>| {
+        pairs
+            .map(|(id, text)| (id.to_string(), serde_json::Value::from(text)))
+            .collect::<serde_json::Map<_, _>>()
+    };
+    let mut state = serde_json::json!({
         "platform": platform.name(),
         "previous_action": previous,
-        "visible_rows": snapshot
-            .refs()
-            .map(|(_, element)| element.describe())
-            .collect::<Vec<_>>(),
-    })
+        "rows": keyed(&mut catalog.rows()),
+    });
+    let fields = keyed(&mut catalog.fields_offered());
+    if !fields.is_empty() {
+        state["fields"] = serde_json::Value::Object(fields);
+    }
+    state
 }
 
 /// Describe an action the way the next step should hear about it.

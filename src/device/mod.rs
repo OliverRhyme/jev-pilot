@@ -11,7 +11,7 @@
 pub mod adb;
 
 use crate::act::{Act, Direction, Swipe, SystemAct};
-use crate::snapshot::{Point, Snapshot, StaleRef};
+use crate::snapshot::{Point, Snapshot, TapError};
 
 /// A concrete instruction a device adapter can carry out.
 ///
@@ -61,26 +61,23 @@ pub enum Command {
 /// the device.
 ///
 /// # Errors
-/// Returns [`StaleRef`] when the action names an element from an observation
-/// other than `snapshot`, meaning the screen has since been replaced.
-pub fn command_for(act: &Act, snapshot: &Snapshot) -> Result<Option<Command>, StaleRef> {
+/// Returns [`TapError`] when the action names an element from another
+/// observation, meaning the screen has since been replaced, or one that is
+/// entirely covered by whatever is drawn over it.
+pub fn command_for(act: &Act, snapshot: &Snapshot) -> Result<Option<Command>, TapError> {
     Ok(match act {
-        Act::Tap(handle) => Some(Command::Tap(snapshot.resolve(*handle)?.bounds.center())),
-        Act::DoubleTap(handle) => Some(Command::DoubleTap(
-            snapshot.resolve(*handle)?.bounds.center(),
-        )),
-        Act::LongPress(handle) => Some(Command::LongPress(
-            snapshot.resolve(*handle)?.bounds.center(),
-        )),
+        Act::Tap(handle) => Some(Command::Tap(snapshot.tap_point(*handle)?)),
+        Act::DoubleTap(handle) => Some(Command::DoubleTap(snapshot.tap_point(*handle)?)),
+        Act::LongPress(handle) => Some(Command::LongPress(snapshot.tap_point(*handle)?)),
         Act::SwipeElement { target, direction } => Some(Command::SwipeFrom {
-            from: snapshot.resolve(*target)?.bounds.center(),
+            from: snapshot.tap_point(*target)?,
             direction: *direction,
         }),
-        Act::Peek(handle) => Some(Command::Peek(snapshot.resolve(*handle)?.bounds.center())),
+        Act::Peek(handle) => Some(Command::Peek(snapshot.tap_point(*handle)?)),
         Act::TypeText { into, text } => {
             // Resolved for its side effect: typing goes to the focused field,
-            // but the reference must still be proven live before we commit.
-            snapshot.resolve(*into)?;
+            // but the field must be proven live and reachable before committing.
+            snapshot.tap_point(*into)?;
             Some(Command::TypeText(text.clone()))
         }
         Act::System(gesture) => Some(Command::System(*gesture)),

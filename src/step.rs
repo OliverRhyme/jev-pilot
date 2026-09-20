@@ -12,12 +12,21 @@
 use crate::act::{Catalog, Deciding, Operation};
 use crate::judgment::{Chosen, Confidence, Likelihood, Poles, Question};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// The instructions for a judgment made against a stated goal.
 #[derive(Debug, Clone, Serialize)]
 pub struct Checking<'a> {
     /// What the worker is trying to achieve.
     pub goal: &'a str,
+    /// What must also be true for the goal to count as met.
+    ///
+    /// Stated here as well as asked separately, because "is the goal met?" is
+    /// otherwise judged against whatever the reader takes the goal to mean. A
+    /// Short about the right subject satisfies "play a video about Jev" on a
+    /// loose reading and fails it on the one that was intended.
+    #[serde(skip_serializing_if = "<[Box<str>]>::is_empty")]
+    pub must_also: &'a [Box<str>],
     /// The judgment being asked.
     pub question: &'static str,
 }
@@ -54,12 +63,64 @@ pub struct StepQuestions<'a> {
     pub goal_met: Question<Checking<'a>>,
     /// Whether the screen is an error state.
     pub is_error_screen: Question<&'static str>,
+    /// One judgment per acceptance criterion, keyed `check_0`, `check_1`, ...
+    ///
+    /// Flattened into the same map as the rest, so they are evaluated in the
+    /// same parallel pass and cost no additional round trip.
+    #[serde(flatten)]
+    pub checks: BTreeMap<Box<str>, Question<Confirming<'a>>>,
+}
+
+/// The instructions for one acceptance criterion.
+#[derive(Debug, Clone, Serialize)]
+pub struct Confirming<'a> {
+    /// What the worker is trying to achieve.
+    pub goal: &'a str,
+    /// The specific thing being checked.
+    pub criterion: &'a str,
+    /// The judgment being asked.
+    pub question: &'static str,
 }
 
 impl<'a> StepQuestions<'a> {
     /// Build the questions for one iteration against `catalog`.
     #[must_use]
     pub fn new(goal: &'a str, catalog: &Catalog) -> Self {
+        Self::checked(goal, catalog, &[])
+    }
+
+    /// Build the questions, with acceptance criteria to confirm alongside.
+    #[must_use]
+    pub fn checked(goal: &'a str, catalog: &Catalog, criteria: &'a [Box<str>]) -> Self {
+        let checks = criteria
+            .iter()
+            .enumerate()
+            .map(|(index, criterion)| {
+                (
+                    format!("check_{index}").into_boxed_str(),
+                    Question::Noul {
+                        instructions: Confirming {
+                            goal,
+                            criterion,
+                            question: "Is `criterion` true of the current screen?",
+                        },
+                        criteria: Poles {
+                            yes: "The screen plainly shows this to be so".into(),
+                            no: "It is not so, or cannot be told from this screen".into(),
+                        },
+                    },
+                )
+            })
+            .collect();
+        Self::assembled(goal, catalog, criteria, checks)
+    }
+
+    fn assembled(
+        goal: &'a str,
+        catalog: &Catalog,
+        criteria: &'a [Box<str>],
+        checks: BTreeMap<Box<str>, Question<Confirming<'a>>>,
+    ) -> Self {
         Self {
             operation: catalog.operation_question(goal),
             tap_target: catalog.tap_target_question(goal),
@@ -71,13 +132,16 @@ impl<'a> StepQuestions<'a> {
             goal_met: Question::Noul {
                 instructions: Checking {
                     goal,
-                    question: "Is `goal` already fully accomplished on the current screen?",
+                    must_also: criteria,
+                    question: "Is `goal` already fully accomplished on the current screen, \
+                               including everything in `must_also`?",
                 },
                 criteria: Poles {
                     yes: "The screen shows the finished result the goal describes".into(),
                     no: "The goal is unstarted, partially done, or not visible here".into(),
                 },
             },
+            checks,
             is_error_screen: Question::Noul {
                 instructions: "Is the current screen an error, crash, or permission-denied state?",
                 criteria: Poles {
@@ -105,4 +169,26 @@ pub struct StepAnswers {
     pub goal_met: Likelihood,
     /// How likely the screen is an error state.
     pub is_error_screen: Likelihood,
+    /// One answer per acceptance criterion, keyed to match the questions.
+    #[serde(flatten, default)]
+    pub checks: BTreeMap<Box<str>, Likelihood>,
+}
+
+impl StepAnswers {
+    /// The first criterion the screen did not satisfy, by position.
+    ///
+    /// A verdict that passes `goal_met` can still fail here: that is the whole
+    /// point of asking separately.
+    #[must_use]
+    pub fn unmet<'c>(&self, criteria: &'c [Box<str>], certainty: f64) -> Option<&'c str> {
+        criteria.iter().enumerate().find_map(|(index, criterion)| {
+            let key = format!("check_{index}");
+            match self.checks.get(key.as_str()) {
+                Some(answer) if answer.noul > certainty => None,
+                // A missing answer counts as unmet: a criterion nobody
+                // confirmed is not a criterion that was met.
+                _ => Some(&**criterion),
+            }
+        })
+    }
 }

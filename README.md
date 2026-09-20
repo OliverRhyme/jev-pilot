@@ -102,6 +102,30 @@ A real run: Jev opened Network & Internet at confidence 1.00, stalled at 0.43
 choosing among its sub-rows, handed over to a person who picked `Internet`, and
 then recognised the goal met at 0.87 on its own.
 
+## Confirming what was reached
+
+A verdict of success can be refused by acceptance criteria — specific claims
+that must hold before the run is allowed to report success:
+
+```rust
+let mut pilot = Pilot::new(device, judge, &Android)
+    .confirming([
+        "A video is currently playing",
+        "The thing playing is a full-length video rather than a Short",
+        "The video is about Jev or TypeSafe AI",
+    ]);
+```
+
+Each becomes its own judgment in the same parallel request, so confirming is
+free, and a rejected verdict is fed back into the next step rather than ending
+the run: *"Declared the goal done, but that was rejected: … was not true."*
+
+**Write one claim per criterion.** Bundling them reads naturally and fails.
+Against a real player screen, `"A full-length video is playing, not a Short and
+not a search results page"` scored **0.31**, while the same three claims asked
+separately scored **0.86 / 0.86 / 0.18** — all correct. A judgment asked about
+three things at once has no coherent yes.
+
 ## Platforms
 
 `Platform` abstracts the only two things that actually differ: how a hierarchy

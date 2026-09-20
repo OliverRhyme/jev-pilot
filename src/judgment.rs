@@ -71,7 +71,7 @@ impl<'de> Deserialize<'de> for OptionId {
 /// carries no meaning beyond where it sits. A list of operations wants its own
 /// names (`tap`, `scroll_down`), because there the name *is* the meaning.
 #[derive(Debug, Clone, Default)]
-pub struct Options(Vec<(Box<str>, Box<str>)>);
+pub struct Options(Vec<(Box<str>, Option<Box<str>>)>);
 
 impl Options {
     /// Offer one more element, addressed positionally.
@@ -82,7 +82,23 @@ impl Options {
         let index = u8::try_from(self.0.len()).map_err(|_| Full)?;
         let id = OptionId::nth(index).ok_or(Full)?;
         self.0
-            .push((id.to_string().into_boxed_str(), rubric.into()));
+            .push((id.to_string().into_boxed_str(), Some(rubric.into())));
+        Ok(id)
+    }
+
+    /// Offer one more option that needs no description of its own.
+    ///
+    /// The Choice carries `null` for it, and whatever the option refers to is
+    /// read from the state instead. For a list of screen rows that halves the
+    /// text sent, because the rows are already in the state for the other
+    /// questions to read.
+    ///
+    /// # Errors
+    /// Returns [`Full`] once [`MAX_OPTIONS`] have been offered.
+    pub fn push_bare(&mut self) -> Result<OptionId, Full> {
+        let index = u8::try_from(self.0.len()).map_err(|_| Full)?;
+        let id = OptionId::nth(index).ok_or(Full)?;
+        self.0.push((id.to_string().into_boxed_str(), None));
         Ok(id)
     }
 
@@ -98,7 +114,7 @@ impl Options {
         if self.0.len() >= MAX_OPTIONS {
             return Err(Full);
         }
-        self.0.push((key.into(), rubric.into()));
+        self.0.push((key.into(), Some(rubric.into())));
         Ok(())
     }
 

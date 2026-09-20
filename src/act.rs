@@ -170,6 +170,18 @@ impl Operation {
     }
 
     /// Whether this operation needs a row to act on.
+    /// What it costs to perform this operation in error.
+    #[must_use]
+    pub const fn consequence(self) -> Consequence {
+        match self {
+            Self::Done | Self::Blocked => Consequence::Terminal,
+            // Swipe-to-delete and swipe-to-archive are the whole point of these
+            // gestures; going back does not bring the row back.
+            Self::SwipeLeft | Self::SwipeRight => Consequence::Destructive,
+            _ => Consequence::Ordinary,
+        }
+    }
+
     /// Whether this operation needs a field to type into.
     #[must_use]
     pub const fn needs_field(self) -> bool {
@@ -299,6 +311,73 @@ pub struct Deciding<'a> {
     pub question: &'static str,
 }
 
+/// What it costs to get an action wrong.
+///
+/// The documented guidance is that a threshold is not one number: different
+/// actions in the same system are gated differently according to what a wrong
+/// one costs. A misplaced tap on a list row is undone by going back; a wrong
+/// verdict ends the run with the wrong answer, and nobody finds out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Consequence {
+    /// Recoverable by going back or looking again.
+    Ordinary,
+    /// Ends the run, right or wrong.
+    Terminal,
+    /// May remove or send something, and going back does not undo it.
+    Destructive,
+}
+
+/// How certain the model must be, per kind of consequence.
+#[derive(Debug, Clone, Copy)]
+pub struct Floors {
+    ordinary: Confidence,
+    terminal: Confidence,
+    destructive: Confidence,
+}
+
+impl Floors {
+    /// One floor for every action, whatever it costs.
+    #[must_use]
+    pub const fn new(everywhere: Confidence) -> Self {
+        Self {
+            ordinary: everywhere,
+            terminal: everywhere,
+            destructive: everywhere,
+        }
+    }
+
+    /// Require more certainty for actions of this kind.
+    #[must_use]
+    pub const fn requiring_for(mut self, consequence: Consequence, floor: Confidence) -> Self {
+        match consequence {
+            Consequence::Ordinary => self.ordinary = floor,
+            Consequence::Terminal => self.terminal = floor,
+            Consequence::Destructive => self.destructive = floor,
+        }
+        self
+    }
+
+    /// The floor an operation must clear.
+    #[must_use]
+    pub const fn for_operation(&self, operation: Operation) -> Confidence {
+        match operation.consequence() {
+            Consequence::Ordinary => self.ordinary,
+            Consequence::Terminal => self.terminal,
+            Consequence::Destructive => self.destructive,
+        }
+    }
+
+    /// The floor a target choice must clear, given the operation it serves.
+    ///
+    /// The same as the operation's: naming the wrong row for a destructive
+    /// gesture is as costly as choosing the gesture itself.
+    #[must_use]
+    pub const fn for_target(&self, operation: Operation) -> Confidence {
+        self.for_operation(operation)
+    }
+}
+
 /// What a step's answers resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -367,9 +446,9 @@ impl core::error::Error for Indecision {}
 pub struct Catalog {
     supported: Vec<Operation>,
     operations: Options,
-    targets: Vec<(OptionId, ElementRef)>,
+    targets: Vec<(OptionId, ElementRef, Box<str>)>,
     target_options: Options,
-    fields: Vec<(OptionId, ElementRef)>,
+    fields: Vec<(OptionId, ElementRef, Box<str>)>,
     field_options: Options,
 }
 
@@ -397,13 +476,13 @@ impl Catalog {
         let mut field_options = Options::default();
         let mut fields = Vec::new();
         for (handle, element) in snapshot.refs() {
-            if let Ok(id) = target_options.push(element.describe()) {
-                targets.push((id, handle));
+            if let Ok(id) = target_options.push_bare() {
+                targets.push((id, handle, element.describe().into_boxed_str()));
             }
             if element.editable
-                && let Ok(id) = field_options.push(element.describe())
+                && let Ok(id) = field_options.push_bare()
             {
-                fields.push((id, handle));
+                fields.push((id, handle, element.describe().into_boxed_str()));
             }
         }
 
@@ -443,8 +522,9 @@ impl Catalog {
         Some(Question::Choice {
             instructions: Deciding {
                 goal,
-                question: "Which field should be typed into to advance `goal`, \
-                           assuming the chosen operation is typing?",
+                question: "Which field in `fields` should be typed into to advance \
+                           `goal`, assuming the chosen operation is typing? \
+                           Answer with the field's key.",
             },
             criteria: self.field_options.clone(),
         })
@@ -528,8 +608,9 @@ impl Catalog {
         Some(Question::Choice {
             instructions: Deciding {
                 goal,
-                question: "Which single row should be acted on to advance `goal`, \
-                           assuming the chosen operation needs a row?",
+                question: "Which single row in `rows` should be acted on to advance \
+                           `goal`, assuming the chosen operation needs a row? \
+                           Answer with the row's key.",
             },
             criteria: self.target_options.clone(),
         })
@@ -537,8 +618,10 @@ impl Catalog {
 
     /// Turn a step's answers into the one action to carry out.
     ///
-    /// Both heads must clear `floor`. A confident operation aimed at a target
-    /// the model was unsure of is still a guess about where to tap.
+    /// Both heads must clear the floor for the chosen operation. A confident
+    /// operation aimed at a target the model was unsure of is still a guess
+    /// about where to tap, and the floor scales with what a wrong one costs —
+    /// see [`Floors`].
     ///
     /// # Errors
     /// Returns [`Indecision`] when either head was too uncertain, when the
@@ -546,9 +629,10 @@ impl Catalog {
     pub fn resolve(
         &self,
         answers: &crate::step::StepAnswers,
-        floor: Confidence,
+        floors: &Floors,
     ) -> Result<Decision, Indecision> {
         let operation = answers.operation.choice;
+        let floor = floors.for_operation(operation);
         if answers.operation.confidence < floor {
             return Err(Indecision::TooUncertain {
                 got: answers.operation.confidence,
@@ -563,6 +647,7 @@ impl Catalog {
 
         if operation.needs_field() {
             let chosen = answers.type_field.as_ref().ok_or(Indecision::NoTarget)?;
+            let floor = floors.for_target(operation);
             if chosen.confidence < floor {
                 return Err(Indecision::TooUncertain {
                     got: chosen.confidence,
@@ -572,8 +657,8 @@ impl Catalog {
             let into = self
                 .fields
                 .iter()
-                .find(|(id, _)| *id == chosen.choice)
-                .map(|(_, handle)| *handle)
+                .find(|(id, ..)| *id == chosen.choice)
+                .map(|(_, handle, _)| *handle)
                 .ok_or_else(|| Indecision::NotOffered {
                     what: chosen.choice.to_string().into_boxed_str(),
                 })?;
@@ -585,6 +670,7 @@ impl Catalog {
         }
 
         let chosen = answers.tap_target.as_ref().ok_or(Indecision::NoTarget)?;
+        let floor = floors.for_target(operation);
         if chosen.confidence < floor {
             return Err(Indecision::TooUncertain {
                 got: chosen.confidence,
@@ -594,8 +680,8 @@ impl Catalog {
         let target = self
             .targets
             .iter()
-            .find(|(id, _)| *id == chosen.choice)
-            .map(|(_, handle)| *handle)
+            .find(|(id, ..)| *id == chosen.choice)
+            .map(|(_, handle, _)| *handle)
             .ok_or_else(|| Indecision::NotOffered {
                 what: chosen.choice.to_string().into_boxed_str(),
             })?;
@@ -629,7 +715,7 @@ impl Catalog {
             let into = self
                 .fields
                 .get(position)
-                .map(|(_, handle)| *handle)
+                .map(|(_, handle, _)| *handle)
                 .ok_or_else(|| Indecision::NotOffered {
                     what: format!("field {position}").into_boxed_str(),
                 })?;
@@ -642,11 +728,24 @@ impl Catalog {
         let handle = self
             .targets
             .get(position)
-            .map(|(_, handle)| *handle)
+            .map(|(_, handle, _)| *handle)
             .ok_or_else(|| Indecision::NotOffered {
                 what: format!("row {position}").into_boxed_str(),
             })?;
         Self::targeted(operation, handle).map(Decision::Ready)
+    }
+
+    /// The rows this screen offers, keyed as the Choice offers them.
+    ///
+    /// The text lives here rather than in the Choice's own options, so it is
+    /// sent once in the state instead of twice.
+    pub fn rows(&self) -> impl Iterator<Item = (OptionId, &str)> {
+        self.targets.iter().map(|(id, _, text)| (*id, &**text))
+    }
+
+    /// The fields this screen offers, keyed as the Choice offers them.
+    pub fn fields_offered(&self) -> impl Iterator<Item = (OptionId, &str)> {
+        self.fields.iter().map(|(id, _, text)| (*id, &**text))
     }
 
     /// The operations offered on this screen.

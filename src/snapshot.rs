@@ -107,6 +107,21 @@ impl Element {
     }
 }
 
+/// The element is there, but nothing of it can be touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Obscured;
+
+impl fmt::Display for Obscured {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the element is completely covered by what is drawn over it"
+        )
+    }
+}
+
+impl core::error::Error for Obscured {}
+
 /// A reference that does not belong to the snapshot it was offered to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StaleRef {
@@ -168,6 +183,39 @@ pub(crate) const RESERVED_ACTIONS: usize = 5;
 /// fails the build instead of a test run.
 const _: () = assert!(MAX_ELEMENTS + RESERVED_ACTIONS <= crate::judgment::MAX_OPTIONS);
 
+/// Why an element could not be turned into a point to tap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TapError {
+    /// The reference came from a different observation.
+    Stale(StaleRef),
+    /// Nothing of the element is left uncovered.
+    Obscured(Obscured),
+}
+
+impl fmt::Display for TapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stale(inner) => inner.fmt(f),
+            Self::Obscured(inner) => inner.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for TapError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Stale(inner) => Some(inner),
+            Self::Obscured(inner) => Some(inner),
+        }
+    }
+}
+
+/// Whether `over` hides part of the band between `top` and `bottom`.
+const fn over_covers(over: Bounds, top: i32, bottom: i32) -> bool {
+    over.top < bottom && over.bottom > top
+}
+
 /// One observation of a screen.
 #[derive(Debug)]
 pub struct Snapshot {
@@ -221,6 +269,51 @@ impl Snapshot {
         Err(StaleRef {
             expected: self.generation,
             found: handle.generation,
+        })
+    }
+
+    /// Where to tap to hit this element.
+    ///
+    /// Not simply the middle of its box. A hierarchy reports an element at its
+    /// full size even when most of it lies behind something drawn later, so the
+    /// middle of a list row that runs under a navigation bar is a point inside
+    /// the navigation bar — and a tap there opens whatever is on top.
+    ///
+    /// The box is narrowed to the tallest band no later element covers, and the
+    /// middle of that band is used instead.
+    ///
+    /// # Errors
+    /// Returns [`StaleRef`] when the reference came from another observation,
+    /// and [`Obscured`] when nothing of the element is left to touch.
+    pub fn tap_point(&self, handle: ElementRef) -> Result<Point, TapError> {
+        let target = self.resolve(handle).map_err(TapError::Stale)?.bounds;
+        let x = i32::midpoint(target.left, target.right);
+
+        // Only what is drawn after this element can cover it, and only where it
+        // actually crosses the column being tapped.
+        let (mut top, mut bottom) = (target.top, target.bottom);
+        for over in self
+            .elements
+            .iter()
+            .skip(usize::from(handle.index) + 1)
+            .map(|element| element.bounds)
+            .filter(|over| over.left <= x && x < over.right)
+        {
+            if over_covers(over, top, bottom) {
+                if over.top <= top {
+                    top = top.max(over.bottom);
+                } else {
+                    bottom = bottom.min(over.top);
+                }
+            }
+        }
+
+        if bottom <= top {
+            return Err(TapError::Obscured(Obscured));
+        }
+        Ok(Point {
+            x,
+            y: i32::midpoint(top, bottom),
         })
     }
 

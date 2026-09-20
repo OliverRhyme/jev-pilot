@@ -1,6 +1,6 @@
 //! Typing: the one thing a System One model cannot do for itself.
 
-use jev_pilot::act::{Act, Catalog, Decision, Operation};
+use jev_pilot::act::{Act, Catalog, Decision, Floors, Operation};
 use jev_pilot::judgment::Confidence;
 use jev_pilot::platform::Android;
 use jev_pilot::snapshot::{Bounds, Element, Snapshot};
@@ -65,11 +65,18 @@ fn the_field_head_offers_only_rows_that_accept_text() {
         "only the search box accepts text: {fields:?}"
     );
     assert!(
-        fields
-            .values()
-            .any(|v| v.as_str().unwrap_or("").contains("Search YouTube")),
-        "{fields:?}"
+        fields.values().all(serde_json::Value::is_null),
+        "the text lives in the state, not in the options: {fields:?}"
     );
+
+    // The state-side text is what the key refers to, and the keys agree.
+    let described: Vec<(String, &str)> = catalog
+        .fields_offered()
+        .map(|(id, text)| (id.to_string(), text))
+        .collect();
+    assert_eq!(described.len(), 1);
+    assert!(described[0].1.contains("Search YouTube"), "{described:?}");
+    assert!(fields.contains_key(&described[0].0), "keys must agree");
 }
 
 /// Jev decides whether and where to type. It cannot decide *what*, so the
@@ -88,7 +95,7 @@ fn a_typing_decision_comes_back_needing_words() {
                 "goal_met": { "type": "noul", "noul": 0.02 },
                 "is_error_screen": { "type": "noul", "noul": 0.01 }
             })),
-            Confidence::ZERO,
+            &Floors::new(Confidence::ZERO),
         )
         .expect("a decision");
 
@@ -116,7 +123,7 @@ fn a_non_typing_decision_is_ready_as_it_stands() {
                 "goal_met": { "type": "noul", "noul": 0.02 },
                 "is_error_screen": { "type": "noul", "noul": 0.01 }
             })),
-            Confidence::ZERO,
+            &Floors::new(Confidence::ZERO),
         )
         .expect("a decision");
 

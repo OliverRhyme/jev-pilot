@@ -1,6 +1,6 @@
 //! The two-dimensional action space: what to do, and what to do it to.
 
-use jev_pilot::act::{Act, Catalog, Decision, Direction, Operation, Outcome};
+use jev_pilot::act::{Act, Catalog, Decision, Direction, Floors, Operation, Outcome};
 use jev_pilot::judgment::Confidence;
 use jev_pilot::platform::{Android, Ios, Platform};
 use jev_pilot::step::StepAnswers;
@@ -72,7 +72,7 @@ fn the_target_matching_the_chosen_operation_is_the_one_used() {
                 "goal_met": { "type": "noul", "noul": 0.02 },
                 "is_error_screen": { "type": "noul", "noul": 0.01 }
             })),
-            Confidence::ZERO,
+            &Floors::new(Confidence::ZERO),
         )
         .expect("a decision");
 
@@ -100,7 +100,7 @@ fn an_operation_without_a_target_ignores_the_speculative_heads() {
                     "goal_met": { "type": "noul", "noul": 0.02 },
                     "is_error_screen": { "type": "noul", "noul": 0.01 }
                 })),
-                Confidence::ZERO,
+                &Floors::new(Confidence::ZERO),
             )
             .expect("a decision");
         assert_eq!(act, Decision::Ready(expected), "for {choice}");
@@ -122,7 +122,7 @@ fn an_uncertain_target_is_refused_even_when_the_operation_is_certain() {
             "goal_met": { "type": "noul", "noul": 0.02 },
             "is_error_screen": { "type": "noul", "noul": 0.01 }
         })),
-        floor,
+        &Floors::new(floor),
     );
 
     assert!(outcome.is_err(), "got {outcome:?}");

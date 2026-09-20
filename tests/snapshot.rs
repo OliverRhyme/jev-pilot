@@ -1,7 +1,7 @@
 //! Observations of a screen, and the references they issue.
 
 use jev_pilot::platform::{Android, HierarchyError, Platform};
-use jev_pilot::snapshot::{MAX_ELEMENTS, Point};
+use jev_pilot::snapshot::{Bounds, Element, MAX_ELEMENTS, Point, Snapshot};
 use std::fmt::Write as _;
 
 const SETTINGS: &str = include_str!("fixtures/settings.xml");
@@ -127,4 +127,101 @@ fn a_helper_served_hierarchy_reads_with_the_same_parser() {
     let (handle, _) = snapshot.refs().next().expect("a row");
     let centre = snapshot.resolve(handle).expect("live").bounds.center();
     assert!(centre.x > 0 && centre.y > 0, "got {centre:?}");
+}
+
+/// A row can be reported at its full size while most of it sits behind
+/// something drawn later. Tapping the centre of the reported box then lands on
+/// whatever covers it.
+///
+/// Taken from a real YouTube results screen on a 1008x2244 Pixel 8 Pro: the
+/// last result is reported as [0,1994][1008,2244], running to the bottom of the
+/// display, while the navigation bar occupies [0,2061][1008,2183]. The naive
+/// centre is (504, 2119) — inside the Create button, which is what a tap there
+/// actually opened.
+#[test]
+fn a_row_half_hidden_behind_a_bar_is_tapped_where_it_is_visible() {
+    let row = |label: &str, l, t, r, b| Element {
+        label: label.into(),
+        detail: None,
+        editable: false,
+        bounds: Bounds {
+            left: l,
+            top: t,
+            right: r,
+            bottom: b,
+        },
+    };
+    let snapshot = Snapshot::new(vec![
+        row("Jev Explained: Demos and Use Cases", 0, 1994, 1008, 2244),
+        row("Home", 0, 2061, 201, 2183),
+        row("Create", 402, 2061, 604, 2183),
+        row("You", 806, 2061, 1008, 2183),
+    ])
+    .expect("a screen");
+
+    let (result, _) = snapshot.refs().next().expect("the result row");
+    let point = snapshot.tap_point(result).expect("a visible point");
+
+    assert!(
+        point.y < 2061,
+        "must land above the navigation bar, got {point:?}"
+    );
+    assert!(point.y >= 1994, "and inside the row, got {point:?}");
+}
+
+/// An element with nothing on top of it is tapped in the middle, as before.
+#[test]
+fn an_unobstructed_row_is_still_tapped_at_its_centre() {
+    let snapshot = Snapshot::new(vec![Element {
+        label: "Network and Internet".into(),
+        detail: None,
+        editable: false,
+        bounds: Bounds {
+            left: 168,
+            top: 596,
+            right: 840,
+            bottom: 744,
+        },
+    }])
+    .expect("a screen");
+
+    let (row, _) = snapshot.refs().next().expect("the row");
+    assert_eq!(
+        snapshot.tap_point(row).expect("visible"),
+        Point { x: 504, y: 670 }
+    );
+}
+
+/// A row completely covered cannot be tapped at all, and saying so beats
+/// tapping whatever is on top of it.
+#[test]
+fn a_fully_covered_row_is_refused() {
+    let snapshot = Snapshot::new(vec![
+        Element {
+            label: "behind a dialog".into(),
+            detail: None,
+            editable: false,
+            bounds: Bounds {
+                left: 0,
+                top: 500,
+                right: 1000,
+                bottom: 600,
+            },
+        },
+        Element {
+            label: "the dialog".into(),
+            detail: None,
+            editable: false,
+            bounds: Bounds {
+                left: 0,
+                top: 400,
+                right: 1000,
+                bottom: 900,
+            },
+        },
+    ])
+    .expect("a screen");
+
+    let (hidden, _) = snapshot.refs().next().expect("the covered row");
+    assert!(snapshot.tap_point(hidden).is_err());
 }
