@@ -570,3 +570,26 @@ fn words_that_are_not_rows_still_make_a_screen_a_different_screen() {
 
     assert_ne!(four.fingerprint(), five.fingerprint());
 }
+
+/// A control that is on the screen but switched off is worth saying, and worth
+/// saying *as* switched off. Named bare, it reads as a way forward that the
+/// catalog then does not offer, and the run goes looking for a row that is not
+/// there instead of doing the thing that would enable it.
+///
+/// Measured on a transfer form: `Continue` present as a disabled button, the
+/// only live row being the source-account picker that enables it.
+#[test]
+fn a_control_that_is_switched_off_is_named_as_switched_off() {
+    const FORM: &str = include_str!("fixtures/disabled-continue.xml");
+
+    let screen = Android.parse_hierarchy(FORM).expect("a screen");
+    let notices: Vec<&str> = screen.notices().collect();
+
+    assert!(
+        notices.contains(&"Continue — not available yet"),
+        "{notices:?}",
+    );
+    assert!(!notices.contains(&"Continue"), "{notices:?}");
+    // Plain captions are unchanged: they were never offers.
+    assert!(notices.contains(&"Step 1 of 3"), "{notices:?}");
+}

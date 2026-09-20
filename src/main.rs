@@ -163,6 +163,7 @@ impl Desk {
                 "previous_action": impasse.previous,
                 "operations": impasse.operations.iter().map(|o| o.key()).collect::<Vec<_>>(),
                 "rows": impasse.rows,
+                "screen_says": impasse.says,
             }),
             &describe(impasse),
         )?;

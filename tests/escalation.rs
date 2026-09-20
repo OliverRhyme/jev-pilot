@@ -62,7 +62,7 @@ fn floor() -> Confidence {
 fn without_an_escalation_policy_an_impasse_ends_the_run() {
     let mut pilot = Pilot::new(
         Fake::default(),
-        Scripted(RefCell::new(vec![unsure()])),
+        Scripted(RefCell::new(vec![unsure(); 30])),
         &Android,
     )
     .requiring(floor());
@@ -127,7 +127,7 @@ fn an_escalation_may_choose_from_the_same_options_jev_had() {
 fn an_escalation_may_decline_and_stop_the_run() {
     let mut pilot = Pilot::new(
         Fake::default(),
-        Scripted(RefCell::new(vec![unsure()])),
+        Scripted(RefCell::new(vec![unsure(); 30])),
         &Android,
     )
     .requiring(floor())
@@ -146,7 +146,7 @@ fn an_escalation_may_decline_and_stop_the_run() {
 fn halt_is_the_default_policy_written_out() {
     let mut pilot = Pilot::new(
         Fake::default(),
-        Scripted(RefCell::new(vec![unsure()])),
+        Scripted(RefCell::new(vec![unsure(); 30])),
         &Android,
     )
     .requiring(floor())
@@ -164,7 +164,7 @@ fn halt_is_the_default_policy_written_out() {
 fn the_impasse_reports_what_jev_was_unsure_about() {
     let mut pilot = Pilot::new(
         Fake::default(),
-        Scripted(RefCell::new(vec![unsure()])),
+        Scripted(RefCell::new(vec![unsure(); 30])),
         &Android,
     )
     .requiring(floor())
@@ -188,7 +188,7 @@ fn the_impasse_reports_what_jev_was_unsure_about() {
 fn an_escalation_cannot_name_a_row_that_is_not_on_screen() {
     let mut pilot = Pilot::new(
         Fake::default(),
-        Scripted(RefCell::new(vec![unsure()])),
+        Scripted(RefCell::new(vec![unsure(); 30])),
         &Android,
     )
     .requiring(floor())
@@ -302,4 +302,43 @@ fn a_covered_row_is_an_impasse_rather_than_a_failure() {
         .expect("the run must not fail");
 
     assert!(matches!(ending, Ending::Uncertain { .. }), "got {ending:?}");
+}
+
+/// An impasse is where a person is asked to decide, and a person deciding gets
+/// less than the model that could not: the rows, and nothing the screen says.
+/// On a form whose Continue is switched off until a picker is used, the words
+/// are the only account of why nothing looks tappable.
+#[test]
+fn an_impasse_carries_what_the_screen_says() {
+    let said = RefCell::new(Vec::new());
+    let mut pilot = Pilot::new(PinPad, Scripted(RefCell::new(vec![unsure(); 30])), &Android)
+        .requiring(floor())
+        .escalating_to(|impasse: &Impasse<'_>| -> Result<Resolution, Infallible> {
+            said.borrow_mut()
+                .extend(impasse.says.iter().map(|s| (*s).to_owned()));
+            Ok(Resolution::Stop)
+        });
+
+    let _ = pilot.pursue("enter the PIN");
+
+    let said = said.borrow();
+    assert!(
+        said.iter().any(|s| s.contains("4 of 6 digits entered")),
+        "{said:?}",
+    );
+}
+
+/// A screen of keys, and words that say how far through it is.
+struct PinPad;
+
+impl Device for PinPad {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        Ok(Android
+            .parse_hierarchy(include_str!("fixtures/pin-pad.xml"))
+            .expect("fixture parses"))
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        Ok(())
+    }
 }

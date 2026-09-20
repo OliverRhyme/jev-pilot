@@ -223,6 +223,15 @@ fn notices_of(document: &roxmltree::Document) -> Vec<Box<str>> {
         let Some(label) = label_of(&node) else {
             continue;
         };
+        // A control that is present but switched off is worth saying, and
+        // worth saying as switched off. Named bare it reads as a way forward
+        // that the catalog does not offer, and the run goes looking for a row
+        // that is not there instead of doing the thing that enables it.
+        let label = if is_switched_off(&node) {
+            format!("{label} — not available yet").into_boxed_str()
+        } else {
+            label
+        };
         // The same caption often appears on a node and on the wrapper drawn
         // around it. Said once is what a person reads.
         if !notices.contains(&label) {
@@ -230,6 +239,19 @@ fn notices_of(document: &roxmltree::Document) -> Vec<Box<str>> {
         }
     }
     notices
+}
+
+/// Whether this node would be a row if it were enabled.
+///
+/// `enabled` is orthogonal to the interaction flags: a greyed-out button keeps
+/// its class and its focusability and drops `clickable`, which is why it is
+/// absent from the catalog rather than present and refused.
+fn is_switched_off(node: &roxmltree::Node) -> bool {
+    node.attribute("enabled") == Some("false")
+        && (node.attribute("focusable") == Some("true")
+            || node
+                .attribute("class")
+                .is_some_and(|class| class.contains("Button")))
 }
 
 /// How many notices travel with a screen.

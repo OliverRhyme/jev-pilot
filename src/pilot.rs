@@ -64,6 +64,13 @@ pub struct Impasse<'i> {
     pub alternatives: &'i [(Box<str>, f64)],
     /// The rows on screen, in the order they were offered.
     pub rows: &'i [String],
+    /// What the screen says, beyond what it offers to act on.
+    ///
+    /// A person deciding an impasse should not be shown less than the model
+    /// that could not decide it. On a form whose commit button is switched off
+    /// until a picker is used, these words are the only account of why nothing
+    /// on the screen looks like a way forward.
+    pub says: &'i [&'i str],
     /// The operations this platform offers here.
     pub operations: &'i [Operation],
     /// What the previous step did, if there was one.
@@ -682,6 +689,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             .refs()
             .map(|(_, element)| element.describe())
             .collect();
+        let says: Vec<&str> = snapshot.notices().collect();
 
         // Sorted so the thing it was nearly beaten by comes first: that is the
         // decision actually being asked about.
@@ -704,6 +712,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),
                 alternatives: &alternatives,
                 rows: &rows,
+                says: &says,
                 operations: catalog.operations(),
                 previous,
             })
