@@ -64,6 +64,11 @@ pub struct Impasse<'i> {
     pub alternatives: &'i [(Box<str>, f64)],
     /// The rows on screen, in the order they were offered.
     pub rows: &'i [String],
+    /// Whether a soft keyboard is covering part of the screen.
+    ///
+    /// The rows it covers are absent rather than refused, so a screen with no
+    /// apparent way on often has one behind the keyboard.
+    pub keyboard_open: bool,
     /// What the screen says, beyond what it offers to act on.
     ///
     /// A person deciding an impasse should not be shown less than the model
@@ -741,6 +746,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),
                 alternatives: &alternatives,
                 rows: &rows,
+                keyboard_open: snapshot.keyboard_open(),
                 says: &says,
                 operations: catalog.operations(),
                 previous,

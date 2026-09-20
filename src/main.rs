@@ -164,6 +164,7 @@ impl Desk {
                 "operations": impasse.operations.iter().map(|o| o.key()).collect::<Vec<_>>(),
                 "rows": impasse.rows,
                 "screen_says": impasse.says,
+                "keyboard_open": impasse.keyboard_open,
             }),
             &describe(impasse),
         )?;

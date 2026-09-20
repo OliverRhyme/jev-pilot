@@ -227,3 +227,26 @@ fn a_run_that_has_not_left_is_not_offered_a_way_back() {
 
     assert!(!catalog.operations().contains(&Operation::Return));
 }
+
+/// With a keyboard up, the rows it covers are absent from the catalog rather
+/// than marked unavailable, and the button that commits a form is usually
+/// among them. Telling the judge the keyboard is open does not tell it that
+/// closing the keyboard brings a row back — so closing it is offered as
+/// something to choose, on the screens where there is a keyboard to close.
+///
+/// Measured on a transfer form: keyboard up, five rows and no commit; the
+/// same screen with the keyboard down, those five and `Continue`.
+#[test]
+fn a_screen_under_a_keyboard_offers_closing_it() {
+    let snapshot = Android.parse_hierarchy(SETTINGS).expect("fixture parses");
+    let covered = Catalog::for_screen(&snapshot.with_keyboard_open(true), &Android);
+
+    assert!(covered.operations().contains(&Operation::CloseKeyboard));
+
+    let settled = Android.parse_hierarchy(SETTINGS).expect("fixture parses");
+    let clear = Catalog::for_screen(&settled, &Android);
+    assert!(
+        !clear.operations().contains(&Operation::CloseKeyboard),
+        "there is no keyboard to close",
+    );
+}

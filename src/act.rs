@@ -106,6 +106,13 @@ pub enum Operation {
     Back,
     /// Leave for the home screen.
     Home,
+    /// Put the soft keyboard away.
+    ///
+    /// Offered only on a screen that has one up. A keyboard covers the bottom
+    /// of the screen, and the rows under it are absent from the catalog rather
+    /// than offered and refused — so nothing else on the screen suggests that
+    /// putting it away would bring a row back.
+    CloseKeyboard,
     /// Go back into the app this goal is about.
     ///
     /// Offered only on a screen belonging to some other app, so it is never a
@@ -139,6 +146,7 @@ impl Operation {
             Self::ScrollDown => "scroll_down",
             Self::Back => "back",
             Self::Home => "home",
+            Self::CloseKeyboard => "close_keyboard",
             Self::Return => "return_to_app",
             Self::AppSwitcher => "app_switcher",
             Self::Submit => "submit",
@@ -167,6 +175,10 @@ impl Operation {
             Self::ScrollDown => "Scroll down to reveal rows below the current view",
             Self::Back => "Go back to the previous screen",
             Self::Home => "Leave the app and return to the home screen",
+            Self::CloseKeyboard => {
+                "Put the keyboard away, revealing the rows it covers — often the button that \
+                 commits the form being typed into"
+            }
             Self::Return => {
                 "Go back into the app this goal is about — this screen belongs to another app"
             }
@@ -245,6 +257,7 @@ impl<'de> serde::Deserialize<'de> for Operation {
             Self::ScrollDown,
             Self::Back,
             Self::Home,
+            Self::CloseKeyboard,
             Self::Return,
             Self::AppSwitcher,
             Self::Submit,
@@ -501,6 +514,11 @@ impl Catalog {
         let mut operations = Options::default();
         let mut supported = Vec::new();
         for operation in platform.operations() {
+            // Nothing to put away, and offering it would be a way to stand
+            // still on every screen that has no keyboard.
+            if *operation == Operation::CloseKeyboard && !snapshot.keyboard_open() {
+                continue;
+            }
             // A tap with nothing to tap is not an option worth offering.
             if operation.needs_tap_target() && snapshot.is_empty() {
                 continue;
@@ -613,7 +631,9 @@ impl Catalog {
         Ok(match operation {
             Operation::ScrollUp => Act::Scroll(Direction::Up),
             Operation::ScrollDown => Act::Scroll(Direction::Down),
-            Operation::Back => Act::System(SystemAct::Back),
+            // Back dismisses an IME on Android, and closing the keyboard is
+            // offered only where one is up, so it cannot navigate instead.
+            Operation::Back | Operation::CloseKeyboard => Act::System(SystemAct::Back),
             Operation::Home => Act::System(SystemAct::Home),
             Operation::AppSwitcher => Act::System(SystemAct::AppSwitcher),
             Operation::Submit => Act::System(SystemAct::Submit),
