@@ -191,9 +191,15 @@ its own `DONE` independently, and that is the right shape. Not done here.
 
 The iOS device layer is not implemented at all — see below.
 
+## Scope
+
+A personal project, not a release. `publish = false` in the manifest; it is not
+on crates.io and is not headed there.
+
 ## Versioning
 
-Public enums that are expected to grow — operations, endings, failure reasons —
+The conventions below are for keeping my own call sites from breaking, not for
+anyone else's. Public enums that are expected to grow — operations, endings, failure reasons —
 are `#[non_exhaustive]`, so a new gesture or a new way of stopping is a minor
 release rather than a breaking one. `Device::Command` is deliberately *not*:
 adding a gesture there should force every device adapter to acknowledge it at

@@ -10,6 +10,8 @@ readme = "README.md"
 keywords = ["android", "ios", "ui-automation", "testing", "agent"]
 categories = ["development-tools::testing", "api-bindings"]
 exclude = ["/.cargo", "/t", "/.python-reference"]
+# Personal project. `cargo publish` refuses outright while this is set.
+publish = false
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
