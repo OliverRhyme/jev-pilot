@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Jev Pilot Helper</string>
+    <string name="accessibility_service_description">Lets Jev Pilot read this screen during automated tests. It answers only on this device, only to a computer connected over USB debugging, and sends nothing anywhere.</string>
+</resources>

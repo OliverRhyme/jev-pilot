@@ -1,0 +1,20 @@
+This directory contains an Android accessibility service derived from the
+Artemis Accessibility Helper.
+
+  Copyright 2026 Google LLC
+  Licensed under the Apache License, Version 2.0
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Changes from the original:
+
+  * Translated from Java to Kotlin in full.
+  * Renamed to the dev.jevpilot.helper package and signed with a different key,
+    so the two helpers install and run side by side on one device.
+  * Moved to loopback port 18877 and the X-Jev-Token header, for the same reason.
+  * Built against API 36 with R8 shrinking; Gradle replaces the standalone
+    aapt2/javac/d8 build script.
+  * Hardened: the connection pool is bounded, the peer is checked to be
+    loopback, requests carrying an Origin header are refused, the header count
+    is capped, request data and exception text are no longer echoed in
+    responses, responses carry nosniff and no-store, authentication failure is
+    delayed, and the text of a password field is never serialised.
