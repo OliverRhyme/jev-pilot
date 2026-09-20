@@ -738,6 +738,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             self.device
                 .perform(&Command::Launch(app))
                 .map_err(RunError::Device)?;
+            // An app takes seconds to start. Reading straight after the launch
+            // returns the screen it was launched from, and the run spends its
+            // first judgement deciding what to do about a launcher it has
+            // already left.
+            self.device
+                .perform(&Command::Settle)
+                .map_err(RunError::Device)?;
         }
         let launcher = self.device.home_screen_app();
         for index in 1..=self.limit {

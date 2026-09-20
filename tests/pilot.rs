@@ -462,6 +462,14 @@ fn naming_the_app_brings_it_to_the_front_before_anything_is_judged() {
         Some(&Command::Launch("com.android.settings".into())),
         "the named app is brought to the front first",
     );
+    // An app takes seconds to start. Observing straight after the launch sees
+    // the screen it was launched from, and the run spends its first judgement
+    // deciding what to do about a launcher it has already left.
+    assert_eq!(
+        pilot.device().performed.get(1),
+        Some(&Command::Settle),
+        "the launch is given time to land before anything is read",
+    );
     // Having been launched, the run is in it — not "away from" the launcher it
     // never belonged to.
     let seen = seen.borrow();
