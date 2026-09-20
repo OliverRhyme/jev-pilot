@@ -537,3 +537,143 @@ impl Device for PinPad {
         Ok(())
     }
 }
+
+/// A screen that has begun to change has not finished changing. A view being
+/// built reports the rows it has so far, and acting on that half-built screen
+/// is acting on a screen that will not exist a moment later.
+///
+/// Measured on a transfer flow: tapping the one live row landed on the next
+/// step while only its Back button had rendered, so the only thing left to
+/// choose was Back — which returned to the screen just left. The run
+/// oscillated between the two until its budget ran out.
+///
+/// Settling therefore waits for two readings that agree, not for the first
+/// reading that differs. That catches a screen still arriving; a screen that
+/// holds a half-built state for longer than the settle will wait is caught
+/// instead by noticing the run has been on it before — see
+/// `a_screen_the_run_has_already_been_on_is_named_as_one`.
+#[test]
+fn a_screen_is_settled_when_it_stops_changing_not_when_it_starts() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("tap", Some("A2"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    let mut pilot = Pilot::new(HalfBuilt::default(), judge, &Android);
+
+    pilot.pursue("get to the next screen").expect("it completes");
+
+    let seen = seen.borrow();
+    // The second judgement must be about the finished screen, never the one
+    // rendering into it.
+    assert_eq!(
+        seen[1]["rows"]["A2"], "Continue",
+        "judged a half-built screen: {}",
+        seen[1],
+    );
+}
+
+/// Two screens can take turns forever without either one repeating an action
+/// against an unchanged screen, so the guard against standing still never
+/// fires. Measured: tapping the one live row reached a half-rendered screen
+/// whose only row was Back, going back returned to the screen just left, and
+/// the pair alternated until the budget ran out.
+///
+/// A run cannot tell "still loading" from "dead end" by looking. It can tell
+/// that it has been here before, which is the fact that makes waiting the
+/// obvious move rather than tapping again.
+#[test]
+fn a_screen_the_run_has_already_been_on_is_named_as_one() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("tap", Some("A2"), 0.99, 0.02),
+            answer("back", None, 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    let mut pilot = Pilot::new(Oscillating::default(), judge, &Android);
+
+    pilot.pursue("get somewhere").expect("it completes");
+
+    let seen = seen.borrow();
+    assert!(seen[0].get("seen_before").is_none(), "{}", seen[0]);
+    assert!(seen[1].get("seen_before").is_none(), "{}", seen[1]);
+    assert_eq!(
+        seen[2]["seen_before"], 2,
+        "the third screen is the first one again: {}",
+        seen[2],
+    );
+}
+
+/// A device that alternates between two screens, whatever is done to it.
+#[derive(Default)]
+struct Oscillating {
+    acts: u32,
+}
+
+impl Device for Oscillating {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        Ok(if self.acts % 2 == 0 {
+            screen_of(&["Go Back", "Select a method"])
+        } else {
+            screen_of(&["Go Back"])
+        })
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        self.acts += 1;
+        Ok(())
+    }
+}
+
+/// A device whose next screen arrives in two parts, as a real one does.
+#[derive(Default)]
+struct HalfBuilt {
+    reads_after_acting: std::cell::Cell<u32>,
+    acted: bool,
+}
+
+impl Device for HalfBuilt {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        if !self.acted {
+            return Ok(screen_of(&["Go Back", "Select a method"]));
+        }
+        let read = self.reads_after_acting.get();
+        self.reads_after_acting.set(read + 1);
+        // The new screen has only its Back button for the first readings; the
+        // rest of it arrives after that, as a view being built does.
+        Ok(if read < 2 {
+            screen_of(&["Go Back"])
+        } else {
+            screen_of(&["Go Back", "Continue"])
+        })
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        self.acted = true;
+        Ok(())
+    }
+}
+
+fn screen_of(labels: &[&str]) -> Snapshot {
+    use jev_pilot::snapshot::{Bounds, Element};
+
+    Snapshot::new(
+        labels
+            .iter()
+            .enumerate()
+            .map(|(row, label)| Element {
+                label: (*label).into(),
+                detail: None,
+                editable: false,
+                bounds: Bounds::from_origin_size(0, 100 * i32::try_from(row).unwrap_or(0), 500, 80),
+            })
+            .collect(),
+    )
+    .expect("a screen")
+}

@@ -580,6 +580,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// stops repeating itself and asks.
     pub const INEFFECTIVE_LIMIT: u32 = 3;
 
+    /// How many screens back a run remembers having been on.
+    pub const MEMORY: usize = 12;
+
     /// Wait for the screen to become something other than `before`.
     ///
     /// Returns whether it did. The reads are cheap through the helper — about
@@ -589,14 +592,30 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     fn settled_on_a_new_screen(&mut self, before: u64) -> Result<bool, Failure<D, J, X, C>> {
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(Self::CHANGE_BUDGET_MS);
+        let mut moved = false;
+        let mut last = before;
         while std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(Self::CHANGE_POLL_MS));
-            let now = self.device.observe().map_err(RunError::Device)?;
-            if now.fingerprint() != before {
+            let now = self.device.observe().map_err(RunError::Device)?.fingerprint();
+            if now != before {
+                moved = true;
+            }
+            // A screen that has begun to change has not finished changing. A
+            // view being built reports the rows it has so far, and acting on
+            // that is acting on a screen that will not exist a moment later —
+            // measured on a transfer flow, where only the new screen's Back
+            // button had rendered, so going back was the only thing to choose
+            // and the run oscillated between two screens.
+            //
+            // Two readings that agree, then, rather than the first that
+            // differs. The screen still has to have moved: unchanged twice
+            // over is exactly the action that did nothing.
+            if moved && now == last {
                 return Ok(true);
             }
+            last = now;
         }
-        Ok(false)
+        Ok(moved)
     }
 
     /// Tell the observer, if there is one, what this step saw and did.
@@ -750,6 +769,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         // The app the goal is about: whichever one was in front when the run
         // was given it. A run can only tell it has wandered off by comparing
         // against somewhere, and nothing else in a run names an app.
+        // The screens this run has judged, newest last. Two screens can take
+        // turns for ever without either one repeating an action against an
+        // unchanged screen, so the guard against standing still never fires:
+        // tap, half-rendered screen, back, the screen just left, tap again.
+        // Knowing it has been here before is what makes waiting the obvious
+        // move rather than tapping again.
+        let mut visited: Vec<u64> = Vec::new();
         let mut origin: Option<Box<str>> = self.app.clone();
         // Named rather than discovered: put the run where it was told to be,
         // before anything is judged about where it is.
@@ -779,6 +805,17 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             if self.types {
                 catalog = catalog.accepting_text();
             }
+            let here = snapshot.fingerprint();
+            let seen_before = visited
+                .iter()
+                .rev()
+                .position(|been| *been == here)
+                .map(|ago| u32::try_from(ago + 1).unwrap_or(u32::MAX));
+            visited.push(here);
+            if visited.len() > Self::MEMORY {
+                visited.remove(0);
+            }
+
             let questions = StepQuestions::checked(goal, &catalog, &self.criteria);
 
             let answers = self
@@ -792,6 +829,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                         origin.as_deref(),
                         snapshot.keyboard_open(),
                         &snapshot.notices().collect::<Vec<_>>(),
+                        seen_before,
                     ),
                     &questions,
                 )
@@ -967,6 +1005,7 @@ fn describe(
     origin: Option<&str>,
     keyboard_open: bool,
     says: &[&str],
+    seen_before: Option<u32>,
 ) -> serde_json::Value {
     // Rows are keyed the way the Choice offers them, so its options can be
     // bare keys and the text travels once rather than twice.
@@ -993,6 +1032,12 @@ fn describe(
         if origin.is_some_and(|origin| origin != app) {
             state["started_in"] = origin.into();
         }
+    }
+    if let Some(ago) = seen_before {
+        // How many steps back, rather than a bare flag: a screen returned to
+        // after two steps is a loop, and one returned to after ten is a form
+        // that was worked through and come back to.
+        state["seen_before"] = ago.into();
     }
     if !says.is_empty() {
         // Apart from the rows, and unkeyed: none of it can be chosen, and a
