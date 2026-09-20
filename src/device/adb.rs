@@ -827,6 +827,35 @@ impl AdbDevice {
         &self.reader
     }
 
+    /// Send a gesture to the helper over the tunnel.
+    #[cfg(feature = "http")]
+    fn post_action(endpoint: &str, token: Option<&str>, body: &str) -> Result<(), AdbError> {
+        let mut request = ureq::post(endpoint).header("Content-Type", "application/json");
+        if let Some(token) = token {
+            request = request.header(crate::device::helper::TOKEN_HEADER, token);
+        }
+        let mut response = request.send(body).map_err(|error| AdbError::Failed {
+            args: "helper action".into(),
+            stderr: error.to_string().into_boxed_str(),
+        })?;
+        let answered = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|error| AdbError::Failed {
+                args: "helper action".into(),
+                stderr: error.to_string().into_boxed_str(),
+            })?;
+        // The helper answers 200 with `success: false` for a gesture the
+        // system refused, so the status alone does not say whether it happened.
+        if answered.contains("\"success\":true") {
+            return Ok(());
+        }
+        Err(AdbError::Failed {
+            args: "helper action".into(),
+            stderr: format!("the helper did not perform it: {answered}").into_boxed_str(),
+        })
+    }
+
     /// Fetch a screen from a helper over the tunnel.
     #[cfg(feature = "http")]
     fn read_helper(endpoint: &str, token: Option<&str>) -> Result<String, AdbError> {
@@ -960,6 +989,33 @@ impl super::Device for AdbDevice {
     }
 
     fn perform(&mut self, command: &super::Command) -> Result<(), Self::Error> {
+        // A gesture through the helper is dispatched in-process; through the
+        // shell it spawns a process on the device, which measures at about
+        // 220ms. Text goes to the field directly rather than through the IME's
+        // key-character map, which silently drops everything outside ASCII.
+        //
+        // A failure here degrades the reader, like a failed read: the helper
+        // is gone, and the rest of the run belongs on the shell path.
+        #[cfg(feature = "http")]
+        if let Hierarchy::Helper { endpoint, token } = &self.hierarchy {
+            let endpoint = endpoint.replace(
+                crate::device::helper::DUMP_PATH,
+                crate::device::helper::ACTION_PATH,
+            );
+            let token = token.clone();
+            let size = self.size()?;
+            if let Some(action) = crate::device::helper::Action::for_command(command, size) {
+                match Self::post_action(&endpoint, token.as_deref(), action.body()) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        self.reader
+                            .degrade(format!("helper would not act: {error}"));
+                        self.hierarchy = Hierarchy::Cli;
+                    }
+                }
+            }
+        }
+
         let args = match command {
             super::Command::Tap(point) => self.adb.tap_args(*point),
             super::Command::TypeText(text) => {

@@ -31,6 +31,9 @@ pub const DEVICE_PORT: u16 = 18877;
 /// The path that answers with a UIAutomator-shaped hierarchy.
 pub const DUMP_PATH: &str = "/dump_xml";
 
+/// The path that carries out a gesture.
+pub const ACTION_PATH: &str = "/action";
+
 /// The header carrying the session token.
 pub const TOKEN_HEADER: &str = "X-Jev-Token";
 
@@ -390,5 +393,101 @@ impl Reader {
         self.uses_helper = false;
         self.why = Some(why.into());
         true
+    }
+}
+
+/// A gesture in the shape the helper's `/action` endpoint expects.
+///
+/// The shell path costs about 220ms per gesture — each `adb shell` spawns a
+/// process on the device — and `input text` goes through the current IME's
+/// key-character map, which silently produces nothing for anything outside
+/// ASCII. The helper dispatches the gesture itself and sets a field's text
+/// directly, so both problems go away.
+///
+/// Not every command has a form here, and what is missing is chosen to match
+/// what the shell path does rather than what the helper is capable of: the
+/// same command must not behave differently on two devices that differ only in
+/// whether a helper is installed. Those stay on the shell path, which is
+/// harmless — `input` does not open a `UiAutomation` connection, so it does not
+/// suppress the helper the way a dump does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Action {
+    body: String,
+}
+
+impl Action {
+    /// The helper form of this command, or `None` when it has none.
+    ///
+    /// `size` is the display, needed for the commands that carry a direction
+    /// rather than geometry.
+    #[must_use]
+    pub fn for_command(command: &crate::device::Command, size: (i32, i32)) -> Option<Self> {
+        use crate::act::{Direction, Swipe, SystemAct};
+        use crate::device::Command;
+        use serde_json::json;
+
+        let (width, height) = size;
+        let body = match command {
+            Command::Tap(at) => json!({"cmd": "tap", "x": at.x, "y": at.y}),
+            Command::DoubleTap(at) => json!({"cmd": "double_tap", "x": at.x, "y": at.y}),
+            Command::LongPress(at) => {
+                json!({"cmd": "long_press", "x": at.x, "y": at.y, "duration": 800})
+            }
+            Command::TypeText(text) => json!({"cmd": "type", "text": text.as_ref()}),
+            Command::Scroll(direction) => {
+                let x = width / 2;
+                // Inset from both edges: a drag that starts at one is claimed
+                // by the system as a navigation gesture.
+                let (near, far) = (height * 3 / 4, height / 4);
+                // Dragging the content up reveals what is below it.
+                let (y1, y2) = match direction {
+                    Direction::Down => (near, far),
+                    Direction::Up => (far, near),
+                };
+                json!({"cmd": "swipe", "x1": x, "y1": y1, "x2": x, "y2": y2, "duration": 300})
+            }
+            Command::SwipeFrom { from, direction } => {
+                let travel = width / 3;
+                let to = match direction {
+                    Swipe::Left => (from.x - travel).max(1),
+                    Swipe::Right => (from.x + travel).min(width - 1),
+                };
+                json!({
+                    "cmd": "swipe",
+                    "x1": from.x, "y1": from.y,
+                    "x2": to, "y2": from.y,
+                    "duration": 250,
+                })
+            }
+            Command::System(act) => {
+                let global = match act {
+                    SystemAct::Back => "back",
+                    SystemAct::Home => "home",
+                    SystemAct::AppSwitcher => "recents",
+                    // There is no global action for the keyboard's enter key.
+                    SystemAct::Submit => return None,
+                };
+                json!({"cmd": "global", "action": global})
+            }
+            // Neither of these has a helper form, for different reasons.
+            //
+            // Waiting is not a gesture: reporting success would tell a caller
+            // the screen had settled when nothing had happened at all.
+            //
+            // Peek the helper *could* serve, as a long press, and deliberately
+            // does not. The shell path refuses it, and a command that works on
+            // one backend and errors on the other differs by an accident of
+            // what happens to be installed.
+            Command::Settle | Command::Peek(_) => return None,
+        };
+        Some(Self {
+            body: body.to_string(),
+        })
+    }
+
+    /// The JSON to POST to `/action`.
+    #[must_use]
+    pub fn body(&self) -> &str {
+        &self.body
     }
 }

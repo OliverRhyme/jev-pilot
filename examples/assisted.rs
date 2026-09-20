@@ -1,7 +1,7 @@
 //! Drive a device with a programmatic second opinion instead of a person.
 //!
 //! ```sh
-//! TYPESAFE_API_KEY=... HELPER_TOKEN=... \
+//! TYPESAFE_API_KEY=... \
 //!   cargo run --example assisted -- <serial> "<goal>" "<text to type>"
 //! ```
 //!
@@ -61,10 +61,8 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         .ok_or("usage: assisted <serial> <goal> [text]")?;
     let text = args.next().unwrap_or_else(|| goal.clone());
 
-    let mut device = AdbDevice::new(serial);
-    if let Ok(token) = std::env::var("HELPER_TOKEN") {
-        device = device.through_helper(18888, "/dump_xml", Some(token.trim()))?;
-    }
+    // Reads and gestures go through the helper when the device has one.
+    let device = AdbDevice::new(serial).with_helper()?;
 
     let words = text.clone();
     let mut pilot = Pilot::new(device, SystemOne::new(ApiKey::from_env()?), &Android)

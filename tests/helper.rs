@@ -248,3 +248,131 @@ fn falling_back_never_reverses() {
         "the first cause is what explains the run, not what it led to"
     );
 }
+
+// ---------------------------------------------------------------- //
+// Acting through the helper
+// ---------------------------------------------------------------- //
+
+use jev_pilot::act::{Direction, Swipe, SystemAct};
+use jev_pilot::device::Command;
+use jev_pilot::device::helper::Action;
+use jev_pilot::snapshot::Point;
+
+fn body_of(command: &Command) -> String {
+    Action::for_command(command, (1080, 2400))
+        .expect("the helper serves this command")
+        .body()
+        .to_owned()
+}
+
+/// Every gesture the loop can issue must have a helper form, or the device
+/// would silently do nothing for the ones it does not.
+#[test]
+fn every_gesture_has_a_helper_form() {
+    let at = Point { x: 540, y: 1200 };
+    for command in [
+        Command::Tap(at),
+        Command::DoubleTap(at),
+        Command::LongPress(at),
+        Command::TypeText("hello".into()),
+        Command::Scroll(Direction::Down),
+        Command::SwipeFrom {
+            from: at,
+            direction: Swipe::Left,
+        },
+        Command::System(SystemAct::Back),
+    ] {
+        assert!(
+            Action::for_command(&command, (1080, 2400)).is_some(),
+            "no helper form for {command:?}"
+        );
+    }
+}
+
+/// What the helper serves must not differ from what the shell serves, or the
+/// same command would do different things on two devices that differ only in
+/// whether a helper happens to be installed. Waiting is not a gesture; Android
+/// has no force-touch preview and the shell path refuses `Peek`, so the helper
+/// refuses it too even though it could dispatch a long press.
+#[test]
+fn the_helper_serves_no_command_the_shell_refuses() {
+    let at = Point { x: 540, y: 1200 };
+
+    assert!(Action::for_command(&Command::Settle, (1080, 2400)).is_none());
+    assert!(Action::for_command(&Command::Peek(at), (1080, 2400)).is_none());
+    assert!(
+        Action::for_command(&Command::System(SystemAct::Submit), (1080, 2400)).is_none(),
+        "there is no global action for the keyboard's enter key"
+    );
+}
+
+#[test]
+fn a_tap_carries_the_point_it_was_given() {
+    let body = body_of(&Command::Tap(Point { x: 540, y: 1200 }));
+
+    assert!(body.contains("\"cmd\":\"tap\""), "{body}");
+    assert!(body.contains("\"x\":540"), "{body}");
+    assert!(body.contains("\"y\":1200"), "{body}");
+}
+
+/// The shell path refuses non-ASCII: `input text` goes through the IME's
+/// key-character map, which silently produces nothing for emoji and CJK. The
+/// helper sets the field's text directly, so there is nothing to refuse.
+#[test]
+fn text_the_shell_could_not_type_goes_through_unchanged() {
+    let body = body_of(&Command::TypeText("こんにちは 🎉".into()));
+
+    assert!(body.contains("\"cmd\":\"type\""), "{body}");
+    assert!(body.contains("こんにちは 🎉"), "{body}");
+}
+
+/// A quote or a backslash in a label must not end the JSON string early.
+#[test]
+fn text_with_json_punctuation_is_escaped() {
+    let body = body_of(&Command::TypeText(r#"say "hi" \ bye"#.into()));
+
+    assert!(body.contains(r#"\"hi\""#), "{body}");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&body).is_ok(),
+        "{body}"
+    );
+}
+
+/// A scroll is a swipe the device computes from its own size, and it must stay
+/// off the edges, where the system reads a drag as a navigation gesture.
+#[test]
+fn scrolling_stays_off_the_screen_edges() {
+    let (width, height) = (1080, 2400);
+    let body = body_of(&Command::Scroll(Direction::Down));
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+
+    assert_eq!(json["cmd"], "swipe");
+    for key in ["y1", "y2"] {
+        let edge = json[key].as_i64().expect(key);
+        assert!(edge > 0 && edge < i64::from(height), "{key} = {edge}");
+    }
+    assert!(
+        json["y1"].as_i64() > json["y2"].as_i64(),
+        "scrolling down drags the content upward: {body}"
+    );
+    assert!(json["x1"].as_i64().expect("x1") < i64::from(width));
+}
+
+/// The system gestures map to the helper's own global actions rather than to
+/// key events, which is what lets them work under gesture navigation where
+/// KEYCODE_APP_SWITCH is not bound to anything.
+#[test]
+fn system_gestures_use_the_helpers_global_actions() {
+    for (act, expected) in [
+        (SystemAct::Back, "back"),
+        (SystemAct::Home, "home"),
+        (SystemAct::AppSwitcher, "recents"),
+    ] {
+        let body = body_of(&Command::System(act));
+        assert!(body.contains("\"cmd\":\"global\""), "{body}");
+        assert!(
+            body.contains(expected),
+            "{act:?} should map to {expected}: {body}"
+        );
+    }
+}

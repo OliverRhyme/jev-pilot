@@ -1,7 +1,7 @@
 //! Drive a device, handing every impasse to an external decider over files.
 //!
 //! ```sh
-//! TYPESAFE_API_KEY=... HELPER_TOKEN=... \
+//! TYPESAFE_API_KEY=... \
 //!   cargo run --example handoff -- <serial> "<goal>" /tmp/handoff
 //! ```
 //!
@@ -83,10 +83,8 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
     let criteria: Vec<String> = args.collect();
     std::fs::create_dir_all(&dir)?;
 
-    let mut device = AdbDevice::new(serial);
-    if let Ok(token) = std::env::var("HELPER_TOKEN") {
-        device = device.through_helper(18888, "/dump_xml", Some(token.trim()))?;
-    }
+    // Reads and gestures go through the helper when the device has one.
+    let device = AdbDevice::new(serial).with_helper()?;
 
     let ask_dir = dir.clone();
     let write_dir = dir.clone();

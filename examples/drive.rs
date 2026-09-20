@@ -95,20 +95,14 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
     let serial = args.next().ok_or("usage: drive <serial> <goal>")?;
     let goal = args.next().ok_or("usage: drive <serial> <goal>")?;
 
-    // An accessibility helper already holding a UiAutomation session answers in
-    // ~50ms where `uiautomator dump` takes ~2.5s. Used when a token is set.
-    let device = AdbDevice::new(serial);
-    let device = match std::env::var("HELPER_TOKEN") {
-        Ok(token) if !token.trim().is_empty() => {
-            let device = device.through_helper(18888, "/dump_xml", Some(token.trim()))?;
-            println!("screens : accessibility helper");
-            device
-        }
-        _ => {
-            println!("screens : uiautomator CLI (set HELPER_TOKEN for the fast path)");
-            device
-        }
-    };
+    // The helper reads a screen in ~50ms where `uiautomator dump` takes ~2.5s,
+    // and dispatches gestures in-process. Absent, everything still works.
+    // `cargo run --example helper -- <serial> install` puts one on a device.
+    let device = AdbDevice::new(serial).with_helper()?;
+    match device.reader().why() {
+        None => println!("screens : accessibility helper"),
+        Some(why) => println!("screens : uiautomator CLI ({why})"),
+    }
     let judge = SystemOne::new(ApiKey::from_env()?);
     let floor = Confidence::new(0.6).ok_or("floor must be a probability")?;
 
