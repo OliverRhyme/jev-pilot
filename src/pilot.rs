@@ -277,6 +277,14 @@ pub struct StepReport<'s> {
     pub index: u32,
     /// The rows the screen offered, as the model was shown them.
     pub rows: Vec<String>,
+    /// What the screen said, beyond what it offered to act on.
+    pub says: Vec<String>,
+    /// Which application the screen belonged to, when the reader could say.
+    ///
+    /// Carried so a run can be explained afterwards. An ending of "blocked"
+    /// means something quite different in the app the goal was about than on a
+    /// launcher the run wandered onto.
+    pub app: Option<&'s str>,
     /// What the model chose, if it was certain enough to act.
     pub chosen: Option<&'s Act>,
     /// How sure the model was about *what* to do.
@@ -608,6 +616,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 .refs()
                 .map(|(_, element)| element.describe())
                 .collect(),
+            says: snapshot.notices().map(ToOwned::to_owned).collect(),
+            app: snapshot.app(),
             chosen,
             operation_confidence: answers.operation.confidence,
             target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),

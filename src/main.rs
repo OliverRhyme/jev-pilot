@@ -446,6 +446,8 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
     let goal = &*goal;
     let dir = desk_dir.unwrap_or_else(|| std::env::temp_dir().join("jev-pilot-desk"));
     let desk = Rc::new(Desk::new(dir.clone(), texts)?);
+    let transcript = dir.join("steps.jsonl");
+    let _ = std::fs::remove_file(&transcript);
 
     let device = AdbDevice::new(choose_device(named)?).with_helper()?;
     println!("device : {}", device.serial());
@@ -474,7 +476,10 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
         .limited_to(steps)
         .escalating_to(move |impasse: &Impasse<'_>| choosing.choose(impasse))
         .writing_with(move |request: &Writing<'_>| writing.compose(request))
-        .watching(report);
+        .watching(move |step: &jev_pilot::pilot::StepReport<'_>| {
+            report(step);
+            transcribe(&transcript, step);
+        });
 
     let ending = pilot.pursue(goal)?;
     println!("\nending : {ending:?}");
@@ -527,6 +532,38 @@ fn describe(impasse: &Impasse<'_>) -> String {
 }
 
 /// One line per step, and one more for what it chose.
+/// Append one step to the run's transcript.
+///
+/// A run that ends early otherwise leaves only its ending: "blocked", with no
+/// way to ask blocked by what, because only an impasse ever prints a screen.
+/// One line per step, as JSON, so the answer is on disk when the question is
+/// asked afterwards rather than needing the run done again.
+fn transcribe(to: &std::path::Path, step: &jev_pilot::pilot::StepReport<'_>) {
+    use std::io::Write as _;
+
+    let line = serde_json::json!({
+        "step": step.index,
+        "app": step.app,
+        "rows": step.rows,
+        "screen_says": step.says,
+        "chosen": step.chosen.map(|act| format!("{act:?}")),
+        "operation_confidence": step.operation_confidence.get(),
+        "target_confidence": step.target_confidence.map(jev_pilot::judgment::Confidence::get),
+        "goal_met": step.goal_met.to_string(),
+        "is_error_screen": step.is_error_screen,
+    });
+    // A transcript that cannot be written must not end the run it is
+    // describing: it is an account of the work, not the work.
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(to)
+        && let Ok(line) = serde_json::to_string(&line)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 fn report(step: &jev_pilot::pilot::StepReport<'_>) {
     println!(
         "step {}  {} rows  goal_met {}  error {:.2}",

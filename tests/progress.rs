@@ -3,7 +3,7 @@
 use jev_pilot::act::{Catalog, Outcome};
 use jev_pilot::device::{Command, Device};
 use jev_pilot::judgment::Progress;
-use jev_pilot::pilot::{Ending, Judge, Pilot};
+use jev_pilot::pilot::{Ending, Judge, Pilot, StepReport};
 use jev_pilot::platform::{Android, Platform};
 use jev_pilot::snapshot::Snapshot;
 use jev_pilot::step::{StepAnswers, StepQuestions};
@@ -116,4 +116,44 @@ fn the_progress_question_is_a_score_with_ordered_levels() {
         levels[0].to_string().to_lowercase().contains("nothing"),
         "{levels:?}"
     );
+}
+
+/// A run that ends at step one leaves no account of what it was looking at,
+/// because only an impasse prints the screen. Then the ending is all there is
+/// — "Blocked" with no way to ask blocked by what — and the next move is to
+/// guess. A report carries the screen so a finished run can be explained.
+#[test]
+fn a_step_is_reported_with_what_the_screen_said_and_which_app_it_was() {
+    let seen = std::cell::RefCell::new(Vec::new());
+    {
+        let mut pilot = Pilot::new(PinPad, Scripted(RefCell::new(vec![turn("done", 1.9)])), &Android)
+            .watching(|report: &StepReport<'_>| {
+                seen.borrow_mut()
+                    .push((report.app.map(str::to_owned), report.says.clone()));
+            });
+        pilot.pursue("enter the PIN").expect("the run completes");
+    }
+
+    let seen = seen.borrow();
+    let (app, says) = &seen[0];
+    assert_eq!(app.as_deref(), Some("com.example.wallet"));
+    assert!(
+        says.iter().any(|s| s.contains("4 of 6 digits entered")),
+        "{says:?}",
+    );
+}
+
+/// A screen of keys, and words that say how far through it is.
+struct PinPad;
+
+impl Device for PinPad {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        Ok(Android
+            .parse_hierarchy(include_str!("fixtures/pin-pad.xml"))
+            .expect("fixture parses"))
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        Ok(())
+    }
 }
