@@ -409,7 +409,7 @@ fn a_screen_only_the_cli_can_see_ends_the_helpers_use() {
 #[test]
 fn giving_up_on_the_helper_says_what_the_cli_saw() {
     let mut reader = Reader::helper();
-    reader.degrade(Reader::blind_to_this_screen(111));
+    reader.degrade(Reader::blind_to_this_screen(111, "the uiautomator CLI"));
 
     assert!(!reader.uses_helper());
     assert!(
@@ -428,11 +428,16 @@ fn giving_up_on_the_helper_says_what_the_cli_saw() {
 fn borrowing_the_cli_for_one_screen_keeps_the_helper() {
     let mut reader = Reader::helper();
 
-    reader.borrow_cli(Reader::blind_to_this_screen(106));
+    reader.borrow_cli(Reader::blind_to_this_screen(106, "the privileged reader"));
 
     assert!(reader.uses_helper(), "still the helper for the next screen");
     assert_eq!(reader.borrowed(), 1);
-    assert!(reader.why().expect("a reason").contains("106"));
+    let why = reader.why().expect("a reason");
+    assert!(why.contains("106"), "{why}");
+    assert!(
+        why.contains("privileged reader"),
+        "it must say which one saw them: {why}"
+    );
 }
 
 /// Reading through the CLI opens a UiAutomation connection, and Android

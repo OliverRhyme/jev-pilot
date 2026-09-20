@@ -593,6 +593,9 @@ struct DeepReader {
     token: Box<str>,
     child: std::process::Child,
     stop: Vec<String>,
+    /// The two settings writes that bind the helper service again.
+    revive: (Vec<String>, Vec<String>),
+    settle_on: Vec<String>,
 }
 
 /// Stopping it is asked of the device.
@@ -604,13 +607,28 @@ struct DeepReader {
 #[cfg(feature = "http")]
 impl Drop for DeepReader {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("adb")
-            .args(&self.stop)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        let quietly = |args: &[String]| {
+            let _ = std::process::Command::new("adb")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        };
+        quietly(&self.stop);
         let _ = self.child.kill();
         let _ = self.child.wait();
+
+        // Stopping the reader kills the whole app process, because the
+        // instrumentation and the accessibility service share one. That leaves
+        // the service enabled and unbound, and Android does not bind it again
+        // on its own — so the thing that broke it puts it back, rather than
+        // leaving the next run to discover it.
+        quietly(&self.revive.0);
+        std::thread::sleep(std::time::Duration::from_millis(
+            AdbDevice::ENABLE_SETTLE_MS,
+        ));
+        quietly(&self.revive.1);
+        quietly(&self.settle_on);
     }
 }
 
@@ -1219,11 +1237,21 @@ impl AdbDevice {
         let token = Token::random().map_err(AdbError::Spawn)?;
         Self::run(&self.adb.push_token_args(&token))?;
 
+        // Worked out now, while the settings can still be read: by the time
+        // this is dropped the reader may be the reason a read would fail.
+        let enabled = Self::run(&self.adb.enabled_services_args()).unwrap_or_default();
+        let (without, with) = crate::device::helper::Provision::revival_of(&enabled);
+
         Ok(DeepReader {
             endpoint: format!("{base}{DUMP_PATH}").into_boxed_str(),
             token: Box::from(token.expose()),
             child,
             stop: self.adb.stop_instrument_args(),
+            revive: (
+                self.adb.set_enabled_services_args(&without),
+                self.adb.set_enabled_services_args(&with),
+            ),
+            settle_on: self.adb.enable_accessibility_args(),
         })
     }
 
@@ -1302,9 +1330,9 @@ impl super::Device for AdbDevice {
             // where `uiautomator dump` takes 2.5s. It costs a process to hold
             // open, so it is started the first time a screen turns out to need
             // it rather than for every run.
-            let via_cli = match self.read_deeply() {
-                Some(snapshot) => snapshot?,
-                None => self.read_via_cli()?,
+            let (via_cli, reader) = match self.read_deeply() {
+                Some(snapshot) => (snapshot?, "the privileged reader"),
+                None => (self.read_via_cli()?, "the uiautomator CLI"),
             };
             let seen = via_cli.refs().count();
             if crate::device::helper::Reader::cli_saw_more(0, seen) {
@@ -1312,7 +1340,9 @@ impl super::Device for AdbDevice {
                 // screens are withheld is a property of the screens: Settings'
                 // Wi-Fi panel is, and the rest of Settings is not.
                 self.reader
-                    .borrow_cli(crate::device::helper::Reader::blind_to_this_screen(seen));
+                    .borrow_cli(crate::device::helper::Reader::blind_to_this_screen(
+                        seen, reader,
+                    ));
             }
             // Whatever it saw is a better answer than the helper's nothing;
             // when the CLI saw nothing either the screen really is empty, which

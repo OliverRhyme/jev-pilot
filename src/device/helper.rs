@@ -459,12 +459,12 @@ impl Reader {
         helper_rows == 0 && cli_rows > 0
     }
 
-    /// The reason to record when the helper could not see a screen the CLI
-    /// could.
+    /// The reason to record when the helper could not see a screen something
+    /// privileged could, naming which reader saw it.
     #[must_use]
-    pub fn blind_to_this_screen(cli_rows: usize) -> String {
+    pub fn blind_to_this_screen(rows: usize, reader: &str) -> String {
         format!(
-            "the helper read no rows from a screen the uiautomator CLI read {cli_rows} from, \
+            "the helper read no rows from a screen {reader} read {rows} from, \
              so that window is not served to an accessibility service"
         )
     }
