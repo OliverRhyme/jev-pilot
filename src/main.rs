@@ -354,6 +354,11 @@ fn pursue(
 
     let ending = pilot.pursue(goal)?;
     println!("\nending : {ending:?}");
+    // Said at the end as well as the start: a run can lose the helper part way
+    // through, and the reason is the only account of why it went slow.
+    if let Some(why) = pilot.device().reader().why() {
+        println!("screens: uiautomator CLI ({why})");
+    }
     let _ = std::fs::remove_file(dir.join("ask.json"));
     Ok(())
 }

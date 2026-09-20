@@ -960,8 +960,6 @@ impl AdbDevice {
 
     /// One reading of the screen, from whichever backend is in use.
     fn read_screen(&mut self) -> Result<crate::snapshot::Snapshot, AdbError> {
-        use crate::platform::Platform as _;
-
         // A helper that stops answering - killed by the ROM, switched off, or
         // cut off by a replug - must not end a run the CLI could finish. The
         // switch is permanent: see `Reader` for why going back is worse than
@@ -969,13 +967,7 @@ impl AdbDevice {
         #[cfg(feature = "http")]
         if let Hierarchy::Helper { endpoint, token } = &self.hierarchy {
             match Self::read_helper(endpoint, token.as_deref()) {
-                Ok(raw) => {
-                    let document = Adb::extract_hierarchy(&raw).ok_or(AdbError::NoActiveWindow)?;
-                    return self
-                        .platform
-                        .parse_hierarchy(document)
-                        .map_err(AdbError::Hierarchy);
-                }
+                Ok(raw) => return self.parse(&raw),
                 Err(error) => {
                     self.reader
                         .degrade(format!("helper stopped answering: {error}"));
@@ -983,18 +975,25 @@ impl AdbDevice {
                 }
             }
         }
+        self.read_via_cli()
+    }
 
+    /// Parse a hierarchy document as this platform describes screens.
+    fn parse(&self, raw: &str) -> Result<crate::snapshot::Snapshot, AdbError> {
+        use crate::platform::Platform as _;
+        let document = Adb::extract_hierarchy(raw).ok_or(AdbError::NoActiveWindow)?;
+        self.platform
+            .parse_hierarchy(document)
+            .map_err(AdbError::Hierarchy)
+    }
+
+    /// One reading through `uiautomator dump`, whatever the helper is doing.
+    fn read_via_cli(&mut self) -> Result<crate::snapshot::Snapshot, AdbError> {
         let args = self.adb.dump_args();
         let mut last_settled_failure = None;
         for attempt in 1..=self.dump_attempts {
             match Self::run(&args) {
-                Ok(raw) => {
-                    let document = Adb::extract_hierarchy(&raw).ok_or(AdbError::NoActiveWindow)?;
-                    return self
-                        .platform
-                        .parse_hierarchy(document)
-                        .map_err(AdbError::Hierarchy);
-                }
+                Ok(raw) => return self.parse(&raw),
                 Err(AdbError::NeverSettled { .. }) => {
                     last_settled_failure = Some(attempt);
                     std::thread::sleep(std::time::Duration::from_millis(300 * u64::from(attempt)));
@@ -1027,16 +1026,39 @@ impl super::Device for AdbDevice {
         //
         // A screen that is genuinely empty is returned as it is, once the
         // attempts are spent.
-        for attempt in 1..=Self::EMPTY_ATTEMPTS {
-            let snapshot = self.read_screen()?;
-            if snapshot.worth_acting_on() || attempt == Self::EMPTY_ATTEMPTS {
-                return Ok(snapshot);
+        let mut blank = self.read_screen()?;
+        for attempt in 1..Self::EMPTY_ATTEMPTS {
+            if blank.worth_acting_on() {
+                return Ok(blank);
             }
             std::thread::sleep(std::time::Duration::from_millis(
                 Self::EMPTY_BACKOFF_MS * u64::from(attempt),
             ));
+            blank = self.read_screen()?;
         }
-        unreachable!("the last attempt returns")
+        if blank.worth_acting_on() {
+            return Ok(blank);
+        }
+
+        // Still nothing. An empty screen from the helper is not proof of an
+        // empty screen: some windows are simply not served to an accessibility
+        // service, and the CLI's privileged connection reads them anyway. One
+        // dump settles which of the two this is.
+        #[cfg(feature = "http")]
+        if self.reader.uses_helper() {
+            let via_cli = self.read_via_cli()?;
+            let seen = via_cli.refs().count();
+            if crate::device::helper::Reader::cli_saw_more(0, seen) {
+                self.reader
+                    .degrade(crate::device::helper::Reader::blind_to_this_screen(seen));
+                self.hierarchy = Hierarchy::Cli;
+            }
+            // Whatever it saw is a better answer than the helper's nothing;
+            // the helper is kept when the CLI saw nothing either, because then
+            // the screen really is empty and that is no fault of the helper's.
+            return Ok(via_cli);
+        }
+        Ok(blank)
     }
 
     fn perform(&mut self, command: &super::Command) -> Result<(), Self::Error> {

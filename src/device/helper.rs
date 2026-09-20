@@ -382,6 +382,34 @@ impl Reader {
         self.why.as_deref()
     }
 
+    /// Whether a CLI reading should replace the helper's and end its use.
+    ///
+    /// An empty screen from the helper is not proof of an empty screen. Some
+    /// windows are simply not served to an accessibility service: measured on
+    /// a Pixel, Settings' Internet panel gave the helper one window and four
+    /// nodes while `uiautomator dump` gave 111, and the platform's own window
+    /// list showed the application window present, focused and active the
+    /// whole time. `UiAutomation` is a privileged connection; an accessibility
+    /// service asking for that window's content is given nothing.
+    ///
+    /// A screen that neither can read is genuinely empty — mid-transition, or
+    /// a video filling the display — and is no reason to give up the helper
+    /// for the rest of the run.
+    #[must_use]
+    pub const fn cli_saw_more(helper_rows: usize, cli_rows: usize) -> bool {
+        helper_rows == 0 && cli_rows > 0
+    }
+
+    /// The reason to record when the helper could not see a screen the CLI
+    /// could.
+    #[must_use]
+    pub fn blind_to_this_screen(cli_rows: usize) -> String {
+        format!(
+            "the helper read no rows from a screen the uiautomator CLI read {cli_rows} from, \
+             so that window is not served to an accessibility service"
+        )
+    }
+
     /// Give up on the helper for the rest of this run.
     ///
     /// Returns whether this call was the one that changed it, so a caller can

@@ -376,3 +376,45 @@ fn system_gestures_use_the_helpers_global_actions() {
         );
     }
 }
+
+/// Some screens are readable through `uiautomator` and not through the helper
+/// at all. Measured on a Pixel, on Settings' Internet panel: the helper and
+/// ARTEMIS's own helper each reported one window and four nodes, while
+/// `uiautomator dump` reported 111 — and the platform's own window list showed
+/// the application window as present, focused and active. An accessibility
+/// service asks for that window's content and is given nothing; `UiAutomation`
+/// is a privileged connection and is not refused.
+///
+/// So an empty screen from the helper is not proof of an empty screen. One CLI
+/// read settles it, and if that sees rows the helper cannot, the run belongs on
+/// the CLI from then on.
+#[test]
+fn a_screen_only_the_cli_can_see_ends_the_helpers_use() {
+    assert!(
+        Reader::cli_saw_more(0, 111),
+        "the helper was blind to this screen"
+    );
+    assert!(
+        !Reader::cli_saw_more(0, 0),
+        "a genuinely empty screen is not the helper's fault"
+    );
+    assert!(
+        !Reader::cli_saw_more(23, 111),
+        "a helper that sees the screen is kept, whatever the node counts are"
+    );
+}
+
+/// The reason has to name what was actually observed, because it is the only
+/// account of why a run went slow.
+#[test]
+fn giving_up_on_the_helper_says_what_the_cli_saw() {
+    let mut reader = Reader::helper();
+    reader.degrade(Reader::blind_to_this_screen(111));
+
+    assert!(!reader.uses_helper());
+    assert!(
+        reader.why().expect("a reason").contains("111"),
+        "{:?}",
+        reader.why()
+    );
+}
