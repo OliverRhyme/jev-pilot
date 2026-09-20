@@ -516,6 +516,40 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         &self.device
     }
 
+    /// How long to keep looking for the screen to change after acting.
+    ///
+    /// Long enough for a dialog to swap its contents or a keyboard to come and
+    /// go, which are slower than an ordinary screen transition, and short
+    /// enough that an action which genuinely changed nothing is noticed rather
+    /// than waited on.
+    pub const CHANGE_BUDGET_MS: u64 = 2_000;
+
+    /// How often to look while waiting.
+    pub const CHANGE_POLL_MS: u64 = 100;
+
+    /// How many actions in a row may leave the screen untouched before a run
+    /// stops repeating itself and asks.
+    pub const INEFFECTIVE_LIMIT: u32 = 3;
+
+    /// Wait for the screen to become something other than `before`.
+    ///
+    /// Returns whether it did. The reads are cheap through the helper — about
+    /// 60ms — so this costs a fraction of the fixed delay it replaces, and
+    /// unlike a fixed delay it is right for both a quick transition and a slow
+    /// one.
+    fn settled_on_a_new_screen(&mut self, before: u64) -> Result<bool, Failure<D, J, X, C>> {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(Self::CHANGE_BUDGET_MS);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(Self::CHANGE_POLL_MS));
+            let now = self.device.observe().map_err(RunError::Device)?;
+            if now.fingerprint() != before {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Tell the observer, if there is one, what this step saw and did.
     fn report(
         &mut self,
@@ -658,6 +692,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     #[allow(clippy::too_many_lines)]
     pub fn pursue(&mut self, goal: &str) -> RunResult<D, J, X, C> {
         let mut previous: Option<String> = None;
+        // How many actions in a row have left the screen exactly as it was.
+        let mut ineffective: u32 = 0;
         for index in 1..=self.limit {
             let snapshot = self.device.observe().map_err(RunError::Device)?;
             let mut catalog = Catalog::for_screen(&snapshot, self.platform);
@@ -784,6 +820,34 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             match resolved {
                 Reached::Command(command) => {
                     self.device.perform(&command).map_err(RunError::Device)?;
+                    // An action and its effect are not the same instant. Read
+                    // straight after acting and the screen is still the one
+                    // acted on, so the next judgement is made about the past —
+                    // and the same action gets chosen again against what looks
+                    // like an unchanged screen. Wait for it to move instead of
+                    // for a fixed time, so a quick transition costs a moment
+                    // and a slow one is still waited out.
+                    let moved = self.settled_on_a_new_screen(snapshot.fingerprint())?;
+                    if moved {
+                        ineffective = 0;
+                    } else {
+                        // It never moved. That is worth saying: a run that
+                        // does not know its action achieved nothing will
+                        // cheerfully do it again.
+                        ineffective += 1;
+                        previous = Some(format!(
+                            "{} — the screen did not change",
+                            previous.as_deref().unwrap_or("Acted")
+                        ));
+                        if ineffective >= Self::INEFFECTIVE_LIMIT {
+                            // Already reported for this step, above.
+                            return Ok(Ending::Uncertain {
+                                because: Indecision::NoProgress {
+                                    repeated: ineffective,
+                                },
+                            });
+                        }
+                    }
                 }
                 Reached::Nothing => {}
                 Reached::Unreachable => {

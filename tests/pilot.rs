@@ -1,6 +1,6 @@
 //! The loop: observe, judge, act, repeat.
 
-use jev_pilot::act::{Outcome, SystemAct};
+use jev_pilot::act::{Indecision, Outcome, SystemAct};
 use jev_pilot::device::{Command, Device};
 use jev_pilot::judgment::Confidence;
 use jev_pilot::pilot::{Ending, Judge, Pilot};
@@ -15,12 +15,24 @@ const SETTINGS: &str = include_str!("fixtures/settings.xml");
 #[derive(Default)]
 struct Fake {
     performed: Vec<Command>,
+    /// Whether acting on this device changes what is on it.
+    ///
+    /// A device that never moves is the interesting case for one test and the
+    /// wrong case for every other: the loop now notices when its actions
+    /// achieve nothing, so a fake that never changes ends runs early.
+    inert: bool,
 }
 
 impl Device for Fake {
     type Error = Infallible;
     fn observe(&mut self) -> Result<Snapshot, Infallible> {
-        Ok(Android.parse_hierarchy(SETTINGS).expect("fixture parses"))
+        let mut screen = Android.parse_hierarchy(SETTINGS).expect("fixture parses");
+        if !self.inert {
+            // Something about it differs after each action, as a real screen
+            // does; the keyboard is the cheapest thing to vary.
+            screen = screen.with_keyboard_open(self.performed.len() % 2 == 1);
+        }
+        Ok(screen)
     }
     fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
         self.performed.push(command.clone());
@@ -126,6 +138,46 @@ fn the_loop_gives_up_after_its_step_limit() {
         pilot.device().performed[0],
         Command::System(SystemAct::Back)
     ));
+}
+
+/// Confidence says nothing about effect. A run can choose the right-looking
+/// row at 0.99 and achieve nothing, then choose it again, because the screen
+/// it is judging is the one it already acted on — which on a real form meant
+/// twelve identical taps, each a live request to a banking API.
+///
+/// A device that never moves is exactly that case, and the run stops asking
+/// rather than spending its whole budget on it.
+#[test]
+fn a_run_stops_repeating_an_action_that_changes_nothing() {
+    let turns = vec![answer("back", None, 0.99, 0.02); 12];
+    let mut pilot = Pilot::new(
+        Fake {
+            inert: true,
+            ..Fake::default()
+        },
+        Scripted::new(turns),
+        &Android,
+    )
+    .limited_to(12);
+
+    let ending = pilot
+        .pursue("Something that cannot be reached by going back")
+        .expect("the run completes");
+
+    assert!(
+        matches!(
+            ending,
+            Ending::Uncertain {
+                because: Indecision::NoProgress { .. }
+            }
+        ),
+        "got {ending:?}"
+    );
+    assert!(
+        pilot.device().performed.len() < 12,
+        "it must stop short of the budget, did {} of 12",
+        pilot.device().performed.len()
+    );
 }
 
 /// A step is shown what the previous one did. Without it the model judging

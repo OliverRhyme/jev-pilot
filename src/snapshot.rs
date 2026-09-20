@@ -262,6 +262,36 @@ impl Snapshot {
         self.keyboard_open
     }
 
+    /// What is on this screen, as one number.
+    ///
+    /// Two reads of an unchanged screen give the same value; a screen that has
+    /// moved on gives a different one. That is what lets a run tell the result
+    /// of its action from the screen it acted on — and a loop that cannot tell
+    /// those apart re-chooses the same action against what looks like an
+    /// unchanged screen.
+    ///
+    /// Deliberately not the [`Generation`]: every read makes a new one, so
+    /// comparing those would call every screen different.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        use core::hash::{Hash as _, Hasher as _};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        // The keyboard changes what can be done without changing the rows
+        // behind it, so it belongs in the identity of the screen.
+        self.keyboard_open.hash(&mut hasher);
+        for element in &self.elements {
+            element.label.hash(&mut hasher);
+            element.detail.hash(&mut hasher);
+            element.editable.hash(&mut hasher);
+            element.bounds.left.hash(&mut hasher);
+            element.bounds.top.hash(&mut hasher);
+            element.bounds.right.hash(&mut hasher);
+            element.bounds.bottom.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// Whether this screen offers anything to act on.
     ///
     /// A screen caught between two others parses to nothing: the old view is

@@ -410,6 +410,17 @@ pub enum Indecision {
         /// The floor the caller required.
         floor: Confidence,
     },
+    /// The same action kept leaving the screen exactly as it was.
+    ///
+    /// Confidence says nothing about effect: a run can choose the right-looking
+    /// row at 0.95 and achieve nothing, then choose it again because the screen
+    /// it is judging is the one it already acted on. Seen on a real form —
+    /// twelve identical taps at 0.90 to 0.97, each a live request to a banking
+    /// API, none of them progress.
+    NoProgress {
+        /// How many actions in a row changed nothing.
+        repeated: u32,
+    },
     /// The model named something this screen never offered.
     NotOffered {
         /// What was named.
@@ -431,6 +442,10 @@ impl fmt::Display for Indecision {
                 floor.get()
             ),
             Self::NotOffered { what } => write!(f, "{what} was not offered"),
+            Self::NoProgress { repeated } => write!(
+                f,
+                "{repeated} actions in a row left the screen exactly as it was"
+            ),
             Self::NoTarget => write!(f, "the operation needs a target and none was chosen"),
             Self::Covered => write!(f, "the row chosen is covered by what is drawn over it"),
         }

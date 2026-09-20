@@ -410,3 +410,90 @@ fn the_screen_says_whether_the_keyboard_is_open() {
             .keyboard_open()
     );
 }
+
+/// After acting, a run has to know whether the screen it is looking at is the
+/// result or still the screen it acted on. Comparing what is on them is enough
+/// and costs nothing: a fingerprint over the rows and where they sit.
+#[test]
+fn a_screen_can_be_told_apart_from_the_one_before_it() {
+    let row = |label: &str, top: i32| Element {
+        label: label.into(),
+        detail: None,
+        editable: false,
+        bounds: Bounds {
+            left: 0,
+            top,
+            right: 100,
+            bottom: top + 50,
+        },
+    };
+
+    let before = Snapshot::new(vec![row("Continue", 0)]).expect("a screen");
+    let same = Snapshot::new(vec![row("Continue", 0)]).expect("a screen");
+    let moved = Snapshot::new(vec![row("Continue", 80)]).expect("a screen");
+    let other = Snapshot::new(vec![row("Back", 0)]).expect("a screen");
+
+    assert_eq!(
+        before.fingerprint(),
+        same.fingerprint(),
+        "same rows, same place"
+    );
+    assert_ne!(before.fingerprint(), moved.fingerprint(), "the row moved");
+    assert_ne!(before.fingerprint(), other.fingerprint(), "different rows");
+}
+
+/// A generation is not identity. Every read makes a new one, so comparing
+/// those would call every screen different and defeat the purpose.
+#[test]
+fn a_fingerprint_is_about_what_is_on_screen_not_when_it_was_read() {
+    let element = || Element {
+        label: "Continue".into(),
+        detail: None,
+        editable: false,
+        bounds: Bounds {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 50,
+        },
+    };
+
+    let first = Snapshot::new(vec![element()]).expect("a screen");
+    let second = Snapshot::new(vec![element()]).expect("a screen");
+
+    assert_ne!(
+        format!("{:?}", first.refs().next().expect("a row").0),
+        format!("{:?}", second.refs().next().expect("a row").0),
+        "the references differ, as they must"
+    );
+    assert_eq!(
+        first.fingerprint(),
+        second.fingerprint(),
+        "the screen does not"
+    );
+}
+
+/// The keyboard arriving or leaving changes what a run can do, so it counts as
+/// the screen having changed even when the rows behind it have not.
+#[test]
+fn the_keyboard_coming_up_counts_as_a_change() {
+    let rows = || {
+        vec![Element {
+            label: "Number to be loaded".into(),
+            detail: None,
+            editable: true,
+            bounds: Bounds {
+                left: 41,
+                top: 360,
+                right: 967,
+                bottom: 493,
+            },
+        }]
+    };
+    let closed = Snapshot::new(rows()).expect("a screen");
+    let open = Snapshot::new(rows())
+        .expect("a screen")
+        .with_keyboard_open(true);
+
+    assert_ne!(closed.fingerprint(), open.fingerprint());
+}
