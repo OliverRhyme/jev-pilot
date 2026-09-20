@@ -1,0 +1,120 @@
+//! Reading a command line. Pure: nothing here touches a device.
+
+use jev_pilot::cli::{Invocation, parse};
+
+fn parsed(words: &[&str]) -> Invocation {
+    parse(words.iter().map(|w| (*w).to_owned())).expect("a valid command line")
+}
+
+/// The common case is one argument: what you want done.
+#[test]
+fn a_goal_is_the_whole_command_line() {
+    let Invocation::Run {
+        goal,
+        device,
+        accept,
+        ..
+    } = parsed(&["Open the Wi-Fi settings"])
+    else {
+        panic!("expected a run");
+    };
+
+    assert_eq!(&*goal, "Open the Wi-Fi settings");
+    assert!(device.is_none(), "one attached device needs no naming");
+    assert!(accept.is_empty());
+}
+
+/// A goal is not optional: without one there is nothing to pursue, and
+/// defaulting to something would drive a stranger's phone somewhere.
+#[test]
+fn a_run_without_a_goal_is_refused() {
+    assert!(parse(Vec::new()).is_err());
+    assert!(parse(["--device".to_owned(), "abc123".to_owned()]).is_err());
+}
+
+#[test]
+fn a_device_and_acceptance_criteria_can_be_named() {
+    let Invocation::Run {
+        goal,
+        device,
+        accept,
+        steps,
+        floor,
+        ..
+    } = parsed(&[
+        "--device",
+        "abc123",
+        "--accept",
+        "Wi-Fi is on",
+        "--accept",
+        "The network list is showing",
+        "--steps",
+        "20",
+        "--floor",
+        "0.75",
+        "Turn Wi-Fi on",
+    ])
+    else {
+        panic!("expected a run");
+    };
+
+    assert_eq!(&*goal, "Turn Wi-Fi on");
+    assert_eq!(device.as_deref(), Some("abc123"));
+    assert_eq!(accept, ["Wi-Fi is on", "The network list is showing"]);
+    assert_eq!(steps, 20);
+    assert!((floor.get() - 0.75).abs() < f64::EPSILON);
+}
+
+/// A floor outside 0..=1 is not a probability, and a step limit of zero would
+/// end every run before it began.
+#[test]
+fn nonsense_limits_are_refused_rather_than_clamped() {
+    assert!(parse(["--floor".to_owned(), "1.5".to_owned(), "go".to_owned()]).is_err());
+    assert!(parse(["--floor".to_owned(), "high".to_owned(), "go".to_owned()]).is_err());
+    assert!(parse(["--steps".to_owned(), "0".to_owned(), "go".to_owned()]).is_err());
+}
+
+/// A mistyped flag must not be swallowed as the goal: the run would then
+/// pursue "--devce abc123" on whatever phone happened to be attached.
+#[test]
+fn an_unknown_flag_is_refused() {
+    let error = parse(["--devce".to_owned(), "abc".to_owned(), "go".to_owned()]).unwrap_err();
+
+    assert!(format!("{error}").contains("--devce"), "{error}");
+}
+
+#[test]
+fn the_helper_is_managed_by_its_own_subcommand() {
+    assert!(matches!(
+        parsed(&["helper"]),
+        Invocation::Helper { install: false, .. }
+    ));
+    assert!(matches!(
+        parsed(&["helper", "install"]),
+        Invocation::Helper { install: true, .. }
+    ));
+    assert!(matches!(
+        parsed(&["helper", "install", "--device", "abc"]),
+        Invocation::Helper {
+            install: true,
+            device: Some(_)
+        }
+    ));
+}
+
+#[test]
+fn devices_and_help_are_their_own_subcommands() {
+    assert!(matches!(parsed(&["devices"]), Invocation::Devices));
+    assert!(matches!(parsed(&["--help"]), Invocation::Help));
+    assert!(matches!(parsed(&["-h"]), Invocation::Help));
+}
+
+/// A goal that looks like a flag is still a goal once `--` has ended the
+/// options, which is the only way to pursue one starting with a dash.
+#[test]
+fn a_goal_can_follow_the_end_of_options() {
+    let Invocation::Run { goal, .. } = parsed(&["--", "--not-a-flag"]) else {
+        panic!("expected a run");
+    };
+    assert_eq!(&*goal, "--not-a-flag");
+}

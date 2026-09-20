@@ -281,3 +281,22 @@ fn tunnels_can_be_listed_and_removed() {
     let removed = adb().forward_remove_args(18899);
     assert_eq!(&removed[2..], &["forward", "--remove", "tcp:18899"]);
 }
+
+/// With one device attached the tool should not make a person copy a serial
+/// out of another command. With two it must, because picking one silently
+/// would drive whichever phone happened to enumerate first.
+#[test]
+fn the_attached_devices_are_read_from_adb_devices() {
+    let listing = "List of devices attached\n\
+                   39081FDJG00G9A\tdevice\n\
+                   emulator-5554\tdevice\n\
+                   R5CT10ABCDE\tunauthorized\n\
+                   ZY223KLMNO\toffline\n\n";
+
+    assert_eq!(
+        Adb::parse_devices(listing),
+        vec!["39081FDJG00G9A".to_owned(), "emulator-5554".to_owned()],
+        "only devices that are ready to be driven"
+    );
+    assert!(Adb::parse_devices("List of devices attached\n\n").is_empty());
+}

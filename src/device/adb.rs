@@ -418,6 +418,28 @@ impl Adb {
         ])
     }
 
+    /// Ask adb which devices are attached.
+    #[must_use]
+    pub fn devices_args() -> Vec<String> {
+        vec!["devices".to_owned()]
+    }
+
+    /// The serials `adb devices` reports as ready to be driven.
+    ///
+    /// A device that is `unauthorized` or `offline` is listed by adb but
+    /// cannot be driven, and offering one as a choice only moves the failure
+    /// somewhere less clear.
+    #[must_use]
+    pub fn parse_devices(raw: &str) -> Vec<String> {
+        raw.lines()
+            .skip_while(|line| line.starts_with("List of devices"))
+            .filter_map(|line| {
+                let (serial, state) = line.split_once('\t')?;
+                (state.trim() == "device").then(|| serial.trim().to_owned())
+            })
+            .collect()
+    }
+
     /// Read the device's navigation mode.
     #[must_use]
     pub fn navigation_args(&self) -> Vec<String> {

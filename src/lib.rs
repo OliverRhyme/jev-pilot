@@ -30,6 +30,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod act;
+pub mod cli;
 pub mod client;
 pub mod credential;
 pub mod device;

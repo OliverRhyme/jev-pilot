@@ -1,7 +1,7 @@
-//! Drive a real Android device toward a goal.
+//! `jev-pilot`: drive an Android device toward a goal.
 //!
 //! ```sh
-//! TYPESAFE_API_KEY=... cargo run --example drive -- <serial> "<goal>" [criteria...]
+//! jev-pilot "Turn Wi-Fi on"
 //! ```
 //!
 //! # One loop, two ways to answer it
@@ -23,15 +23,17 @@
 use core::fmt::Write as _;
 use jev_pilot::{
     act::Operation,
+    cli::{self, Invocation},
     client::http::SystemOne,
     credential::ApiKey,
-    device::adb::AdbDevice,
+    device::adb::{Adb, AdbDevice},
+    device::helper::BUNDLED,
     judgment::Confidence,
     pilot::{Impasse, Pilot, Resolution, Writing},
     platform::Android,
 };
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
@@ -208,28 +210,121 @@ fn parse_typed(line: &str) -> Option<Resolution> {
     })
 }
 
-fn main() -> Result<(), Box<dyn core::error::Error>> {
-    let mut args = std::env::args().skip(1);
-    let serial = args
-        .next()
-        .ok_or("usage: drive <serial> <goal> [criteria...]")?;
-    let goal = args
-        .next()
-        .ok_or("usage: drive <serial> <goal> [criteria...]")?;
-    // Everything after the goal is an acceptance criterion: a specific claim
-    // that must hold before success is accepted.
-    let criteria: Vec<String> = args.collect();
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("jev-pilot: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
 
-    let dir = std::env::var("DRIVE_DESK").map_or_else(
-        |_| std::env::temp_dir().join("jev-pilot-desk"),
-        PathBuf::from,
-    );
+fn run() -> Result<(), Box<dyn core::error::Error>> {
+    match cli::parse(std::env::args().skip(1))? {
+        Invocation::Help => {
+            print!("{}", cli::USAGE);
+            Ok(())
+        }
+        Invocation::Devices => list_devices(),
+        Invocation::Helper { device, install } => manage_helper(device.as_deref(), install),
+        Invocation::Run {
+            goal,
+            device,
+            accept,
+            steps,
+            floor,
+            desk,
+        } => pursue(&goal, device.as_deref(), accept, steps, floor, desk),
+    }
+}
+
+/// The attached devices, as adb reports them.
+fn attached() -> Result<Vec<String>, Box<dyn core::error::Error>> {
+    let output = std::process::Command::new("adb")
+        .args(Adb::devices_args())
+        .output()
+        .map_err(|error| format!("could not run adb: {error}"))?;
+    Ok(Adb::parse_devices(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn list_devices() -> Result<(), Box<dyn core::error::Error>> {
+    let devices = attached()?;
+    if devices.is_empty() {
+        println!("no devices attached and authorised");
+        return Ok(());
+    }
+    for serial in devices {
+        println!("{serial}");
+    }
+    Ok(())
+}
+
+/// The device to drive.
+///
+/// One attached device needs no naming. Two do: picking one silently would
+/// drive whichever phone happened to enumerate first, which is somebody's.
+fn choose_device(named: Option<&str>) -> Result<String, Box<dyn core::error::Error>> {
+    if let Some(serial) = named {
+        return Ok(serial.to_owned());
+    }
+    let mut devices = attached()?;
+    match devices.len() {
+        0 => Err("no devices attached and authorised; check `adb devices`".into()),
+        1 => Ok(devices.remove(0)),
+        _ => Err(format!(
+            "{} devices attached; name one with --device (see `jev-pilot devices`)",
+            devices.len()
+        )
+        .into()),
+    }
+}
+
+fn manage_helper(named: Option<&str>, install: bool) -> Result<(), Box<dyn core::error::Error>> {
+    let device = AdbDevice::new(choose_device(named)?);
+    let provision = device.helper_provision()?;
+    println!("device : {}", device.serial());
+    println!("bundled: {} v{}", BUNDLED.package, BUNDLED.version_name);
+    println!("state  : {provision:?} — {}", provision.advice());
+
+    if provision.is_ready() || !install {
+        if !provision.is_ready() {
+            println!("\n{HELPER_PITCH}");
+            println!("To install it:  jev-pilot helper install");
+        }
+        return Ok(());
+    }
+
+    println!("\ninstalling...");
+    device.install_helper()?;
+    let after = device.helper_provision()?;
+    println!("state  : {after:?} — {}", after.advice());
+    Ok(())
+}
+
+const HELPER_PITCH: &str = "\
+The helper is strongly recommended. Without it every screen read costs about
+2.5s instead of about 60ms, every gesture spawns a process on the device, text
+outside ASCII cannot be typed at all, and `uiautomator dump` reports boxes
+whose bottom edge lies above their top for rows scrolled off screen.
+
+It is an accessibility service: once enabled it can read every screen on that
+device. It answers only on loopback, only to a caller holding a token this
+host generates per run, and it sends nothing anywhere. The source is in
+`helper/` and it is built from that source, not downloaded.";
+
+fn pursue(
+    goal: &str,
+    named: Option<&str>,
+    accept: Vec<String>,
+    steps: u32,
+    floor: Confidence,
+    desk_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn core::error::Error>> {
+    let dir = desk_dir.unwrap_or_else(|| std::env::temp_dir().join("jev-pilot-desk"));
     let desk = Rc::new(Desk::new(dir.clone())?);
 
-    // The helper reads a screen in ~60ms where `uiautomator dump` takes ~2.5s,
-    // and dispatches gestures in-process. Absent, everything still works:
-    // `cargo run --example helper -- <serial> install` puts one on a device.
-    let device = AdbDevice::new(serial).with_helper()?;
+    let device = AdbDevice::new(choose_device(named)?).with_helper()?;
     println!("device : {}", device.serial());
     match device.reader().why() {
         None => println!("screens: accessibility helper"),
@@ -240,49 +335,26 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         "asking : this terminal, or {}",
         dir.join("answer.json").display()
     );
-    if !criteria.is_empty() {
-        println!("accept : {}", criteria.join(" / "));
+    if !accept.is_empty() {
+        println!("accept : {}", accept.join(" / "));
     }
     println!();
 
     let judge = SystemOne::new(ApiKey::from_env()?);
-    let floor = Confidence::new(0.6).ok_or("floor must be a probability")?;
-
     let choosing = Rc::clone(&desk);
     let writing = Rc::clone(&desk);
 
     let mut pilot = Pilot::new(device, judge, &Android)
         .requiring(floor)
-        .confirming(criteria)
-        .limited_to(15)
+        .confirming(accept)
+        .limited_to(steps)
         .escalating_to(move |impasse: &Impasse<'_>| choosing.choose(impasse))
         .writing_with(move |request: &Writing<'_>| writing.compose(request))
-        .watching(|step| {
-            println!(
-                "step {}  {} rows  goal_met {}  error {:.2}",
-                step.index,
-                step.rows.len(),
-                step.goal_met,
-                step.is_error_screen
-            );
-            let target = step
-                .target_confidence
-                .map_or_else(|| "-".to_owned(), |c| format!("{:.2}", c.get()));
-            match step.chosen {
-                Some(act) => println!(
-                    "   -> {act:?}   op {:.2} / target {target}",
-                    step.operation_confidence.get()
-                ),
-                None => println!(
-                    "   -> refused   op {:.2} / target {target}",
-                    step.operation_confidence.get()
-                ),
-            }
-        });
+        .watching(report);
 
-    let ending = pilot.pursue(&goal)?;
+    let ending = pilot.pursue(goal)?;
     println!("\nending : {ending:?}");
-    let _ = std::fs::remove_file(Path::new(&dir).join("ask.json"));
+    let _ = std::fs::remove_file(dir.join("ask.json"));
     Ok(())
 }
 
@@ -316,4 +388,28 @@ fn describe(impasse: &Impasse<'_>) -> String {
         "     tap <n> | type <n> | back | scroll_down | done | stop: "
     );
     out
+}
+
+/// One line per step, and one more for what it chose.
+fn report(step: &jev_pilot::pilot::StepReport<'_>) {
+    println!(
+        "step {}  {} rows  goal_met {}  error {:.2}",
+        step.index,
+        step.rows.len(),
+        step.goal_met,
+        step.is_error_screen
+    );
+    let target = step
+        .target_confidence
+        .map_or_else(|| "-".to_owned(), |c| format!("{:.2}", c.get()));
+    match step.chosen {
+        Some(act) => println!(
+            "   -> {act:?}   op {:.2} / target {target}",
+            step.operation_confidence.get()
+        ),
+        None => println!(
+            "   -> refused   op {:.2} / target {target}",
+            step.operation_confidence.get()
+        ),
+    }
 }
