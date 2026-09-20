@@ -292,6 +292,40 @@ impl Adb {
         raw.trim().lines().next()?.trim().parse().ok()
     }
 
+    /// Every forward adb currently holds, for every device.
+    ///
+    /// `--list` ignores `-s` and prints the whole table, so the serial is
+    /// matched in [`Self::parse_forward_reuse`] rather than by adb.
+    #[must_use]
+    pub fn forward_list_args(&self) -> Vec<String> {
+        self.targeted(&["forward", "--list"])
+    }
+
+    /// Close a tunnel by the host port it occupies.
+    #[must_use]
+    pub fn forward_remove_args(&self, local_port: u16) -> Vec<String> {
+        self.targeted(&["forward", "--remove", &format!("tcp:{local_port}")])
+    }
+
+    /// The host port of a tunnel already reaching `device_port` on this device.
+    ///
+    /// adb allocates a fresh host port for every `tcp:0` and never reclaims
+    /// one, so opening a tunnel per run leaks a port per run. Reusing the
+    /// existing tunnel caps it at one per device port. Lines read
+    /// `<serial> tcp:<local> tcp:<remote>`, and a row for another device
+    /// reaches another phone's screen, so the serial must match.
+    #[must_use]
+    pub fn parse_forward_reuse(&self, raw: &str, device_port: u16) -> Option<u16> {
+        let remote = format!("tcp:{device_port}");
+        raw.lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                Some((fields.next()?, fields.next()?, fields.next()?))
+            })
+            .find(|&(serial, _, found)| serial == &*self.serial && found == remote)
+            .and_then(|(_, local, _)| local.strip_prefix("tcp:")?.parse().ok())
+    }
+
     /// Read the device's navigation mode.
     #[must_use]
     pub fn navigation_args(&self) -> Vec<String> {
@@ -494,6 +528,10 @@ impl AdbDevice {
 
     /// Open a tunnel to a helper on the device and read screens through it.
     ///
+    /// A tunnel already reaching `device_port` on this device is reused. adb
+    /// allocates a fresh host port for every `tcp:0` and reclaims none, so
+    /// opening one per run leaks a port per run; reusing caps it at one.
+    ///
     /// # Errors
     /// Returns [`AdbError`] when the tunnel cannot be opened or adb does not
     /// report the port it allocated.
@@ -504,15 +542,27 @@ impl AdbDevice {
         path: &str,
         token: Option<&str>,
     ) -> Result<Self, AdbError> {
-        let raw = Self::run(&self.adb.forward_args(device_port))?;
-        let local = Adb::parse_forward_port(&raw).ok_or_else(|| AdbError::Failed {
-            args: "forward tcp:0".into(),
-            stderr: format!("adb did not report a host port, said {raw:?}").into_boxed_str(),
-        })?;
+        let existing = Self::run(&self.adb.forward_list_args())
+            .ok()
+            .and_then(|listing| self.adb.parse_forward_reuse(&listing, device_port));
+        let local = match existing {
+            Some(port) => port,
+            None => Self::open_forward(&self.adb, device_port)?,
+        };
         Ok(self.reading_from(Hierarchy::Helper {
             endpoint: format!("http://127.0.0.1:{local}{path}").into_boxed_str(),
             token: token.map(Box::from),
         }))
+    }
+
+    /// Ask adb for a fresh host port tunnelled to `device_port`.
+    #[cfg(feature = "http")]
+    fn open_forward(adb: &Adb, device_port: u16) -> Result<u16, AdbError> {
+        let raw = Self::run(&adb.forward_args(device_port))?;
+        Adb::parse_forward_port(&raw).ok_or_else(|| AdbError::Failed {
+            args: "forward tcp:0".into(),
+            stderr: format!("adb did not report a host port, said {raw:?}").into_boxed_str(),
+        })
     }
 
     /// Fetch a screen from a helper over the tunnel.

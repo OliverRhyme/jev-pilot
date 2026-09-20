@@ -239,3 +239,45 @@ fn the_allocated_host_port_is_read_back_from_adb() {
     assert_eq!(Adb::parse_forward_port(""), None);
     assert_eq!(Adb::parse_forward_port("error: cannot bind"), None);
 }
+
+/// `adb forward tcp:0` allocates a *new* host port every call, and adb never
+/// reclaims it. A loop that opened a tunnel per run accumulated fifteen
+/// forwards to the same device port on one afternoon. The existing tunnel is
+/// found first so a second run reuses it instead of stacking another.
+#[test]
+fn an_existing_tunnel_to_the_same_device_port_is_found() {
+    let listing = "\
+SERIAL123 tcp:18899 tcp:18888
+SERIAL123 tcp:19000 tcp:9000
+OTHER tcp:18700 tcp:18888
+";
+
+    assert_eq!(adb().parse_forward_reuse(listing, 18888), Some(18899));
+}
+
+/// The listing is global: `--list` ignores `-s` and prints every device's
+/// forwards. Reusing another phone's tunnel would read the wrong screen.
+#[test]
+fn a_tunnel_belonging_to_another_device_is_not_reused() {
+    let listing = "OTHER tcp:18700 tcp:18888\n";
+
+    assert_eq!(adb().parse_forward_reuse(listing, 18888), None);
+}
+
+/// A forward to a different device port is a different service.
+#[test]
+fn a_tunnel_to_a_different_device_port_is_not_reused() {
+    let listing = "SERIAL123 tcp:19000 tcp:9000\n";
+
+    assert_eq!(adb().parse_forward_reuse(listing, 18888), None);
+}
+
+/// Listing and removing are how a caller cleans up tunnels it no longer wants.
+#[test]
+fn tunnels_can_be_listed_and_removed() {
+    let listed: Vec<String> = adb().forward_list_args();
+    assert_eq!(&listed[2..], &["forward", "--list"]);
+
+    let removed = adb().forward_remove_args(18899);
+    assert_eq!(&removed[2..], &["forward", "--remove", "tcp:18899"]);
+}
