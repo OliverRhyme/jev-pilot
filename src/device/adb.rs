@@ -601,6 +601,12 @@ impl AdbDevice {
     /// How long to wait before believing the accessibility setting stuck.
     pub const ENABLE_SETTLE_MS: u64 = 500;
 
+    /// How many times a screen with nothing on it is read again.
+    pub const EMPTY_ATTEMPTS: u32 = 4;
+
+    /// The first backoff between those reads; it grows with each attempt.
+    pub const EMPTY_BACKOFF_MS: u64 = 150;
+
     /// Drive the device with this serial.
     #[must_use]
     pub fn new(serial: impl Into<Box<str>>) -> Self {
@@ -929,18 +935,9 @@ impl AdbDevice {
         self.size = Some(size);
         Ok(size)
     }
-}
 
-impl super::Device for AdbDevice {
-    type Error = AdbError;
-
-    /// Read the screen, retrying while it is still animating.
-    ///
-    /// `uiautomator` waits for a one-second quiet gap in the accessibility
-    /// event stream within a ten-second budget, and offers no flag to relax
-    /// either. A screen with a spinner, a video, or a blinking cursor can miss
-    /// that window repeatedly, so the only remedy is to ask again.
-    fn observe(&mut self) -> Result<crate::snapshot::Snapshot, Self::Error> {
+    /// One reading of the screen, from whichever backend is in use.
+    fn read_screen(&mut self) -> Result<crate::snapshot::Snapshot, AdbError> {
         use crate::platform::Platform as _;
 
         // A helper that stops answering - killed by the ROM, switched off, or
@@ -986,6 +983,38 @@ impl super::Device for AdbDevice {
         Err(AdbError::NeverSettled {
             attempts: last_settled_failure.unwrap_or(self.dump_attempts),
         })
+    }
+}
+
+impl super::Device for AdbDevice {
+    type Error = AdbError;
+
+    /// Read the screen, retrying while it is still animating.
+    ///
+    /// `uiautomator` waits for a one-second quiet gap in the accessibility
+    /// event stream within a ten-second budget, and offers no flag to relax
+    /// either. A screen with a spinner, a video, or a blinking cursor can miss
+    /// that window repeatedly, so the only remedy is to ask again.
+    fn observe(&mut self) -> Result<crate::snapshot::Snapshot, Self::Error> {
+        // A screen caught between two others parses to nothing, and handing
+        // that to a model asks it to choose among no rows — which it answers
+        // by waiting, spending a step to recover from a read that should have
+        // looked again. Reading faster made this visible rather than causing
+        // it: through the 2.5s CLI a transition was usually over before the
+        // dump returned, where the helper reads straight into it.
+        //
+        // A screen that is genuinely empty is returned as it is, once the
+        // attempts are spent.
+        for attempt in 1..=Self::EMPTY_ATTEMPTS {
+            let snapshot = self.read_screen()?;
+            if snapshot.worth_acting_on() || attempt == Self::EMPTY_ATTEMPTS {
+                return Ok(snapshot);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(
+                Self::EMPTY_BACKOFF_MS * u64::from(attempt),
+            ));
+        }
+        unreachable!("the last attempt returns")
     }
 
     fn perform(&mut self, command: &super::Command) -> Result<(), Self::Error> {

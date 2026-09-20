@@ -242,6 +242,17 @@ impl Snapshot {
         })
     }
 
+    /// Whether this screen offers anything to act on.
+    ///
+    /// A screen caught between two others parses to nothing: the old view is
+    /// gone and the new one has not been laid out. That is not a decision
+    /// anyone can make — there is no row to choose, and no operation that
+    /// helps — so a reader looks again rather than handing it to a model.
+    #[must_use]
+    pub fn worth_acting_on(&self) -> bool {
+        !self.elements.is_empty()
+    }
+
     /// Every element, paired with the reference that addresses it.
     pub fn refs(&self) -> impl Iterator<Item = (ElementRef, &Element)> {
         self.elements.iter().enumerate().map(|(index, element)| {

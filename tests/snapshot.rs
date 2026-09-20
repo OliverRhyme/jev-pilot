@@ -225,3 +225,29 @@ fn a_fully_covered_row_is_refused() {
     let (hidden, _) = snapshot.refs().next().expect("the covered row");
     assert!(snapshot.tap_point(hidden).is_err());
 }
+
+/// A screen caught mid-transition parses to nothing actionable. That is not a
+/// decision for a model to make — there is no row to choose and no operation
+/// that helps — so a reader must look again rather than hand it over. Measured
+/// on a real run: a YouTube settings screen read 60ms after a tap returned
+/// zero rows, and the loop spent a step choosing `wait` to recover. Through
+/// the 2.5s CLI the same transition was never visible.
+#[test]
+fn a_screen_with_nothing_on_it_is_not_worth_acting_on() {
+    let empty = Snapshot::new(Vec::new()).expect("an empty screen is still a screen");
+    assert!(!empty.worth_acting_on());
+
+    let occupied = Snapshot::new(vec![Element {
+        label: "General".into(),
+        detail: None,
+        editable: false,
+        bounds: Bounds {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 50,
+        },
+    }])
+    .expect("one row");
+    assert!(occupied.worth_acting_on());
+}
