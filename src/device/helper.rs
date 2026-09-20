@@ -349,6 +349,8 @@ const fn unsafe_free_slice(bytes: &[u8], start: usize, end: usize) -> &[u8] {
 pub struct Reader {
     uses_helper: bool,
     why: Option<Box<str>>,
+    borrowed: u32,
+    rebinding: bool,
 }
 
 impl Reader {
@@ -358,6 +360,8 @@ impl Reader {
         Self {
             uses_helper: true,
             why: None,
+            borrowed: 0,
+            rebinding: false,
         }
     }
 
@@ -367,6 +371,8 @@ impl Reader {
         Self {
             uses_helper: false,
             why: Some(why.into()),
+            borrowed: 0,
+            rebinding: false,
         }
     }
 
@@ -408,6 +414,42 @@ impl Reader {
             "the helper read no rows from a screen the uiautomator CLI read {cli_rows} from, \
              so that window is not served to an accessibility service"
         )
+    }
+
+    /// Read this one screen through the CLI, and keep the helper for the next.
+    ///
+    /// A screen the helper cannot see is a property of that screen, not of the
+    /// helper: Settings' Wi-Fi panel is withheld from accessibility services
+    /// while the rest of Settings is not. Giving the helper up for the whole
+    /// run would pay 2.5s on every later read to solve a problem that ended
+    /// with that screen.
+    ///
+    /// The dump this implies silences the helper for about 1.5s, so the next
+    /// failure is forgiven once — see [`Self::forgives_a_failure`].
+    pub fn borrow_cli(&mut self, why: impl Into<Box<str>>) {
+        self.borrowed = self.borrowed.saturating_add(1);
+        self.rebinding = true;
+        self.why = Some(why.into());
+    }
+
+    /// How many screens were read through the CLI without giving the helper up.
+    #[must_use]
+    pub const fn borrowed(&self) -> u32 {
+        self.borrowed
+    }
+
+    /// Whether the next helper failure means "still rebinding" rather than
+    /// "gone", and should be waited out instead of ending its use.
+    ///
+    /// True exactly once after a borrow: `uiautomator dump` opens a
+    /// `UiAutomation` connection and Android unbinds every accessibility
+    /// service while one is alive, so the read straight after a dump finds the
+    /// helper mid-rebind. A failure with no dump behind it is a real loss, and
+    /// waiting on it would slow every remaining step.
+    pub const fn forgives_a_failure(&mut self) -> bool {
+        let forgiven = self.rebinding;
+        self.rebinding = false;
+        forgiven
     }
 
     /// Give up on the helper for the rest of this run.

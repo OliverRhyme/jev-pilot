@@ -418,3 +418,58 @@ fn giving_up_on_the_helper_says_what_the_cli_saw() {
         reader.why()
     );
 }
+
+/// A screen the helper cannot see is a property of that screen, not of the
+/// helper. Settings' Wi-Fi panel is withheld from accessibility services while
+/// the rest of Settings is not, so giving the helper up for the whole run
+/// would pay 2.5s on every later read to solve a problem that ended with that
+/// screen.
+#[test]
+fn borrowing_the_cli_for_one_screen_keeps_the_helper() {
+    let mut reader = Reader::helper();
+
+    reader.borrow_cli(Reader::blind_to_this_screen(106));
+
+    assert!(reader.uses_helper(), "still the helper for the next screen");
+    assert_eq!(reader.borrowed(), 1);
+    assert!(reader.why().expect("a reason").contains("106"));
+}
+
+/// Reading through the CLI opens a UiAutomation connection, and Android
+/// unbinds every accessibility service while one is alive. So the read right
+/// after a borrow finds the helper still rebinding, and that one failure means
+/// "not yet", not "gone".
+#[test]
+fn the_read_after_a_borrow_forgives_one_helper_failure() {
+    let mut reader = Reader::helper();
+    reader.borrow_cli("blind");
+
+    assert!(
+        reader.forgives_a_failure(),
+        "the dump we just did silenced it"
+    );
+    assert!(!reader.forgives_a_failure(), "but only once");
+}
+
+/// A helper that fails without a dump having just silenced it is actually
+/// gone, and waiting on it would slow every remaining step.
+#[test]
+fn a_failure_out_of_nowhere_is_not_forgiven() {
+    let mut reader = Reader::helper();
+
+    assert!(!reader.forgives_a_failure());
+}
+
+/// Borrowing repeatedly is still not giving up: a run that visits the same
+/// withheld screen ten times pays for those ten screens and no others.
+#[test]
+fn many_borrows_still_do_not_end_the_helpers_use() {
+    let mut reader = Reader::helper();
+    for _ in 0..10 {
+        reader.borrow_cli("blind");
+        let _ = reader.forgives_a_failure();
+    }
+
+    assert!(reader.uses_helper());
+    assert_eq!(reader.borrowed(), 10);
+}

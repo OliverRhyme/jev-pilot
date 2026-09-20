@@ -356,8 +356,15 @@ fn pursue(
     println!("\nending : {ending:?}");
     // Said at the end as well as the start: a run can lose the helper part way
     // through, and the reason is the only account of why it went slow.
-    if let Some(why) = pilot.device().reader().why() {
-        println!("screens: uiautomator CLI ({why})");
+    let reader = pilot.device().reader();
+    match (reader.uses_helper(), reader.borrowed(), reader.why()) {
+        (true, 0, _) => println!("screens: accessibility helper throughout"),
+        (true, borrowed, Some(why)) => println!(
+            "screens: accessibility helper, with {borrowed} screen(s) read through the CLI\n\
+             reason : {why}"
+        ),
+        (_, _, Some(why)) => println!("screens: uiautomator CLI ({why})"),
+        (_, _, None) => {}
     }
     let _ = std::fs::remove_file(dir.join("ask.json"));
     Ok(())

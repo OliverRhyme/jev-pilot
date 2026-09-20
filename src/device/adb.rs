@@ -629,6 +629,10 @@ impl AdbDevice {
     /// The first backoff between those reads; it grows with each attempt.
     pub const EMPTY_BACKOFF_MS: u64 = 150;
 
+    /// How long an accessibility service takes to rebind after a dump released
+    /// the `UiAutomation` connection that suppressed it.
+    pub const REBIND_MS: u64 = 1_500;
+
     /// Drive the device with this serial.
     #[must_use]
     pub fn new(serial: impl Into<Box<str>>) -> Self {
@@ -966,8 +970,24 @@ impl AdbDevice {
         // staying.
         #[cfg(feature = "http")]
         if let Hierarchy::Helper { endpoint, token } = &self.hierarchy {
-            match Self::read_helper(endpoint, token.as_deref()) {
+            let (endpoint, token) = (endpoint.clone(), token.clone());
+            match Self::read_helper(&endpoint, token.as_deref()) {
                 Ok(raw) => return self.parse(&raw),
+                // A dump we ourselves just did silences the helper for about
+                // 1.5s, so the read right after one finds it mid-rebind. That
+                // failure means "not yet", and waiting it out is cheaper than
+                // giving up the helper for every remaining step.
+                Err(_) if self.reader.forgives_a_failure() => {
+                    std::thread::sleep(std::time::Duration::from_millis(Self::REBIND_MS));
+                    match Self::read_helper(&endpoint, token.as_deref()) {
+                        Ok(raw) => return self.parse(&raw),
+                        Err(error) => {
+                            self.reader
+                                .degrade(format!("helper did not come back: {error}"));
+                            self.hierarchy = Hierarchy::Cli;
+                        }
+                    }
+                }
                 Err(error) => {
                     self.reader
                         .degrade(format!("helper stopped answering: {error}"));
@@ -1049,13 +1069,15 @@ impl super::Device for AdbDevice {
             let via_cli = self.read_via_cli()?;
             let seen = via_cli.refs().count();
             if crate::device::helper::Reader::cli_saw_more(0, seen) {
+                // Borrowed for this screen, not given up for the run. Which
+                // screens are withheld is a property of the screens: Settings'
+                // Wi-Fi panel is, and the rest of Settings is not.
                 self.reader
-                    .degrade(crate::device::helper::Reader::blind_to_this_screen(seen));
-                self.hierarchy = Hierarchy::Cli;
+                    .borrow_cli(crate::device::helper::Reader::blind_to_this_screen(seen));
             }
             // Whatever it saw is a better answer than the helper's nothing;
-            // the helper is kept when the CLI saw nothing either, because then
-            // the screen really is empty and that is no fault of the helper's.
+            // when the CLI saw nothing either the screen really is empty, which
+            // is no fault of the helper's.
             return Ok(via_cli);
         }
         Ok(blank)
