@@ -690,10 +690,35 @@ impl Drop for DeepReader {
                 .stderr(std::process::Stdio::null())
                 .status();
         };
-        quietly(&self.stop);
+        // The `am instrument -w` client is ended first, and force-stopping
+        // the package is the fallback rather than the first move.
+        //
+        // Order matters more than it looks. The instrumentation holds a
+        // `UiAutomation`, and that registration lives in the system, not in
+        // the process: force-stopping the process leaves it behind, and a
+        // registered `UiAutomation` unbinds every accessibility service on
+        // the device and refuses every new registration. The device then has
+        // no working accessibility at all — not this helper, not
+        // `uiautomator dump`, not anything else — until the framework is
+        // restarted.
+        //
+        // Observed exactly that: `Bound services:{}` with three services
+        // enabled, and `uiautomator dump` answering
+        // "UiAutomationService ... already registered!".
+        //
+        // Ending the client lets ActivityManager tear the instrumentation
+        // down, which unregisters properly.
         let _ = self.child.kill();
         let _ = self.child.wait();
+        std::thread::sleep(std::time::Duration::from_millis(Self::UNREGISTER_MS));
+        quietly(&self.stop);
     }
+}
+
+impl DeepReader {
+    /// How long the instrumentation is given to let go of its `UiAutomation`
+    /// before the package is stopped outright.
+    const UNREGISTER_MS: u64 = 400;
 }
 
 /// A live Android device driven through the `adb` binary.
