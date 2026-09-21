@@ -1326,7 +1326,17 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             .perform(&Command::Settle)
                             .map_err(RunError::Device)?;
                         settled_ms = elapsed_ms(acting);
-                        ineffective += 1;
+                        // Waiting is not an action that achieved nothing, so
+                        // it does not count towards getting nowhere. A keypad
+                        // whose counter lags a tap looks unchanged for a
+                        // reading or two, and counting each wait would end a
+                        // run that is getting somewhere slowly — measured
+                        // entering a PIN, where tap, wait, tap ended the run
+                        // while the digits were going in.
+                        //
+                        // What bounds the waiting is arriving back at the
+                        // same screen too many times, which is the honest
+                        // description of a screen that never moves.
                         previous = Some(format!(
                             "{} — still nothing, so this step waited instead of \
                              doing it again",
@@ -1339,13 +1349,6 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             judged_ms,
                             settled_ms,
                         });
-                        if ineffective >= Self::INEFFECTIVE_LIMIT {
-                            return Ok(Ending::Uncertain {
-                                because: Indecision::NoProgress {
-                                    repeated: ineffective,
-                                },
-                            });
-                        }
                         continue;
                     }
                     // Closing a keyboard that has already closed is going

@@ -1232,3 +1232,32 @@ impl Device for Unfurling {
         Ok(())
     }
 }
+
+/// Waiting is not an action that achieved nothing. A keypad whose counter
+/// lags a tap looks unchanged for a reading or two, so the run waits — and
+/// counting each wait towards "this is getting nowhere" ends a run that is
+/// getting somewhere slowly.
+///
+/// Measured entering a PIN: tap, wait, tap, and the run stopped for want of
+/// progress while the digits were going in.
+#[test]
+fn waiting_does_not_count_towards_getting_nowhere() {
+    let judge = Scripted::new(vec![answer("tap", Some("A2"), 0.99, 0.02); 30]);
+    let mut pilot = Pilot::new(Fake { inert: true, ..Fake::default() }, judge, &Android);
+
+    let ending = pilot.pursue("press the key").expect("the run completes");
+
+    // A screen that never moves still ends the run — as going in circles,
+    // which is what it is, rather than as three failed actions when only one
+    // action was ever taken.
+    assert_eq!(
+        ending,
+        Ending::Uncertain {
+            because: Indecision::NoProgress {
+                repeated: Pilot::<Fake, Scripted>::VISITS_ALLOWED
+            }
+        },
+        "got {ending:?}",
+    );
+}
+
