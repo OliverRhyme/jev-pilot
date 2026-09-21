@@ -69,6 +69,11 @@ pub struct Impasse<'i> {
     /// The rows it covers are absent rather than refused, so a screen with no
     /// apparent way on often has one behind the keyboard.
     pub keyboard_open: bool,
+    /// How likely the screen was still arriving, when the judge said.
+    ///
+    /// A person asked what to do about a screen should know whether the run
+    /// believes it has finished appearing.
+    pub still_arriving: Option<f64>,
     /// Controls the screen shows and will not let anything act on.
     ///
     /// A greyed-out commit button is absent from the rows rather than offered
@@ -324,6 +329,12 @@ pub struct StepReport<'s> {
     pub goal_met: Progress,
     /// How likely the screen was an error state.
     pub is_error_screen: f64,
+    /// How likely the screen was still arriving, when the judge said.
+    ///
+    /// Recorded for the same reason the repetition count is: a signal the
+    /// run acts on and the record does not mention can only be inferred from
+    /// the steps around it, which is guessing.
+    pub still_arriving: Option<f64>,
     /// How long reading the screen took, in milliseconds.
     ///
     /// Apart from the step's own total because they are spent very
@@ -747,6 +758,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),
             goal_met: answers.goal_met.progress(),
             is_error_screen: answers.is_error_screen.noul,
+            still_arriving: answers.still_arriving.map(|arriving| arriving.noul),
             read_ms: spent.read_ms,
             step_ms: spent.step_ms,
             waited_ms: spent.waited_ms,
@@ -855,6 +867,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 alternatives: &alternatives,
                 rows: &rows,
                 keyboard_open: snapshot.keyboard_open(),
+                still_arriving: answers.still_arriving.map(|arriving| arriving.noul),
                 fields: &fields,
                 says: &says,
                 unavailable: &unavailable,
