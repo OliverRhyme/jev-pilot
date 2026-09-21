@@ -357,7 +357,7 @@ fn an_impasse_lists_the_fields_it_invites_a_number_for() {
         .requiring(floor())
         .escalating_to(|impasse: &Impasse<'_>| -> Result<Resolution, Infallible> {
             said.borrow_mut()
-                .extend(impasse.fields.iter().map(|f| (*f).to_owned()));
+                .extend(impasse.fields.iter().cloned());
             Ok(Resolution::Stop)
         });
 
