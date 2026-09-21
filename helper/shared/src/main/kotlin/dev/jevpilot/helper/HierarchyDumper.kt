@@ -110,7 +110,7 @@ object HierarchyDumper {
             }
 
             if (options.wantXml) {
-                result.put("xml", buildXml(rootSnapshots, displayInfo.rotation))
+                result.put("xml", buildXml(rootSnapshots, displayInfo.rotation, source.quietForMs))
             }
             if (options.wantElements) {
                 val flat = ArrayList<JSONObject>()
@@ -205,17 +205,27 @@ object HierarchyDumper {
     ): String {
         val displayInfo = DisplayUtils.getDisplayInfo(source.context)
         val roots = captureRootSnapshots(source, displayInfo, options, DumpStats())
+        // Read before the walk, not after: the walk itself takes time, and
+        // the question is how long the screen had been quiet when it was
+        // asked, not when the answer finished being written.
+        val quietFor = source.quietForMs
         if (roots.isEmpty()) {
             return "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n" +
-                "<hierarchy rotation=\"${displayInfo.rotation}\" />\n"
+                "<hierarchy rotation=\"${displayInfo.rotation}\"" +
+                quietAttribute(quietFor) + " />\n"
         }
-        return buildXml(roots, displayInfo.rotation)
+        return buildXml(roots, displayInfo.rotation, quietFor)
     }
 
-    private fun buildXml(roots: List<A11yNode>, rotation: Int): String {
+    /** ` quiet-ms="N"`, or nothing when the source cannot say. */
+    private fun quietAttribute(quietForMs: Long): String =
+        if (quietForMs < 0) "" else " quiet-ms=\"$quietForMs\""
+
+    private fun buildXml(roots: List<A11yNode>, rotation: Int, quietForMs: Long): String {
         val sb = StringBuilder(roots.size * 1024 + 256)
         sb.append("<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n")
-        sb.append("<hierarchy rotation=\"").append(rotation).append("\">")
+        sb.append("<hierarchy rotation=\"").append(rotation).append("\"")
+        sb.append(quietAttribute(quietForMs)).append(">")
         roots.forEachIndexed { i, root ->
             root.index = i
             root.writeXml(sb)

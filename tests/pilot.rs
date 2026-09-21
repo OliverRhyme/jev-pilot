@@ -954,3 +954,54 @@ impl Device for SlowToDraw {
         Some("com.example.launcher".into())
     }
 }
+
+/// When the device can say how long the screen has been quiet, that is the
+/// answer — not a guess assembled from watching the tree. A screen still
+/// being drawn emits accessibility events; one that has finished does not.
+///
+/// Settling waits for the quiet to reach the threshold and then stops, so a
+/// screen that went still immediately costs one reading rather than two
+/// agreeing ones.
+#[test]
+fn a_device_that_can_say_it_is_quiet_is_believed() {
+    let judge = Scripted::new(vec![
+        answer("tap", Some("A2"), 0.99, 0.02),
+        answer("done", None, 0.99, 0.97),
+    ]);
+    let mut pilot = Pilot::new(Quietening::default(), judge, &Android);
+
+    pilot.pursue("tap the thing").expect("the run completes");
+
+    // One reading to act on, one to see the screen is quiet, one for the
+    // next step. A tree-watching settle needs two agreeing readings instead
+    // of the one, and so takes four.
+    assert!(
+        pilot.device().reads <= 3,
+        "a screen that says it is quiet is not polled at: {} reads",
+        pilot.device().reads,
+    );
+}
+
+/// A device that reports the screen has been still for a good while.
+#[derive(Default)]
+struct Quietening {
+    reads: u32,
+    acted: bool,
+}
+
+impl Device for Quietening {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        self.reads += 1;
+        let rows: &[&str] = if self.acted {
+            &["Go Back", "Done"]
+        } else {
+            &["Go Back", "Continue"]
+        };
+        Ok(screen_of(rows).quiet_for(Some(400)))
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        self.acted = true;
+        Ok(())
+    }
+}

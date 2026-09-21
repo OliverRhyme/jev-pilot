@@ -650,6 +650,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// stops repeating itself and asks.
     pub const INEFFECTIVE_LIMIT: u32 = 3;
 
+    /// How long a screen must have gone without an accessibility event
+    /// before the device's own account of it is taken as settled.
+    ///
+    /// Short, because it is a real measurement rather than a guess: the
+    /// device is reporting silence, not a caller hoping for it.
+    pub const QUIET_ENOUGH_MS: u64 = 120;
+
     /// How many times in a row a screen may be judged still arriving before
     /// the run acts on it anyway.
     pub const ARRIVALS_WAITED_OUT: u32 = 3;
@@ -702,7 +709,21 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         let mut last = before;
         while std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(Self::CHANGE_POLL_MS));
-            let now = self.device.observe().map_err(RunError::Device)?.fingerprint();
+            let screen = self.device.observe().map_err(RunError::Device)?;
+            // When the device can say how long the screen has been quiet,
+            // that is the answer rather than one assembled from watching.
+            // A screen still being drawn emits accessibility events and a
+            // settled one does not, so one reading settles it where watching
+            // needs two that agree — and watching cannot tell a screen that
+            // has finished from one that is between two others and happens
+            // to be still for a moment.
+            if screen
+                .quiet_for_ms()
+                .is_some_and(|quiet| u64::from(quiet) >= Self::QUIET_ENOUGH_MS)
+            {
+                return Ok(screen.fingerprint() != before);
+            }
+            let now = screen.fingerprint();
             // A screen that has begun to change has not finished changing. A
             // view being built reports the rows it has so far, and acting on
             // that is acting on a screen that will not exist a moment later —

@@ -224,6 +224,7 @@ pub struct Snapshot {
     app: Option<Box<str>>,
     notices: Box<[Box<str>]>,
     unavailable: Box<[Box<str>]>,
+    quiet_for_ms: Option<u32>,
     elements: Box<[Element]>,
 }
 
@@ -246,6 +247,7 @@ impl Snapshot {
             app: None,
             notices: Box::default(),
             unavailable: Box::default(),
+            quiet_for_ms: None,
             elements: elements.into_boxed_slice(),
         })
     }
@@ -292,6 +294,27 @@ impl Snapshot {
     /// about the state.
     pub fn notices(&self) -> impl Iterator<Item = &str> {
         self.notices.iter().map(|notice| &**notice)
+    }
+
+    /// Note how long the reader had seen the screen unchanged.
+    #[must_use]
+    pub const fn quiet_for(mut self, ms: Option<u32>) -> Self {
+        self.quiet_for_ms = ms;
+        self
+    }
+
+    /// How long the screen had been quiet when it was read, in milliseconds.
+    ///
+    /// `None` from a reader that cannot say, which is not the same as zero: a
+    /// `uiautomator` dump carries no such thing, and treating its silence as
+    /// "just changed" would make every shell-read screen look mid-transition.
+    ///
+    /// A screen still being drawn emits accessibility events and a settled
+    /// one does not, so this is the device's own answer to whether it has
+    /// finished — exactly what polling the tree from outside cannot work out.
+    #[must_use]
+    pub const fn quiet_for_ms(&self) -> Option<u32> {
+        self.quiet_for_ms
     }
 
     /// Note the controls that are present but cannot be used.

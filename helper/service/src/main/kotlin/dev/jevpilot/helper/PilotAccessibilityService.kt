@@ -27,6 +27,18 @@ import android.view.accessibility.AccessibilityEvent
  */
 class PilotAccessibilityService : AccessibilityService() {
 
+    /**
+     * When any accessibility event last arrived, on the uptime clock.
+     *
+     * Started at the moment the service connects rather than at -1: "nothing
+     * has changed since I began watching" is a true and useful answer, and
+     * withholding it would leave the first steps of every run with no
+     * account of whether the screen had settled.
+     */
+    @Volatile
+    var lastEventAtMs: Long = -1L
+        private set
+
     @Volatile
     var currentPackageName: String = ""
         private set
@@ -57,6 +69,7 @@ class PilotAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        lastEventAtMs = android.os.SystemClock.uptimeMillis()
         Log.i(TAG, "PilotAccessibilityService connected")
 
         // A foreground notification is what keeps the service alive on ROMs
@@ -94,7 +107,11 @@ class PilotAccessibilityService : AccessibilityService() {
         }.onFailure { Log.w(TAG, "Failed to configure AccessibilityServiceInfo", it) }
 
         server?.shutdown()
-        val source = ServiceSource(this) { currentPackageName to currentActivityName }
+        val source = ServiceSource(
+            this,
+            foreground = { currentPackageName to currentActivityName },
+            lastEventAt = { lastEventAtMs },
+        )
         server = CommandServer(source, DEFAULT_PORT, gestures = this).apply {
             isDaemon = true
             start()
@@ -181,7 +198,13 @@ class PilotAccessibilityService : AccessibilityService() {
      * anything they carry.
      */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        if (event == null) return
+        // Every event, whatever kind. A screen still being drawn emits them
+        // and a settled screen does not, so the time since the last one is
+        // the device's own answer to "has it finished?" — which a caller
+        // polling the tree from outside cannot work out.
+        lastEventAtMs = android.os.SystemClock.uptimeMillis()
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         event.packageName?.let { currentPackageName = it.toString() }
         event.className?.let { currentActivityName = it.toString() }
     }

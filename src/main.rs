@@ -362,6 +362,10 @@ fn observe(named: Option<&str>) -> Result<(), Box<dyn core::error::Error>> {
         if screen.keyboard_open() { "up" } else { "down" }
     );
     println!("app     : {}", screen.app().unwrap_or("unknown"));
+    match screen.quiet_for_ms() {
+        Some(quiet) => println!("quiet   : {quiet}ms since the screen last changed"),
+        None => println!("quiet   : this reader cannot say"),
+    }
 
     let refused: Vec<&str> = screen.unavailable().collect();
     if !refused.is_empty() {

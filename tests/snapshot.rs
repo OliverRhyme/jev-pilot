@@ -608,3 +608,39 @@ fn a_control_becoming_available_makes_it_a_different_screen() {
 
     assert_ne!(off.fingerprint(), on.fingerprint());
 }
+
+/// A screen that is still being drawn emits accessibility events; one that
+/// has finished does not. The helper sees that stream, so how long the screen
+/// has been quiet is a fact the device can state exactly — where a caller
+/// polling the tree from outside can only watch for the answer to stop
+/// changing, and cannot tell a screen that has finished from one that is
+/// between two others and happens to be still for a moment.
+#[test]
+fn the_screen_says_how_long_it_has_been_quiet() {
+    const SETTLED: &str = include_str!("fixtures/settings.xml");
+
+    let quiet = SETTLED.replace("<hierarchy rotation=\"0\"", "<hierarchy rotation=\"0\" quiet-ms=\"431\"");
+    assert_eq!(
+        Android
+            .parse_hierarchy(&quiet)
+            .expect("a screen")
+            .quiet_for_ms(),
+        Some(431),
+    );
+}
+
+/// A reader that cannot say is not the same as a screen that has just
+/// changed, and treating the two alike would make every `uiautomator` dump
+/// look like a screen mid-transition.
+#[test]
+fn a_reader_that_cannot_say_how_quiet_it_is_says_nothing() {
+    const SETTLED: &str = include_str!("fixtures/settings.xml");
+
+    assert_eq!(
+        Android
+            .parse_hierarchy(SETTLED)
+            .expect("a screen")
+            .quiet_for_ms(),
+        None,
+    );
+}

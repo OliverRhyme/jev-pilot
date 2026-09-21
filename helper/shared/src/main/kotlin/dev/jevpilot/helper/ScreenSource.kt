@@ -55,6 +55,19 @@ interface ScreenSource {
 
     /** What this source is, reported by `/ping`. */
     val label: String
+
+    /**
+     * Milliseconds since this source last saw the screen change, or -1 when
+     * it cannot say.
+     *
+     * A screen that is still being drawn is emitting accessibility events;
+     * one that has finished is not. That makes "has it settled?" a question
+     * the device can answer exactly, where a caller polling the tree from
+     * outside can only watch for the answer to stop changing — and cannot
+     * tell a screen that has finished from one that is between two others
+     * and happens to be still for a moment.
+     */
+    val quietForMs: Long get() = -1L
 }
 
 /** Reading through the accessibility service. */
@@ -62,6 +75,8 @@ class ServiceSource(
     private val service: AccessibilityService,
     /** What the service last saw come to the front. */
     private val foreground: () -> Pair<String, String> = { "" to "" },
+    /** When the service last saw any accessibility event, on the uptime clock. */
+    private val lastEventAt: () -> Long = { -1L },
 ) : ScreenSource {
 
     override fun windows(): List<AccessibilityWindowInfo> =
@@ -77,6 +92,12 @@ class ServiceSource(
     override val currentPackage: String get() = foreground().first
     override val currentActivity: String get() = foreground().second
     override val label: String get() = "PilotAccessibilityService"
+
+    override val quietForMs: Long
+        get() {
+            val seen = lastEventAt()
+            return if (seen < 0) -1L else android.os.SystemClock.uptimeMillis() - seen
+        }
 
     /**
      * A screenshot through the accessibility API, which answers on a callback

@@ -82,6 +82,7 @@ impl Platform for Android {
             .map(|snapshot| snapshot.in_app(app_of(&document)))
             .map(|snapshot| snapshot.saying(notices_of(&document)))
             .map(|snapshot| snapshot.offering_but_refusing(refused_by(&document)))
+            .map(|snapshot| snapshot.quiet_for(quiet_for_ms(&document)))
             .map_err(HierarchyError::from)
     }
 }
@@ -250,6 +251,18 @@ fn is_switched_off(node: &roxmltree::Node) -> bool {
             || node
                 .attribute("class")
                 .is_some_and(|class| class.contains("Button")))
+}
+
+/// How long the reader had seen the screen unchanged, when it can say.
+///
+/// Written on the hierarchy's root by the accessibility helper, which sees
+/// the event stream. A `uiautomator` dump has no such attribute and answers
+/// `None`.
+fn quiet_for_ms(document: &roxmltree::Document) -> Option<u32> {
+    document
+        .root_element()
+        .attribute("quiet-ms")
+        .and_then(|ms| ms.parse().ok())
 }
 
 /// The controls a screen shows and will not let anything act on.
