@@ -102,6 +102,36 @@ A real run: Jev opened Network & Internet at confidence 1.00, stalled at 0.43
 choosing among its sub-rows, handed over to a person who picked `Internet`, and
 then recognised the goal met at 0.87 on its own.
 
+## Driving from another agent
+
+`jev-pilot-mcp` speaks the Model Context Protocol over stdin and stdout, so a
+model holding a conversation can drive a device — and, more to the point, can
+*be* the second opinion above. A run that cannot decide stops and asks; the
+caller answers it and the run carries on.
+
+```jsonc
+// Wherever your client keeps its MCP servers
+{ "mcpServers": { "jev-pilot": { "command": "jev-pilot-mcp" } } }
+```
+
+Seven tools. `observe`, `devices` and `run_status` only look. `start_run` acts
+on a real device and says so in its description and its annotations, because a
+client is going to put that in front of a person, and reading a screen and
+moving money through one are not the same permission.
+
+A run is not one call that blocks until it is over:
+
+| | |
+| --- | --- |
+| `start_run` | begin, and get back a name for the run |
+| `run_status` | every step so far, and what it is asking if it is asking |
+| `answer_run` | answer it — an operation and row it was offered, or the words to type |
+| `stop_run` | end it, leaving the device where it got to |
+
+Every tool runs the `jev-pilot` binary rather than driving the loop in-process,
+so the server cannot drift from the command line it is a face for, and an
+answer written over MCP lands in the same desk a person at a terminal writes to.
+
 ## Reading the screen quickly
 
 `uiautomator dump` costs about 2.4s per observation: it spawns a JVM and then

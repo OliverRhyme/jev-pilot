@@ -35,6 +35,7 @@ pub mod client;
 pub mod credential;
 pub mod device;
 pub mod judgment;
+pub mod mcp;
 pub mod pilot;
 pub mod platform;
 pub mod snapshot;
