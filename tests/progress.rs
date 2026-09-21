@@ -223,3 +223,73 @@ fn time_spent_waiting_for_an_answer_is_reported_apart_from_the_work() {
         "and the work is what is left: {step}ms total, {waited}ms of it waiting",
     );
 }
+
+/// A step's time is spent in three different places and only one of them was
+/// named. Reading the screen was measured; the judgement and the settling
+/// after the act were not, and the report was emitted before the device was
+/// touched at all — so the settle was in no number anywhere, and the rest was
+/// attributed by guesswork.
+#[test]
+fn a_slow_judgement_is_reported_as_a_slow_judgement() {
+    let seen = std::cell::RefCell::new(Vec::new());
+    {
+        let mut pilot = Pilot::new(
+            PinPad,
+            Dawdling(RefCell::new(vec![turn("done", 1.9)])),
+            &Android,
+        )
+        .watching(|report: &StepReport<'_>| {
+            seen.borrow_mut()
+                .push((report.judged_ms, report.settled_ms, report.step_ms));
+        });
+        pilot.pursue("enter the PIN").expect("the run completes");
+    }
+
+    let seen = seen.borrow();
+    let (judged, settled, step) = seen[0];
+    assert!(judged >= 250, "the judgement is measured: {judged}ms");
+    assert_eq!(settled, 0, "a verdict touches nothing, so settles nothing");
+    assert!(step >= judged, "and the step contains it: {step}ms");
+}
+
+/// An action whose screen never moves spends the whole settle budget waiting
+/// for it, and that time is the settle's, not the judgement's.
+#[test]
+fn time_spent_settling_after_an_act_is_reported_as_the_settle() {
+    let seen = std::cell::RefCell::new(Vec::new());
+    {
+        let mut pilot = Pilot::new(
+            PinPad,
+            Scripted(RefCell::new(vec![turn("scroll_down", 0.2); 4])),
+            &Android,
+        )
+        .watching(|report: &StepReport<'_>| {
+            seen.borrow_mut().push((report.judged_ms, report.settled_ms));
+        });
+        let _ = pilot.pursue("scroll about");
+    }
+
+    let seen = seen.borrow();
+    let (judged, settled) = seen[0];
+    assert!(
+        settled >= 1_000,
+        "an unmoving screen costs the whole settle budget: {settled}ms",
+    );
+    assert!(judged < 100, "and the judge was instant: {judged}ms");
+}
+
+/// A judge that takes its time, as one across a network does.
+struct Dawdling(RefCell<Vec<serde_json::Value>>);
+
+impl Judge for Dawdling {
+    type Error = Infallible;
+    fn evaluate(
+        &self,
+        _state: serde_json::Value,
+        _questions: &StepQuestions<'_>,
+    ) -> Result<StepAnswers, Infallible> {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let next = self.0.borrow_mut().remove(0);
+        Ok(serde_json::from_value(next).expect("scripted answer parses"))
+    }
+}

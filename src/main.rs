@@ -570,6 +570,8 @@ fn transcribe(to: &std::path::Path, step: &jev_pilot::pilot::StepReport<'_>) {
         "read_ms": step.read_ms,
         "step_ms": step.step_ms,
         "waited_ms": step.waited_ms,
+        "judged_ms": step.judged_ms,
+        "settled_ms": step.settled_ms,
         "chosen": step.chosen.map(|act| format!("{act:?}")),
         "operation_confidence": step.operation_confidence.get(),
         "target_confidence": step.target_confidence.map(jev_pilot::judgment::Confidence::get),
@@ -590,7 +592,8 @@ fn transcribe(to: &std::path::Path, step: &jev_pilot::pilot::StepReport<'_>) {
 
 fn report(step: &jev_pilot::pilot::StepReport<'_>) {
     println!(
-        "step {}  {} rows  goal_met {}  error {:.2}  {}ms (read {}ms{})",
+        "step {}  {} rows  goal_met {}  error {:.2}  \
+         {}ms (read {} judge {} settle {}{})",
         step.index,
         step.rows.len(),
         step.goal_met,
@@ -599,6 +602,8 @@ fn report(step: &jev_pilot::pilot::StepReport<'_>) {
         // of its time on the person answering.
         step.step_ms.saturating_sub(step.waited_ms),
         step.read_ms,
+        step.judged_ms,
+        step.settled_ms,
         if step.waited_ms > 0 {
             format!(", asked {}ms", step.waited_ms)
         } else {

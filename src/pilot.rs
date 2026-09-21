@@ -340,6 +340,17 @@ pub struct StepReport<'s> {
     /// typing, and counting that as the step's cost makes the timings useless
     /// for the one purpose they have. The work is `step_ms` less this.
     pub waited_ms: u64,
+    /// How long the judgement took, in milliseconds.
+    ///
+    /// Usually a network round trip, and usually most of a step. Worth its
+    /// own number because nothing can be done about it locally, so a run that
+    /// is slow for any other reason is the only kind worth optimising.
+    pub judged_ms: u64,
+    /// How long acting and waiting for the screen to settle took.
+    ///
+    /// Zero for a step that touched nothing — a verdict, a refusal, a screen
+    /// that could not be reached.
+    pub settled_ms: u64,
 }
 
 /// A failure from one of a run's four parts.
@@ -712,7 +723,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         answers: &StepAnswers,
         chosen: Option<&Act>,
         repeating: Option<u32>,
-        spent: (u64, u64, u64),
+        spent: Spent,
     ) {
         let Some(observer) = self.observer.as_mut() else {
             return;
@@ -732,9 +743,11 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),
             goal_met: answers.goal_met.progress(),
             is_error_screen: answers.is_error_screen.noul,
-            read_ms: spent.0,
-            step_ms: spent.1,
-            waited_ms: spent.2,
+            read_ms: spent.read_ms,
+            step_ms: spent.step_ms,
+            waited_ms: spent.waited_ms,
+            judged_ms: spent.judged_ms,
+            settled_ms: spent.settled_ms,
         });
     }
 
@@ -915,6 +928,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // Time this step spent on somebody else, accumulated as it is
             // asked for.
             let waited = std::cell::Cell::new(0_u64);
+            // Filled in as the step goes: zero until the act, since a step
+            // that touches nothing settles nothing.
+            let mut settled_ms = 0_u64;
             let snapshot = self.device.observe().map_err(RunError::Device)?;
             let read_ms = elapsed_ms(began);
             if origin.is_none()
@@ -949,6 +965,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             let recent: Vec<&str> = so_far.iter().map(String::as_str).collect();
             let questions = StepQuestions::checked(goal, &catalog, &self.criteria);
 
+            let judging = std::time::Instant::now();
             let answers = self
                 .judge
                 .evaluate(
@@ -969,12 +986,20 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     ),
                     &questions,
                 )
-                .map_err(RunError::Judge)?;
+                .map_err(RunError::Judge);
+            let judged_ms = elapsed_ms(judging);
+            let answers = answers?;
 
             let decided = catalog.resolve(&answers, &self.floors);
 
             if answers.is_error_screen.noul > self.certainty {
-                self.report(index, &snapshot, &answers, None, repeated, (read_ms, elapsed_ms(began), waited.get()));
+                self.report(index, &snapshot, &answers, None, repeated, Spent {
+                    read_ms,
+                    step_ms: elapsed_ms(began),
+                    waited_ms: waited.get(),
+                    judged_ms,
+                    settled_ms,
+                });
                 return Ok(Ending::ErrorScreen);
             }
             // A screen with nothing on it is not evidence. Mid-transition the
@@ -997,7 +1022,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 continue;
             }
             if !blind && reached == Progress::Achieved {
-                self.report(index, &snapshot, &answers, None, repeated, (read_ms, elapsed_ms(began), waited.get()));
+                self.report(index, &snapshot, &answers, None, repeated, Spent {
+                    read_ms,
+                    step_ms: elapsed_ms(began),
+                    waited_ms: waited.get(),
+                    judged_ms,
+                    settled_ms,
+                });
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
             // An acceptance criterion is the caller's own definition of done,
@@ -1019,7 +1050,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 && !self.criteria.is_empty()
                 && answers.unmet(&self.criteria, self.certainty).is_none()
             {
-                self.report(index, &snapshot, &answers, None, repeated, (read_ms, elapsed_ms(began), waited.get()));
+                self.report(index, &snapshot, &answers, None, repeated, Spent {
+                    read_ms,
+                    step_ms: elapsed_ms(began),
+                    waited_ms: waited.get(),
+                    judged_ms,
+                    settled_ms,
+                });
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
 
@@ -1041,7 +1078,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     if let Some(decision) = answered? {
                         decision
                     } else {
-                        self.report(index, &snapshot, &answers, None, repeated, (read_ms, elapsed_ms(began), waited.get()));
+                        self.report(index, &snapshot, &answers, None, repeated, Spent {
+                    read_ms,
+                    step_ms: elapsed_ms(began),
+                    waited_ms: waited.get(),
+                    judged_ms,
+                    settled_ms,
+                });
                         return Ok(Ending::Uncertain { because });
                     }
                 }
@@ -1076,16 +1119,21 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 }
             };
 
-            // Reported once the act is settled, so a step resolved by an
-            // escalation is logged with what was actually sent to the device
-            // rather than with the refusal that preceded it.
-            self.report(index, &snapshot, &answers, Some(&act), repeated, (read_ms, elapsed_ms(began), waited.get()));
-
             // A verdict ends the run. It resolves to no command, so without
             // this the loop carries on driving a screen it has just declared
             // finished — and the goal-met guard hides that whenever the two
             // happen to agree.
             if let Act::Finish(outcome) = act {
+                // Reported here rather than with the acting steps below: a
+                // verdict touches nothing, so there is no settle to wait for
+                // and nothing to be learned by reporting it later.
+                self.report(index, &snapshot, &answers, Some(&act), repeated, Spent {
+                    read_ms,
+                    step_ms: elapsed_ms(began),
+                    waited_ms: waited.get(),
+                    judged_ms,
+                    settled_ms,
+                });
                 match self.refuse_verdict(outcome, blind, &answers) {
                     Some(reason) => {
                         previous = Some(reason);
@@ -1120,6 +1168,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             )?;
             match resolved {
                 Reached::Command(command) => {
+                    let acting = std::time::Instant::now();
                     self.device.perform(&command).map_err(RunError::Device)?;
                     // An action and its effect are not the same instant. Read
                     // straight after acting and the screen is still the one
@@ -1129,6 +1178,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     // for a fixed time, so a quick transition costs a moment
                     // and a slow one is still waited out.
                     let moved = self.settled_on_a_new_screen(snapshot.fingerprint())?;
+                    settled_ms = elapsed_ms(acting);
                     if moved {
                         ineffective = 0;
                     } else {
@@ -1141,7 +1191,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             previous.as_deref().unwrap_or("Acted")
                         ));
                         if ineffective >= Self::INEFFECTIVE_LIMIT {
-                            // Already reported for this step, above.
+                            self.report(index, &snapshot, &answers, Some(&act), repeated, Spent {
+                                read_ms,
+                                step_ms: elapsed_ms(began),
+                                waited_ms: waited.get(),
+                                judged_ms,
+                                settled_ms,
+                            });
                             return Ok(Ending::Uncertain {
                                 because: Indecision::NoProgress {
                                     repeated: ineffective,
@@ -1152,12 +1208,30 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 }
                 Reached::Nothing => {}
                 Reached::Unreachable => {
-                    self.report(index, &snapshot, &answers, None, repeated, (read_ms, elapsed_ms(began), waited.get()));
+                    self.report(index, &snapshot, &answers, None, repeated, Spent {
+                    read_ms,
+                    step_ms: elapsed_ms(began),
+                    waited_ms: waited.get(),
+                    judged_ms,
+                    settled_ms,
+                });
                     return Ok(Ending::Uncertain {
                         because: Indecision::Covered,
                     });
                 }
             }
+
+            // Reported once the act has been carried out and the screen has
+            // settled, so the step's own cost includes both. A step resolved
+            // by an escalation is logged with what was actually sent to the
+            // device rather than with the refusal that preceded it.
+            self.report(index, &snapshot, &answers, Some(&act), repeated, Spent {
+                read_ms,
+                step_ms: elapsed_ms(began),
+                waited_ms: waited.get(),
+                judged_ms,
+                settled_ms,
+            });
         }
         Ok(Ending::OutOfSteps { limit: self.limit })
     }
@@ -1271,6 +1345,21 @@ fn describe(
         state["fields"] = serde_json::Value::Object(fields);
     }
     state
+}
+
+/// Where a step's time went.
+///
+/// The `_ms` on every field is the unit and is kept: these are handed
+/// straight to [`StepReport`], whose fields are public and where a bare
+/// `read` would not say what it counts.
+#[derive(Debug, Clone, Copy, Default)]
+#[allow(clippy::struct_field_names)]
+struct Spent {
+    read_ms: u64,
+    step_ms: u64,
+    waited_ms: u64,
+    judged_ms: u64,
+    settled_ms: u64,
 }
 
 /// Milliseconds since an instant, saturated rather than wrapped.
