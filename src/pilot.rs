@@ -647,7 +647,12 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     pub const QUIET_ENOUGH_MS: u64 = 120;
 
     /// How many screens back a run remembers having been on.
-    pub const MEMORY: usize = 12;
+    ///
+    /// Long enough to span a lap of a flow: a transfer re-entered from its
+    /// menu takes around a dozen steps, and a window that short evicts the
+    /// screen before the run comes back to it — which is how three laps of
+    /// one flow went unrecognised.
+    pub const MEMORY: usize = 32;
 
     /// How long a named app is given to put something on screen.
     ///
@@ -1201,6 +1206,30 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             match resolved {
                 Reached::Command(command) => {
                     let acting = std::time::Instant::now();
+                    // Closing a keyboard that has already closed is going
+                    // back. The catalog offered it from the screen as it was
+                    // when this step began, and a keyboard dismissed by the
+                    // step before may be gone by now — so the gesture would
+                    // land as navigation and take the run off the form it is
+                    // filling. Measured: two such steps in a row returned a
+                    // transfer to the dashboard.
+                    if matches!(act, Act::CloseKeyboard)
+                        && !self
+                            .device
+                            .observe()
+                            .map_err(RunError::Device)?
+                            .keyboard_open()
+                    {
+                        previous = Some("The keyboard was already away".to_owned());
+                        self.report(index, &snapshot, &answers, Some(&act), repeated, Spent {
+                            read_ms,
+                            step_ms: elapsed_ms(began),
+                            waited_ms: waited.get(),
+                            judged_ms,
+                            settled_ms,
+                        });
+                        continue;
+                    }
                     self.device.perform(&command).map_err(RunError::Device)?;
                     // An action and its effect are not the same instant. Read
                     // straight after acting and the screen is still the one

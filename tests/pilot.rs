@@ -1072,3 +1072,48 @@ fn an_action_that_changes_nothing_is_given_longer_the_next_time() {
         spent.as_millis(),
     );
 }
+
+/// Closing a keyboard that has already closed is going back. The catalog
+/// offers it from the screen as it was when the step began, and a keyboard
+/// dismissed by the step before may be gone by the time this one acts — so
+/// the gesture lands as navigation and the run leaves the form it was
+/// filling.
+///
+/// Measured on a transfer form: two `close_keyboard` steps in a row, the
+/// second of which returned the run to the dashboard.
+#[test]
+fn closing_a_keyboard_that_has_already_closed_does_nothing() {
+    let judge = Scripted::new(vec![
+        answer("close_keyboard", None, 0.99, 0.02),
+        answer("done", None, 0.99, 0.97),
+    ]);
+    let mut pilot = Pilot::new(Closing::default(), judge, &Android);
+
+    pilot.pursue("put the keyboard away").expect("the run completes");
+
+    assert!(
+        pilot.device().performed.is_empty(),
+        "the keyboard was already down, so there was nothing to do: {:?}",
+        pilot.device().performed,
+    );
+}
+
+/// A device whose keyboard is up when the step is judged and down by the time
+/// it acts, as one is when the step before dismissed it.
+#[derive(Default)]
+struct Closing {
+    reads: u32,
+    performed: Vec<Command>,
+}
+
+impl Device for Closing {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        self.reads += 1;
+        Ok(screen_of(&["Go Back", "Continue"]).with_keyboard_open(self.reads == 1))
+    }
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        self.performed.push(command.clone());
+        Ok(())
+    }
+}
