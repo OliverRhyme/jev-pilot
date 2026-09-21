@@ -1033,3 +1033,42 @@ fn repeating_is_counted_even_when_the_screen_never_moves() {
         seen[2],
     );
 }
+
+/// An action that has achieved nothing yet is not the same as one that has
+/// achieved nothing. A button backed by a network call shows no change and
+/// emits no events while the call is in flight, so both the watching settle
+/// and the device's own account of the silence agree — correctly — that the
+/// screen has not moved.
+///
+/// Measured on a transfer form: Continue tapped five times, the run stopped
+/// for want of progress, and the summary appeared afterwards. The app was
+/// not ignoring the taps; it was slower than the run's patience.
+///
+/// So patience grows with each action that changes nothing, and costs
+/// nothing at all when actions work.
+#[test]
+fn an_action_that_changes_nothing_is_given_longer_the_next_time() {
+    let mut pilot = Pilot::new(
+        Fake { inert: true, ..Fake::default() },
+        Scripted::new(vec![answer("tap", Some("A2"), 0.99, 0.02); 6]),
+        &Android,
+    );
+
+    let began = std::time::Instant::now();
+    let ending = pilot.pursue("tap the same thing").expect("the run completes");
+    let spent = began.elapsed();
+
+    assert!(
+        matches!(ending, Ending::Uncertain { .. }),
+        "it still gives up: {ending:?}",
+    );
+    // Three attempts at a flat budget come to three times it. Waiting
+    // longer each time comes to six, so five is a threshold only a backoff
+    // can clear.
+    let flat = 5 * u128::from(Pilot::<Fake, Scripted>::CHANGE_BUDGET_MS);
+    assert!(
+        spent.as_millis() > flat,
+        "later attempts must wait longer: {}ms is no more than {flat}ms",
+        spent.as_millis(),
+    );
+}

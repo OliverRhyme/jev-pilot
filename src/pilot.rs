@@ -688,9 +688,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         Ok(())
     }
 
-    fn settled_on_a_new_screen(&mut self, before: u64) -> Result<bool, Failure<D, J, X, C>> {
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(Self::CHANGE_BUDGET_MS);
+    fn settled_on_a_new_screen(
+        &mut self,
+        before: u64,
+        attempt: u32,
+    ) -> Result<bool, Failure<D, J, X, C>> {
+        let budget = Self::CHANGE_BUDGET_MS.saturating_mul(u64::from(attempt));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(budget);
         let mut last = before;
         while std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(Self::CHANGE_POLL_MS));
@@ -1205,7 +1209,20 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     // like an unchanged screen. Wait for it to move instead of
                     // for a fixed time, so a quick transition costs a moment
                     // and a slow one is still waited out.
-                    let moved = self.settled_on_a_new_screen(snapshot.fingerprint())?;
+                    // Patience grows with each action that changed nothing.
+                    // A button backed by a network call shows no change and
+                    // emits no events while the call is in flight, so every
+                    // signal available agrees — correctly — that the screen
+                    // has not moved, and the only thing separating "not yet"
+                    // from "never" is how long the run is willing to wait.
+                    //
+                    // Measured: Continue tapped five times on a transfer
+                    // form, the run stopped for want of progress, and the
+                    // summary appeared afterwards. Costs nothing when
+                    // actions work, because then this is always the first
+                    // attempt.
+                    let moved = self
+                        .settled_on_a_new_screen(snapshot.fingerprint(), ineffective + 1)?;
                     settled_ms = elapsed_ms(acting);
                     if moved {
                         ineffective = 0;
