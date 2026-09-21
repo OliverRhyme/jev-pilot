@@ -109,15 +109,33 @@ model holding a conversation can drive a device — and, more to the point, can
 *be* the second opinion above. A run that cannot decide stops and asks; the
 caller answers it and the run carries on.
 
+```console
+$ cargo install --path . --features mcp   # off by default; it brings a runtime
+```
+
 ```jsonc
 // Wherever your client keeps its MCP servers
 { "mcpServers": { "jev-pilot": { "command": "jev-pilot-mcp" } } }
 ```
 
+Built on [`rmcp`], the official SDK, so the protocol surface tracks the spec
+rather than this repo. The server is async because `rmcp` is; the loop it drives
+is not, and should not be — a step is observe, judge, act, settle, and each
+waits on the one before, so there is nothing for a runtime to overlap. Several
+devices at once is one process each, which also means a wedged phone cannot take
+the others with it.
+
+[`rmcp`]: https://crates.io/crates/rmcp
+
 Seven tools. `observe`, `devices` and `run_status` only look. `start_run` acts
 on a real device and says so in its description and its annotations, because a
 client is going to put that in front of a person, and reading a screen and
 moving money through one are not the same permission.
+
+The server tells the client how to prompt it — how to write a goal, what makes
+an `accept` claim checkable, how `text` keys are matched, what lowering the
+floor does and does not loosen. Every one of those rules is one that has cost a
+real run, so they are worth the words.
 
 A run is not one call that blocks until it is over:
 
@@ -137,6 +155,15 @@ already being driven is refused, and told to watch, answer or stop the run it ha
 
 Runs end when the conversation does. Left going, one carries on tapping at
 somebody's phone with nothing watching it and nothing able to answer it.
+
+**When a run cannot decide, it asks the client.** If the client supports
+sampling, the run's impasse goes to *its* model and the answer comes straight
+back — System Two arriving by callback rather than by polling, and still an
+index into the catalog the run offered, never an action the model invented. A
+client without sampling is told so, and falls back to `run_status` and
+`answer_run`. Sampling is deprecated upstream by SEP-2577; elicitation, which
+asks the person rather than the model, is the successor and is not yet wired
+up here.
 
 Every tool runs the `jev-pilot` binary rather than driving the loop in-process,
 so the server cannot drift from the command line it is a face for, and an

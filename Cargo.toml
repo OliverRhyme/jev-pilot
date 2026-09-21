@@ -18,6 +18,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 roxmltree = { version = "0.20", optional = true }
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls", "json"] }
+rmcp = { version = "3.4", optional = true, default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
+schemars = { version = "1", optional = true }
+tokio = { version = "1", optional = true, default-features = false, features = ["rt", "macros", "io-std", "signal"] }
 
 [features]
 default = ["android", "ios", "http"]
@@ -28,8 +31,24 @@ ios = ["dep:roxmltree"]
 # A blocking HTTP transport. Without it the crate builds the request and you
 # send it with whatever client you already have.
 http = ["dep:ureq"]
+# An MCP server, so another agent can drive a device and answer its impasses.
+#
+# Off by default, and deliberately. It brings an async runtime with it, and the
+# loop itself has no use for one: a step is observe, judge, act, settle, and
+# each waits on the one before. Everything using this crate as a library would
+# pay for a runtime that only the server needs.
+mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
 
 # docs.rs renders every feature, and marks which items need which.
+# The server is a binary of its own, and only exists when its feature is on.
+[[bin]]
+name = "jev-pilot-mcp"
+required-features = ["mcp"]
+
+[[bin]]
+name = "jev-pilot"
+path = "src/main.rs"
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

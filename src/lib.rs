@@ -35,6 +35,8 @@ pub mod client;
 pub mod credential;
 pub mod device;
 pub mod judgment;
+#[cfg(feature = "mcp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
 pub mod mcp;
 pub mod pilot;
 pub mod platform;

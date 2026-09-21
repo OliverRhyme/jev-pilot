@@ -4,9 +4,24 @@
 //! this adds is the seam: a run that cannot decide stops and asks, and over
 //! MCP the thing holding the conversation is what answers.
 
-fn main() -> std::process::ExitCode {
-    match jev_pilot::mcp::serve(std::io::stdin().lock(), &mut std::io::stdout().lock()) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+use rmcp::ServiceExt as _;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::process::ExitCode {
+    // One thread. Nothing here is compute, and the run itself is a separate
+    // process with a loop that waits on one thing at a time.
+    let serving = match jev_pilot::mcp::Pilot::new()
+        .serve(rmcp::transport::stdio())
+        .await
+    {
+        Ok(serving) => serving,
+        Err(error) => {
+            eprintln!("jev-pilot-mcp: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    match serving.waiting().await {
+        Ok(_) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("jev-pilot-mcp: {error}");
             std::process::ExitCode::FAILURE

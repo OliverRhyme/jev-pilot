@@ -1,100 +1,429 @@
-//! Speaking the Model Context Protocol, so another agent can drive a device.
+//! An MCP server, so another agent can drive a device — and be the second
+//! opinion a run escalates to.
 //!
-//! The interesting part is not the transport. It is that this crate already
-//! has the seam an MCP client wants to sit in: a run that cannot decide asks,
-//! and anything able to write an answer can answer it. That is the desk, and
-//! over MCP the asking party becomes whoever is holding the conversation.
+//! The interesting part is not the transport. This crate already has the seam
+//! an MCP client wants to sit in: a run that cannot decide stops and asks, and
+//! anything able to write an answer can answer it. That is the desk, and here
+//! the party holding the conversation becomes what answers.
 //!
-//! So a run is not one call that blocks until it is over. It is started, then
-//! looked in on, then answered when it wants something — which is the same
-//! shape a person at a terminal already uses.
+//! There are three ways it can, in the order they are tried:
 //!
-//! Every tool here is carried out by running the `jev-pilot` binary, rather
-//! than by driving the loop in this process. One behaviour, described once: a
-//! server that reimplemented the run would drift from the command line it is
-//! supposed to be a face for.
+//! 1. **Sampling.** The client's own model answers, asked for exactly when the
+//!    run needs it. This is System Two arriving by callback rather than by
+//!    polling, and it is what MCP's `sampling/createMessage` is for.
+//! 2. **Elicitation.** No sampling, but the client can put a question to the
+//!    person in front of it.
+//! 3. **Watching.** Neither, so the run waits and whoever is holding the
+//!    conversation answers it with `answer_run` when they notice.
+//!
+//! Every tool is carried out by running the `jev-pilot` binary rather than by
+//! driving the loop in this process. One behaviour, described once: a server
+//! that reimplemented the run would drift from the command line it is
+//! supposed to be a face for. It also keeps the loop synchronous, which is
+//! what it wants to be — a step is observe, judge, act, settle, and each waits
+//! on the one before, so there is nothing for a runtime to overlap.
 
-/// The protocol version this server speaks.
-pub const PROTOCOL: &str = "2025-06-18";
+// `#[tool_handler]` writes an async trait method that never awaits, and the
+// lint is about code this module does not write.
+#![allow(clippy::unused_async_trait_impl)]
 
-/// Versions this server will answer in, newest first.
-///
-/// A client that asked for an older one is answered in it: it asked because
-/// that is what it understands, and naming the newest instead tells it
-/// nothing it can use.
-const SPOKEN: &[&str] = &[PROTOCOL, "2025-03-26", "2024-11-05"];
+use std::sync::{Arc, Mutex};
 
-/// The runs this server has started, by the name it gave them.
-///
-/// Named here rather than by the caller, so one conversation cannot reach into
-/// another's run by guessing a name it was never given.
-#[derive(Debug, Default)]
-pub struct Sessions {
-    runs: std::collections::BTreeMap<String, Run>,
+use rmcp::handler::server::router::tool::ToolRouter;
+#[allow(deprecated)]
+use rmcp::model::{CreateMessageRequestParams, Role, SamplingMessage, SamplingMessageContentBlock};
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig,
+};
+use rmcp::service::{Peer, RequestContext, RoleServer};
+use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+/// Which device a call is about, when more than one is attached.
+#[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
+pub struct Which {
+    /// Which device, when more than one is attached.
+    pub device: Option<String>,
 }
 
-impl Sessions {
-    /// The devices with a run still going on them.
-    ///
-    /// Asked rather than remembered, because a run ends on its own: the child
-    /// is reaped here, so a finished run stops holding its device.
-    pub fn still_running(&mut self) -> Vec<String> {
-        self.runs.retain(|_, run| !run.finished());
-        self.runs.keys().cloned().collect()
-    }
+/// What the helper tool takes.
+#[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
+pub struct HelperArgs {
+    /// Which device, when more than one is attached.
+    pub device: Option<String>,
+    /// Install and enable it, rather than only reporting.
+    pub install: Option<bool>,
+}
 
-    /// Where a run keeps its desk, if this server started it.
+/// What starting a run takes.
+#[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
+pub struct StartArgs {
+    /// What to achieve, in plain words. Say what to achieve rather than how to
+    /// find the app — pass `app` for that. Name the steps in the order the app
+    /// asks for them, and for a keypad name the keys in order ("tap the digit
+    /// keys 2, 4, 6, 8, 1, 0 in that order") rather than the number.
+    pub goal: String,
+    /// Which device, when more than one is attached.
+    pub device: Option<String>,
+    /// The app package the goal is about. It is brought to the front first,
+    /// and the run knows when it has left it.
+    pub app: Option<String>,
+    /// Claims that must hold before success is believed. Write them about text
+    /// that is visible when the run finishes: a claim about something further
+    /// down the page can never be confirmed, and the run will walk off a
+    /// finished screen still looking for it.
+    pub accept: Option<Vec<String>>,
+    /// Words to type, keyed by the field they belong in. The key is matched
+    /// against whatever the screen calls the field — its hint, its label, its
+    /// caption — by containment and ignoring case, so "password" finds
+    /// "Password" and "account number" finds "RBGI Account Number". A field
+    /// with nothing supplied stops the run to ask for the words.
+    pub text: Option<std::collections::BTreeMap<String, String>>,
+    /// How many steps before giving up.
+    pub steps: Option<u32>,
+    /// Below this confidence the run asks rather than acts. Lowering it
+    /// loosens ordinary gestures only: ending the run, and leaving the app,
+    /// keep their own floor whatever is passed here. Around 0.35 to 0.4 keeps
+    /// most runs moving; the default of 0.6 asks often.
+    pub floor: Option<f64>,
+}
+
+/// What answering a run takes.
+#[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
+pub struct AnswerArgs {
+    /// Which device's run, when more than one is being driven.
+    pub device: Option<String>,
+    /// One of the operations the run listed, or `stop` to end it.
+    pub operation: Option<String>,
+    /// Which row, or which field when typing, counting from zero.
+    pub target: Option<u32>,
+    /// The words, when it asked for some.
+    pub text: Option<String>,
+}
+
+/// The server.
+#[derive(Clone)]
+pub struct Pilot {
+    tool_router: ToolRouter<Self>,
+    sessions: Arc<Mutex<Sessions>>,
+}
+
+impl Default for Pilot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for Pilot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pilot").finish_non_exhaustive()
+    }
+}
+
+impl Pilot {
+    /// A server with no runs going.
     #[must_use]
-    pub fn desk_of(&self, run: &str) -> Option<&std::path::Path> {
-        self.runs.get(run).map(|run| run.desk.as_path())
+    pub fn new() -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+            sessions: Arc::new(Mutex::new(Sessions::default())),
+        }
     }
 
-    /// Remember a run this server started.
-    pub fn remember(&mut self, name: String, desk: std::path::PathBuf, child: std::process::Child) {
-        self.runs.insert(name, Run { desk, child });
+    /// Which run a call is about, given what it said and what is in flight.
+    fn resolve(&self, device: Option<&str>) -> Result<String, String> {
+        let mut sessions = self.sessions.lock().map_err(|_| poisoned())?;
+        let running = sessions.still_running();
+        which_run(device, &running.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+}
+
+fn poisoned() -> String {
+    "the run book is in an unknown state; start this server again".to_owned()
+}
+
+/// Run the command line and say what it said.
+fn ran(args: &[String]) -> CallToolResult {
+    match run_pilot(args) {
+        Ok(said) => CallToolResult::success(vec![ContentBlock::text(said)]),
+        Err(error) => refused(&format!("could not run jev-pilot: {error}")),
+    }
+}
+
+/// A call that was understood and could not be carried out.
+///
+/// Inside the result rather than as a transport fault: the asking model can
+/// read this and do something else, which is the whole point of telling it.
+fn refused(said: &str) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(said.to_owned())])
+}
+
+#[tool_router(router = tool_router)]
+impl Pilot {
+    /// Read what is on the device's screen right now.
+    #[tool(
+        description = "Read what is on the device's screen right now: the rows that can be \
+                       acted on, what the screen says, which controls it shows but will not \
+                       let anything use, and which app is in front. Changes nothing. This is \
+                       the cheapest way to find out where a device is.",
+        annotations(title = "Look at the screen", read_only_hint = true)
+    )]
+    pub async fn observe(&self, Parameters(which): Parameters<Which>) -> CallToolResult {
+        ran(&invocation("observe", &to_value(&which)).unwrap_or_default())
     }
 
-    /// Forget a run, ending it if it is still going.
-    pub fn forget(&mut self, run: &str) -> bool {
-        match self.runs.remove(run) {
-            Some(mut run) => {
-                let _ = run.child.kill();
-                let _ = run.child.wait();
-                true
+    /// List the devices attached to this machine.
+    #[tool(
+        description = "List the devices attached to this machine, so a later call can name \
+                       one. Changes nothing.",
+        annotations(title = "List devices", read_only_hint = true)
+    )]
+    pub async fn devices(&self) -> CallToolResult {
+        ran(&["devices".to_owned()])
+    }
+
+    /// Report on the on-device helper, and install it when asked.
+    #[tool(
+        description = "Report on the on-device helper that reads screens quickly, and install \
+                       it when asked to. Without it every screen read takes about two seconds \
+                       instead of about fifty milliseconds.",
+        annotations(title = "The screen-reading helper", read_only_hint = false)
+    )]
+    pub async fn helper(&self, Parameters(args): Parameters<HelperArgs>) -> CallToolResult {
+        ran(&invocation("helper", &to_value(&args)).unwrap_or_default())
+    }
+
+    /// Drive the device towards a goal.
+    #[tool(
+        description = "Drive the device towards a goal, written in plain words. THIS ACTS ON \
+                       A REAL DEVICE: it taps, types and navigates, and on an app that moves \
+                       money or sends messages it will do those things. Returns at once; \
+                       watch it with run_status and answer it with answer_run. One run per \
+                       device — a device already being driven is refused rather than driven \
+                       twice. Call observe first: a goal written for a screen nobody looked \
+                       at is where most bad runs begin.",
+        annotations(
+            title = "Drive the device towards a goal",
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        )
+    )]
+    pub async fn start_run(
+        &self,
+        Parameters(args): Parameters<StartArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let arguments = to_value(&args);
+        let Some(mut line) = invocation("start_run", &arguments) else {
+            return Ok(refused("a run needs a goal"));
+        };
+
+        let device = args.device.clone();
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return Ok(refused(&poisoned()));
+        };
+        let busy = sessions.still_running();
+        if let Some(already) = busy
+            .iter()
+            .find(|running| device.as_deref().is_none_or(|asked| *running == asked))
+        {
+            return Ok(refused(&format!(
+                "{already} is already being driven. Watch it with run_status, answer it with \
+                 answer_run, or end it with stop_run."
+            )));
+        }
+
+        let name = device.clone().unwrap_or_else(|| "the attached device".to_owned());
+        let desk = std::env::temp_dir().join(format!(
+            "jev-pilot-mcp-{}",
+            name.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
+        ));
+        if let Err(error) = std::fs::create_dir_all(&desk) {
+            return Ok(refused(&format!("could not make a desk for {name}: {error}")));
+        }
+        // The goal is the one positional and must stay last.
+        let goal = line.pop().unwrap_or_default();
+        line.push("--desk".to_owned());
+        line.push(desk.display().to_string());
+        line.push(goal.clone());
+
+        match std::process::Command::new(binary())
+            .args(&line)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                sessions.remember(name.clone(), desk.clone(), child);
+                drop(sessions);
+                let answering = attend(context.peer.clone(), desk, goal);
+                Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                    "a run is under way on {name}. It acts on the device from here. {answering}"
+                ))]))
             }
-            None => false,
+            Err(error) => Ok(refused(&format!("could not start jev-pilot: {error}"))),
+        }
+    }
+
+    /// How a run is getting on.
+    #[tool(
+        description = "How a run is getting on: every step it has taken, whether it is waiting \
+                       for an answer and what it is asking, and how it ended if it has. \
+                       Changes nothing. Name a device only when more than one is being driven.",
+        annotations(title = "How a run is getting on", read_only_hint = true)
+    )]
+    pub async fn run_status(&self, Parameters(which): Parameters<Which>) -> Result<CallToolResult, ErrorData> {
+        let run = match self.resolve(which.device.as_deref()) {
+            Ok(run) => run,
+            Err(said) => return Ok(refused(&said)),
+        };
+        let Ok(sessions) = self.sessions.lock() else {
+            return Ok(refused(&poisoned()));
+        };
+        match sessions.desk_of(&run) {
+            Some(desk) => Ok(CallToolResult::success(vec![ContentBlock::text(status_of(desk))])),
+            None => Ok(refused(&format!("no run on {run}"))),
+        }
+    }
+
+    /// Answer a run that stopped to ask.
+    #[tool(
+        description = "Answer a run that stopped to ask. Name an operation it was offered, the \
+                       row or field it applies to, or the words to type. This is how the \
+                       caller becomes the second opinion a run escalates to, so it acts on \
+                       the device.",
+        annotations(
+            title = "Answer a run",
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        )
+    )]
+    pub async fn answer_run(&self, Parameters(args): Parameters<AnswerArgs>) -> Result<CallToolResult, ErrorData> {
+        let run = match self.resolve(args.device.as_deref()) {
+            Ok(run) => run,
+            Err(said) => return Ok(refused(&said)),
+        };
+        let Some(answer) = answer_from(&to_value(&args)) else {
+            return Ok(refused(
+                "an answer needs an operation, a target or some text; this one said nothing",
+            ));
+        };
+        let Ok(sessions) = self.sessions.lock() else {
+            return Ok(refused(&poisoned()));
+        };
+        let Some(desk) = sessions.desk_of(&run) else {
+            return Ok(refused(&format!("no run on {run}")));
+        };
+        match std::fs::write(desk.join("answer.json"), answer.to_string()) {
+            Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "answered the run on {run} with {answer}"
+            ))])),
+            Err(error) => Ok(refused(&format!("could not answer {run}: {error}"))),
+        }
+    }
+
+    /// End a run that is still going.
+    #[tool(
+        description = "End a run that is still going, leaving the device wherever it got to. \
+                       Nothing further is done to the device.",
+        annotations(title = "Stop a run", read_only_hint = false)
+    )]
+    pub async fn stop_run(&self, Parameters(which): Parameters<Which>) -> Result<CallToolResult, ErrorData> {
+        let run = match self.resolve(which.device.as_deref()) {
+            Ok(run) => run,
+            Err(said) => return Ok(refused(&said)),
+        };
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return Ok(refused(&poisoned()));
+        };
+        if sessions.forget(&run) {
+            Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "the run on {run} is stopped; the device is left where it got to"
+            ))]))
+        } else {
+            Ok(refused(&format!("no run on {run}")))
         }
     }
 }
 
-impl Drop for Sessions {
-    /// A conversation that ends takes its runs with it.
-    ///
-    /// Left going, a run carries on tapping at somebody's phone with nothing
-    /// watching it and nothing able to answer it when it asks.
-    fn drop(&mut self) {
-        for (_, run) in std::mem::take(&mut self.runs) {
-            let mut run = run;
-            let _ = run.child.kill();
-            let _ = run.child.wait();
-        }
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for Pilot {
+    fn get_info(&self) -> ServerConfig {
+        let mut me = Implementation::default();
+        "jev-pilot".clone_into(&mut me.name);
+        env!("CARGO_PKG_VERSION").clone_into(&mut me.version);
+
+        let mut info = ServerConfig::default();
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.server_info = me;
+        info.instructions = Some(GUIDANCE.to_owned());
+        info
     }
 }
 
-/// One run, and where it keeps its desk.
-#[derive(Debug)]
-struct Run {
-    desk: std::path::PathBuf,
-    child: std::process::Child,
-}
+/// What a client is told before it calls anything.
+///
+/// Worth spending words on. The tools are easy to call and easy to call
+/// badly, and every rule below is one that has actually cost a run: a goal
+/// that sent it hunting through a launcher, a claim about text that was below
+/// the fold, a floor lowered in the belief it only made things quicker.
+const GUIDANCE: &str = "\
+Drives an Android or iOS device towards a goal. Code enumerates what the \
+screen allows and a model picks one of those, so nothing here can invent a \
+coordinate or name a row that is not on screen.
 
-impl Run {
-    /// Whether this run has ended on its own.
-    fn finished(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
-    }
-}
+LOOK FIRST. `observe` is free and changes nothing, and it tells you the rows, \
+what the screen says, the controls it shows but will not let anything use, \
+which app is in front, and how long the screen has been still. Most bad runs \
+start with a goal written for a screen nobody looked at.
 
+WRITING A GOAL. Say what to achieve, not how to find the app: pass `app` with \
+the package instead, which brings it to the front and lets the run notice when \
+it has wandered off. Name the steps in the order the app asks for them, and \
+name what to enter where. For a keypad, name the keys in order — 'tap the \
+digit keys 2, 4, 6, 8, 1, 0 in that order' works, 'enter PIN 246810' leaves \
+it counting.
+
+WRITING `accept`. These are what must hold before success is believed, and \
+they are checked against the screen as read. Write them about text that is \
+actually visible when the run finishes — a claim about something further down \
+the page can never be confirmed, and the run will walk off a finished screen \
+looking for it. 'A transfer receipt is on screen' is checkable. 'A receipt \
+showing a reference number' is not, if the reference is below the fold.
+
+WRITING `text`. Keys are matched against whatever the screen calls the field — \
+its hint, its label, its caption — by containment, ignoring case. So \
+'password' finds 'Password', and 'account number' finds 'RBGI Account \
+Number'. A field with nothing supplied stops the run to ask you for the words.
+
+THE FLOOR. Below it the run asks instead of acting. Lowering it loosens \
+ordinary gestures only: ending the run, and leaving the app, keep their own \
+floor whatever you pass, because a run that gives up on a guess has answered \
+wrongly rather than cheaply. Around 0.35 to 0.4 keeps most runs moving; the \
+default of 0.6 asks often.
+
+WHEN IT ASKS. A run that cannot decide stops. If this client can be sampled it \
+will ask you directly and carry on from your answer. Otherwise watch it with \
+`run_status` and reply with `answer_run`, naming an operation it listed and a \
+row it showed you — an operation it did not offer, or a row it does not have, \
+is refused and you are asked again.
+
+ONE RUN PER DEVICE. A second run on the same phone would take turns at the \
+same screen with the first. Stop or finish the one that is there.";
+
+/// Turn a typed argument struct back into the JSON the pure helpers read.
+///
+/// Those helpers are shared with the command line and tested without any of
+/// this, which is worth a serialisation: the rules about what becomes which
+/// flag live in one place and are checked there.
+fn to_value<T: serde::Serialize>(args: &T) -> serde_json::Value {
+    serde_json::to_value(args).unwrap_or(serde_json::Value::Null)
+}
 /// Which run a call is about.
 ///
 /// A run is named by the device it drives, because that is what it is. Naming
@@ -120,268 +449,6 @@ pub fn which_run(asked: Option<&str>, running: &[&str]) -> Result<String, String
             running.join(", ")
         )),
     }
-}
-
-/// Hold a conversation: one JSON object per line in, one per line out.
-///
-/// Newline-delimited because that is what MCP over a pipe is, and because it
-/// keeps this readable in a terminal when something has gone wrong.
-///
-/// A line that is not JSON is complained about rather than hung up on. One bad
-/// line says nothing about the next.
-///
-/// # Errors
-/// Returns the first error from reading or writing the pipe. A conversation
-/// whose other end has gone is over.
-pub fn serve(asked: impl std::io::Read, said: &mut impl std::io::Write) -> std::io::Result<()> {
-    use std::io::BufRead as _;
-
-    let mut sessions = Sessions::default();
-    for line in std::io::BufReader::new(asked).lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let answer = match serde_json::from_str::<serde_json::Value>(&line) {
-            Ok(request) => handle(&request, &mut sessions),
-            Err(error) => Some(fault(
-                &serde_json::Value::Null,
-                -32700,
-                &format!("that line is not JSON: {error}"),
-            )),
-        };
-        if let Some(answer) = answer {
-            writeln!(said, "{answer}")?;
-            said.flush()?;
-        }
-    }
-    Ok(())
-}
-
-/// Answer one request, or nothing at all when it was a notification.
-///
-/// Notifications carry no id and want no reply; answering one is a protocol
-/// error, and some clients close the connection over it.
-#[must_use]
-pub fn handle(
-    request: &serde_json::Value,
-    sessions: &mut Sessions,
-) -> Option<serde_json::Value> {
-    let id = request.get("id").cloned();
-    let method = request.get("method").and_then(serde_json::Value::as_str)?;
-    // No id means a notification. It is still dispatched, because some of them
-    // matter; it is simply not answered.
-    let id = id?;
-
-    let params = request.get("params").cloned().unwrap_or(serde_json::json!({}));
-    Some(match method {
-        "initialize" => reply(&id, &initialize(&params)),
-        "ping" => reply(&id, &serde_json::json!({})),
-        "tools/list" => reply(&id, &serde_json::json!({ "tools": tools() })),
-        "tools/call" => reply(&id, &call(&params, sessions)),
-        _ => fault(&id, -32601, &format!("no such method: {method}")),
-    })
-}
-
-/// The handshake.
-fn initialize(params: &serde_json::Value) -> serde_json::Value {
-    let asked = params
-        .get("protocolVersion")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(PROTOCOL);
-    let speaking = if SPOKEN.contains(&asked) { asked } else { PROTOCOL };
-    serde_json::json!({
-        "protocolVersion": speaking,
-        "capabilities": { "tools": { "listChanged": false } },
-        "serverInfo": { "name": "jev-pilot", "version": env!("CARGO_PKG_VERSION") },
-    })
-}
-
-/// What this server can be asked to do.
-///
-/// Every entry says plainly whether it changes the device. A client is going
-/// to put these in front of a person, and "read the screen" and "move money
-/// through an app" are not the same kind of permission.
-fn tools() -> Vec<serde_json::Value> {
-    let tool = |name: &str, about: &str, schema: serde_json::Value, reads: bool, wrecks: bool| {
-        serde_json::json!({
-            "name": name,
-            "description": about,
-            "inputSchema": schema,
-            "annotations": {
-                "readOnlyHint": reads,
-                "destructiveHint": wrecks,
-                "openWorldHint": true,
-            },
-        })
-    };
-    let device = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "device": {
-                "type": "string",
-                "description": "Which device, when more than one is attached.",
-            },
-        },
-    });
-    let named = |extra: serde_json::Value| {
-        let mut schema = device.clone();
-        let (Some(into), Some(from)) = (
-            schema["properties"].as_object_mut(),
-            extra.as_object(),
-        ) else {
-            return schema;
-        };
-        for (key, value) in from {
-            into.insert(key.clone(), value.clone());
-        }
-        schema
-    };
-    // A run is named by the device it drives, so naming the device is the
-    // only thing these ever need — and only when more than one is being
-    // driven at once.
-    let run = named(serde_json::json!({}));
-
-    let mut offered = looking(&tool, &device, &named);
-    offered.extend(acting(&tool, &named, &run));
-    offered
-}
-
-/// The tools that only look.
-fn looking(
-    tool: &dyn Fn(&str, &str, serde_json::Value, bool, bool) -> serde_json::Value,
-    device: &serde_json::Value,
-    named: &dyn Fn(serde_json::Value) -> serde_json::Value,
-) -> Vec<serde_json::Value> {
-    vec![
-        tool(
-            "observe",
-            "Read what is on the device's screen right now: the rows that can \
-             be acted on, what the screen says, which controls it shows but \
-             will not let anything use, and which app is in front. Changes \
-             nothing. This is the cheapest way to find out where a device is.",
-            device.clone(),
-            true,
-            false,
-        ),
-        tool(
-            "devices",
-            "List the devices attached to this machine, so a later call can \
-             name one. Changes nothing.",
-            serde_json::json!({ "type": "object", "properties": {} }),
-            true,
-            false,
-        ),
-        tool(
-            "helper",
-            "Report on the on-device helper that reads screens quickly, and \
-             install it when asked to. Without it every screen read takes \
-             about two seconds instead of about fifty milliseconds.",
-            named(serde_json::json!({
-                "install": {
-                    "type": "boolean",
-                    "description": "Install and enable it, rather than only reporting.",
-                },
-            })),
-            false,
-            false,
-        ),
-    ]
-}
-
-/// The tools that act on the device.
-fn acting(
-    tool: &dyn Fn(&str, &str, serde_json::Value, bool, bool) -> serde_json::Value,
-    named: &dyn Fn(serde_json::Value) -> serde_json::Value,
-    run: &serde_json::Value,
-) -> Vec<serde_json::Value> {
-    vec![
-        tool(
-            "start_run",
-            "Drive the device towards a goal, written in plain words. THIS \
-             ACTS ON A REAL DEVICE: it taps, types and navigates, and on an \
-             app that moves money or sends messages it will do those things. \
-             Returns at once; watch it with run_status and answer it with \
-             answer_run. One run per device — a device already being driven \
-             is refused rather than driven twice.",
-            named(serde_json::json!({
-                "goal": {
-                    "type": "string",
-                    "description": "What to achieve, in plain words.",
-                },
-                "app": {
-                    "type": "string",
-                    "description": "The app package the goal is about. It is brought to the \
-                                    front first, and the run knows when it has left it.",
-                },
-                "accept": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Claims that must hold on the final screen before success \
-                                    is accepted. Write them about text the screen shows.",
-                },
-                "text": {
-                    "type": "object",
-                    "description": "Words to type, keyed by the field they belong in. A field \
-                                    with nothing supplied stops the run to ask.",
-                    "additionalProperties": { "type": "string" },
-                },
-                "steps": { "type": "integer", "description": "How many steps before giving up." },
-                "floor": {
-                    "type": "number",
-                    "description": "Below this confidence the run asks rather than acts. \
-                                    Lowering it applies to ordinary gestures only.",
-                },
-            })),
-            false,
-            true,
-        ),
-        tool(
-            "run_status",
-            "How a run is getting on: every step it has taken, whether it is \
-             waiting for an answer and what it is asking, and how it ended if \
-             it has. Changes nothing. Name a device only when more than one \
-             is being driven.",
-            run.clone(),
-            true,
-            false,
-        ),
-        tool(
-            "answer_run",
-            "Answer a run that stopped to ask. Name an operation it was \
-             offered, the row or field it applies to, or the words to type. \
-             This is how the caller becomes the second opinion a run escalates \
-             to, so it acts on the device.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "device": {
-                        "type": "string",
-                        "description": "Which device's run, when more than one is being driven.",
-                    },
-                    "operation": {
-                        "type": "string",
-                        "description": "One of the operations the run listed, or `stop` to end it.",
-                    },
-                    "target": {
-                        "type": "integer",
-                        "description": "Which row, or which field when typing, counting from zero.",
-                    },
-                    "text": { "type": "string", "description": "The words, when it asked for some." },
-                },
-            }),
-            false,
-            true,
-        ),
-        tool(
-            "stop_run",
-            "End a run that is still going, leaving the device wherever it \
-             got to. Nothing further is done to the device.",
-            run.clone(),
-            false,
-            false,
-        ),
-    ]
 }
 
 /// The command line one tool call stands for.
@@ -479,149 +546,6 @@ pub fn answer_from(arguments: &serde_json::Value) -> Option<serde_json::Value> {
     (!answer.is_empty()).then_some(serde_json::Value::Object(answer))
 }
 
-/// Carry out one tool call.
-fn call(params: &serde_json::Value, sessions: &mut Sessions) -> serde_json::Value {
-    let name = params
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
-
-    match name {
-        "observe" | "devices" | "helper" => match invocation(name, &arguments) {
-            Some(args) => match run_pilot(&args) {
-                Ok(said) => said_so(&said),
-                Err(error) => failed(&format!("could not run jev-pilot: {error}")),
-            },
-            None => failed(&format!("{name} was given arguments it cannot use")),
-        },
-        "start_run" => start(&arguments, sessions),
-        "run_status" => match resolve(&arguments, sessions) {
-            Ok(run) => match sessions.desk_of(&run) {
-                Some(desk) => said_so(&status_of(desk)),
-                None => failed(&format!("no run on {run}")),
-            },
-            Err(said) => failed(&said),
-        },
-        "answer_run" => {
-            let run = match resolve(&arguments, sessions) {
-                Ok(run) => run,
-                Err(said) => return failed(&said),
-            };
-            let Some(desk) = sessions.desk_of(&run) else {
-                return failed(&format!("no run on {run}"));
-            };
-            let Some(answer) = answer_from(&arguments) else {
-                return failed(
-                    "an answer needs an operation, a target or some text; \
-                     this one said nothing",
-                );
-            };
-            match std::fs::write(desk.join("answer.json"), answer.to_string()) {
-                Ok(()) => said_so(&format!("answered {run} with {answer}")),
-                Err(error) => failed(&format!("could not answer {run}: {error}")),
-            }
-        }
-        "stop_run" => match resolve(&arguments, sessions) {
-            Ok(run) if sessions.forget(&run) => said_so(&format!(
-                "the run on {run} is stopped; the device is left where it got to"
-            )),
-            Ok(run) => failed(&format!("no run on {run}")),
-            Err(said) => failed(&said),
-        },
-        // Reported inside the result rather than as a transport fault: the
-        // call was understood and refused, which is a thing the asking model
-        // can read and act on.
-        _ => failed(&format!("no such tool: {name}")),
-    }
-}
-
-/// Which run a call is about, given what it said and what is in flight.
-fn resolve(arguments: &serde_json::Value, sessions: &mut Sessions) -> Result<String, String> {
-    let running = sessions.still_running();
-    which_run(
-        arguments.get("device").and_then(serde_json::Value::as_str),
-        &running.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-}
-
-/// Begin a run, and hand back the name to watch it by.
-fn start(arguments: &serde_json::Value, sessions: &mut Sessions) -> serde_json::Value {
-    let Some(mut args) = invocation("start_run", arguments) else {
-        return failed("a run needs a goal");
-    };
-    // Named by the device it will drive, and refused when that device is
-    // already being driven: two runs on one screen take turns at it, each
-    // undoing what the other has just done, and neither knows the other is
-    // there.
-    let asked = arguments.get("device").and_then(serde_json::Value::as_str);
-    let busy = sessions.still_running();
-    if let Some(already) = busy
-        .iter()
-        .find(|device| asked.is_none_or(|asked| *device == asked))
-    {
-        return failed(&format!(
-            "{already} is already being driven. Watch it with run_status, \
-             answer it with answer_run, or end it with stop_run."
-        ));
-    }
-    let name = asked.unwrap_or("the attached device").to_owned();
-    let desk = std::env::temp_dir().join(format!(
-        "jev-pilot-mcp-{}",
-        name.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
-    ));
-    if let Err(error) = std::fs::create_dir_all(&desk) {
-        return failed(&format!("could not make a desk for {name}: {error}"));
-    }
-    // The desk goes first: the goal is the one positional and must stay last.
-    let goal = args.pop().unwrap_or_default();
-    args.push("--desk".to_owned());
-    args.push(desk.display().to_string());
-    args.push(goal);
-
-    match std::process::Command::new(binary())
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => {
-            sessions.remember(name.clone(), desk, child);
-            said_so(&format!(
-                "a run is under way on {name}. It acts on the device from here. \
-                 Watch it with run_status, and when it asks, answer it with \
-                 answer_run."
-            ))
-        }
-        Err(error) => failed(&format!("could not start jev-pilot: {error}")),
-    }
-}
-
-/// How a run is getting on, as far as its desk can say.
-fn status_of(desk: &std::path::Path) -> String {
-    let mut said = String::new();
-    match std::fs::read_to_string(desk.join("steps.jsonl")) {
-        Ok(steps) if !steps.trim().is_empty() => {
-            said.push_str("steps so far:\n");
-            said.push_str(&steps);
-        }
-        _ => said.push_str("no steps yet\n"),
-    }
-    // `ask.json` is written when a run stops to ask and removed when it is
-    // answered, so its presence is the question.
-    if let Ok(asking) = std::fs::read_to_string(desk.join("ask.json")) {
-        said.push_str("\nit is waiting for an answer:\n");
-        said.push_str(&asking);
-    } else {
-        said.push_str("\nit is not waiting for anything\n");
-    }
-    said
-}
-
 /// The `jev-pilot` binary to run.
 ///
 /// Beside this one when that is where it is, so a server installed somewhere
@@ -646,27 +570,213 @@ fn run_pilot(args: &[String]) -> std::io::Result<String> {
     Ok(said)
 }
 
-/// A tool call that worked.
-fn said_so(said: &str) -> serde_json::Value {
-    serde_json::json!({ "content": [{ "type": "text", "text": said }] })
+/// How a run is getting on, as far as its desk can say.
+fn status_of(desk: &std::path::Path) -> String {
+    let mut said = String::new();
+    match std::fs::read_to_string(desk.join("steps.jsonl")) {
+        Ok(steps) if !steps.trim().is_empty() => {
+            said.push_str("steps so far:\n");
+            said.push_str(&steps);
+        }
+        _ => said.push_str("no steps yet\n"),
+    }
+    // `ask.json` is written when a run stops to ask and removed when it is
+    // answered, so its presence is the question.
+    if let Ok(asking) = std::fs::read_to_string(desk.join("ask.json")) {
+        said.push_str("\nit is waiting for an answer:\n");
+        said.push_str(&asking);
+    } else {
+        said.push_str("\nit is not waiting for anything\n");
+    }
+    said
 }
 
-/// A tool call that could not be carried out.
-fn failed(said: &str) -> serde_json::Value {
-    serde_json::json!({
-        "isError": true,
-        "content": [{ "type": "text", "text": said }],
-    })
+/// The runs this server has started, by the name it gave them.
+///
+/// Named here rather than by the caller, so one conversation cannot reach into
+/// another's run by guessing a name it was never given.
+#[derive(Debug, Default)]
+pub struct Sessions {
+    runs: std::collections::BTreeMap<String, Run>,
 }
 
-fn reply(id: &serde_json::Value, result: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+impl Sessions {
+    /// The devices with a run still going on them.
+    ///
+    /// Asked rather than remembered, because a run ends on its own: the child
+    /// is reaped here, so a finished run stops holding its device.
+    pub fn still_running(&mut self) -> Vec<String> {
+        self.runs.retain(|_, run| !run.finished());
+        self.runs.keys().cloned().collect()
+    }
+
+    /// Where a run keeps its desk, if this server started it.
+    #[must_use]
+    pub fn desk_of(&self, run: &str) -> Option<&std::path::Path> {
+        self.runs.get(run).map(|run| run.desk.as_path())
+    }
+
+    /// Remember a run this server started.
+    pub fn remember(&mut self, name: String, desk: std::path::PathBuf, child: std::process::Child) {
+        self.runs.insert(name, Run { desk, child });
+    }
+
+    /// Forget a run, ending it if it is still going.
+    pub fn forget(&mut self, run: &str) -> bool {
+        match self.runs.remove(run) {
+            Some(mut run) => {
+                let _ = run.child.kill();
+                let _ = run.child.wait();
+                true
+            }
+            None => false,
+        }
+    }
 }
 
-fn fault(id: &serde_json::Value, code: i32, message: &str) -> serde_json::Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": { "code": code, "message": message },
-    })
+impl Drop for Sessions {
+    /// A conversation that ends takes its runs with it.
+    ///
+    /// Left going, a run carries on tapping at somebody's phone with nothing
+    /// watching it and nothing able to answer it when it asks.
+    fn drop(&mut self) {
+        for (_, run) in std::mem::take(&mut self.runs) {
+            let mut run = run;
+            let _ = run.child.kill();
+            let _ = run.child.wait();
+        }
+    }
 }
+
+/// One run, and where it keeps its desk.
+#[derive(Debug)]
+struct Run {
+    desk: std::path::PathBuf,
+    child: std::process::Child,
+}
+
+impl Run {
+    /// Whether this run has ended on its own.
+    fn finished(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
+    }
+}
+
+/// Watch a run's desk and answer it when it asks.
+///
+/// This is the callback the polling tools do not need to be: a run that stops
+/// to ask is answered by the client's own model, asked for exactly when the
+/// run needs it. That is what `sampling/createMessage` is for, and it is the
+/// same seam a person at a terminal writes to — the answer still lands in
+/// `answer.json`, and is still an index into the catalog the run offered.
+///
+/// Returns what to tell the caller about how their run will be answered,
+/// because that changes what they should do next.
+#[allow(deprecated)]
+fn attend(peer: Peer<RoleServer>, desk: std::path::PathBuf, goal: String) -> String {
+    let can = peer
+        .peer_info()
+        .and_then(|client| client.capabilities.sampling.clone())
+        .is_some();
+    if !can {
+        return "This client cannot be sampled, so nobody is standing by: watch it with \
+                run_status, and when it asks, answer it with answer_run."
+            .to_owned();
+    }
+    tokio::spawn(async move { answering(&peer, &desk, &goal).await });
+    "It will ask this conversation when it cannot decide, and carry on from the \
+     answer. Watch it with run_status."
+        .to_owned()
+}
+
+/// Answer a run for as long as it is asking.
+async fn answering(peer: &Peer<RoleServer>, desk: &std::path::Path, goal: &str) {
+    let asked = desk.join("ask.json");
+    let answer = desk.join("answer.json");
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(ASKED_EVERY_MS)).await;
+        // The desk writes `ask.json` when it wants something and takes it away
+        // once it has been answered, so its being there is the question.
+        let Ok(question) = std::fs::read_to_string(&asked) else {
+            // Gone, or never there. A finished run stops having a desk to
+            // read, and this stops with it.
+            if !desk.exists() {
+                return;
+            }
+            continue;
+        };
+        if answer.exists() {
+            // Already answered and not yet picked up.
+            continue;
+        }
+        let Some(said) = second_opinion(peer, goal, &question).await else {
+            return;
+        };
+        if std::fs::write(&answer, said.to_string()).is_err() {
+            return;
+        }
+    }
+}
+
+/// Put the run's question to the client's model and shape what comes back.
+///
+/// Sampling is how a server asks the client's model something, and it is on
+/// its way out of the protocol: SEP-2577 deprecates it. Elicitation, which
+/// asks the *person* rather than the model, is the successor and is not
+/// deprecated. They are not the same thing — one gets a second opinion
+/// without anybody being interrupted — so this uses sampling while it exists
+/// and says so rather than pretending otherwise.
+#[allow(deprecated)]
+async fn second_opinion(
+    peer: &Peer<RoleServer>,
+    goal: &str,
+    question: &str,
+) -> Option<serde_json::Value> {
+    let asking = format!(
+        "A run driving a phone cannot decide, and you are the second opinion.\n\n\
+         The goal: {goal}\n\n\
+         What it is looking at, and what it was about to do:\n{question}\n\n\
+         Answer with one JSON object and nothing else.\n\
+         To act: {{\"operation\": \"<one of the operations listed>\", \"target\": \
+         <the row's number, when the operation needs one>}}.\n\
+         To type, when it asked what to type: {{\"text\": \"<the words>\"}}.\n\
+         To give up: {{\"operation\": \"stop\"}}.\n\n\
+         Name only an operation it listed and only a row it showed you. A row it does \
+         not have will be refused and you will be asked again."
+    );
+    let mut wanted = CreateMessageRequestParams::new(
+        vec![SamplingMessage::new(
+            Role::User,
+            SamplingMessageContentBlock::text(asking),
+        )],
+        SAY_AT_MOST,
+    );
+    wanted.system_prompt = Some(
+        "You pick from what a screen actually offers. You never invent a row, an operation \
+         or a coordinate."
+            .to_owned(),
+    );
+    let answered = peer.create_message(wanted).await.ok()?;
+    // Whatever it said, only the shape the desk reads is written, and only
+    // the fields it knows. A model that answered with prose around the object
+    // still gets its object used.
+    let said = answered
+        .message
+        .content
+        .into_vec()
+        .into_iter()
+        .find_map(|block| block.as_text().map(|text| text.text.clone()))?;
+    let object = said.find('{').and_then(|from| {
+        said.rfind('}')
+            .and_then(|to| said.get(from..=to))
+            .and_then(|slice| serde_json::from_str::<serde_json::Value>(slice).ok())
+    })?;
+    answer_from(&object)
+}
+
+/// How often a watched run is looked in on.
+const ASKED_EVERY_MS: u64 = 400;
+
+/// How much a second opinion is allowed to say. It answers with one small
+/// object, and a budget is required.
+const SAY_AT_MOST: u32 = 200;
