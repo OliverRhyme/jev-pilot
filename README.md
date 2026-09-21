@@ -156,14 +156,25 @@ already being driven is refused, and told to watch, answer or stop the run it ha
 Runs end when the conversation does. Left going, one carries on tapping at
 somebody's phone with nothing watching it and nothing able to answer it.
 
-**When a run cannot decide, it asks the client.** If the client supports
-sampling, the run's impasse goes to *its* model and the answer comes straight
-back — System Two arriving by callback rather than by polling, and still an
-index into the catalog the run offered, never an action the model invented. A
-client without sampling is told so, and falls back to `run_status` and
-`answer_run`. Sampling is deprecated upstream by SEP-2577; elicitation, which
-asks the person rather than the model, is the successor and is not yet wired
-up here.
+**When a run cannot decide, the client answers it** — on its own turn, through
+`run_status` and `answer_run`. The model holding the conversation *is* the
+second opinion, and its answer is still an index into the catalog the run
+offered, never an action it invented.
+
+There is a way for a server to call back into the client's model instead —
+`sampling/createMessage` — and this does not use it. [SEP-2577] deprecates
+sampling, tells new implementations not to adopt it, and names it the most
+security-sensitive of the three features it removes, because it lets a server
+put text of its choosing in front of somebody else's model. That is a pointed
+objection here rather than a general one: the text would be whatever an app has
+drawn on the screen, and the answer coming back moves money. A screen is not a
+trustworthy author.
+
+Elicitation, which asks the *person* rather than the model, is not deprecated
+and would be the way to put a question in front of a user directly. It is not
+wired up yet.
+
+[SEP-2577]: https://modelcontextprotocol.io/seps/2577-deprecate-roots-sampling-and-logging
 
 Every tool runs the `jev-pilot` binary rather than driving the loop in-process,
 so the server cannot drift from the command line it is a face for, and an

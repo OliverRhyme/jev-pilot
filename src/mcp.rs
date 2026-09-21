@@ -6,15 +6,21 @@
 //! anything able to write an answer can answer it. That is the desk, and here
 //! the party holding the conversation becomes what answers.
 //!
-//! There are three ways it can, in the order they are tried:
+//! The answering is client-driven, and deliberately. MCP has a way for a
+//! server to call back into the client's model — `sampling/createMessage` —
+//! and SEP-2577 deprecates it, tells new implementations not to adopt it, and
+//! names it the most security-sensitive feature of the three it removes,
+//! because it lets a server put text of its choosing in front of somebody
+//! else's model.
 //!
-//! 1. **Sampling.** The client's own model answers, asked for exactly when the
-//!    run needs it. This is System Two arriving by callback rather than by
-//!    polling, and it is what MCP's `sampling/createMessage` is for.
-//! 2. **Elicitation.** No sampling, but the client can put a question to the
-//!    person in front of it.
-//! 3. **Watching.** Neither, so the run waits and whoever is holding the
-//!    conversation answers it with `answer_run` when they notice.
+//! That warning is pointed here rather than general. The text this server
+//! would be forwarding is whatever an app has drawn on the screen, and the
+//! answer coming back moves money. A screen is not a trustworthy author.
+//!
+//! So the client asks, on its own turn: `run_status` says whether a run is
+//! waiting and what it wants, and `answer_run` answers it. The model doing
+//! the asking is the second opinion, and it reads the question itself rather
+//! than having it pushed at it.
 //!
 //! Every tool is carried out by running the `jev-pilot` binary rather than by
 //! driving the loop in this process. One behaviour, described once: a server
@@ -30,13 +36,10 @@
 use std::sync::{Arc, Mutex};
 
 use rmcp::handler::server::router::tool::ToolRouter;
-#[allow(deprecated)]
-use rmcp::model::{CreateMessageRequestParams, Role, SamplingMessage, SamplingMessageContentBlock};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig,
 };
-use rmcp::service::{Peer, RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -214,7 +217,6 @@ impl Pilot {
     pub async fn start_run(
         &self,
         Parameters(args): Parameters<StartArgs>,
-        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let arguments = to_value(&args);
         let Some(mut line) = invocation("start_run", &arguments) else {
@@ -248,7 +250,7 @@ impl Pilot {
         let goal = line.pop().unwrap_or_default();
         line.push("--desk".to_owned());
         line.push(desk.display().to_string());
-        line.push(goal.clone());
+        line.push(goal);
 
         match std::process::Command::new(binary())
             .args(&line)
@@ -258,11 +260,14 @@ impl Pilot {
             .spawn()
         {
             Ok(child) => {
-                sessions.remember(name.clone(), desk.clone(), child);
-                drop(sessions);
-                let answering = attend(context.peer.clone(), desk, goal);
+                sessions.remember(name.clone(), desk, child);
                 Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                    "a run is under way on {name}. It acts on the device from here. {answering}"
+                    "a run is under way on {name}. It acts on the device from here.\n\n\
+                     It will stop and ask when it cannot decide. Nothing will call you: \
+                     check on it with run_status, and when it is waiting, reply with \
+                     answer_run. That is you being the second opinion, so look at what it \
+                     is asking rather than guessing — an operation it did not offer, or a \
+                     row it does not have, is refused and asked again."
                 ))]))
             }
             Err(error) => Ok(refused(&format!("could not start jev-pilot: {error}"))),
@@ -407,11 +412,16 @@ floor whatever you pass, because a run that gives up on a guess has answered \
 wrongly rather than cheaply. Around 0.35 to 0.4 keeps most runs moving; the \
 default of 0.6 asks often.
 
-WHEN IT ASKS. A run that cannot decide stops. If this client can be sampled it \
-will ask you directly and carry on from your answer. Otherwise watch it with \
-`run_status` and reply with `answer_run`, naming an operation it listed and a \
+WHEN IT ASKS. A run that cannot decide stops and waits. Nothing will call you \
+about it: check with `run_status`, which says whether it is waiting and what \
+it wants. Then answer with `answer_run`, naming an operation it listed and a \
 row it showed you — an operation it did not offer, or a row it does not have, \
-is refused and you are asked again.
+is refused and you are asked again. You are the second opinion here, so read \
+what it is asking rather than guessing; it stopped precisely because the \
+obvious answer was not obvious.
+
+A run left unanswered waits five minutes and then gives up, so `start_run` \
+and walking away is how a good run becomes a dead one. Check on it.
 
 ONE RUN PER DEVICE. A second run on the same phone would take turns at the \
 same screen with the first. Stop or finish the one that is there.";
@@ -661,122 +671,3 @@ impl Run {
         matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
     }
 }
-
-/// Watch a run's desk and answer it when it asks.
-///
-/// This is the callback the polling tools do not need to be: a run that stops
-/// to ask is answered by the client's own model, asked for exactly when the
-/// run needs it. That is what `sampling/createMessage` is for, and it is the
-/// same seam a person at a terminal writes to — the answer still lands in
-/// `answer.json`, and is still an index into the catalog the run offered.
-///
-/// Returns what to tell the caller about how their run will be answered,
-/// because that changes what they should do next.
-#[allow(deprecated)]
-fn attend(peer: Peer<RoleServer>, desk: std::path::PathBuf, goal: String) -> String {
-    let can = peer
-        .peer_info()
-        .and_then(|client| client.capabilities.sampling.clone())
-        .is_some();
-    if !can {
-        return "This client cannot be sampled, so nobody is standing by: watch it with \
-                run_status, and when it asks, answer it with answer_run."
-            .to_owned();
-    }
-    tokio::spawn(async move { answering(&peer, &desk, &goal).await });
-    "It will ask this conversation when it cannot decide, and carry on from the \
-     answer. Watch it with run_status."
-        .to_owned()
-}
-
-/// Answer a run for as long as it is asking.
-async fn answering(peer: &Peer<RoleServer>, desk: &std::path::Path, goal: &str) {
-    let asked = desk.join("ask.json");
-    let answer = desk.join("answer.json");
-    loop {
-        tokio::time::sleep(std::time::Duration::from_millis(ASKED_EVERY_MS)).await;
-        // The desk writes `ask.json` when it wants something and takes it away
-        // once it has been answered, so its being there is the question.
-        let Ok(question) = std::fs::read_to_string(&asked) else {
-            // Gone, or never there. A finished run stops having a desk to
-            // read, and this stops with it.
-            if !desk.exists() {
-                return;
-            }
-            continue;
-        };
-        if answer.exists() {
-            // Already answered and not yet picked up.
-            continue;
-        }
-        let Some(said) = second_opinion(peer, goal, &question).await else {
-            return;
-        };
-        if std::fs::write(&answer, said.to_string()).is_err() {
-            return;
-        }
-    }
-}
-
-/// Put the run's question to the client's model and shape what comes back.
-///
-/// Sampling is how a server asks the client's model something, and it is on
-/// its way out of the protocol: SEP-2577 deprecates it. Elicitation, which
-/// asks the *person* rather than the model, is the successor and is not
-/// deprecated. They are not the same thing — one gets a second opinion
-/// without anybody being interrupted — so this uses sampling while it exists
-/// and says so rather than pretending otherwise.
-#[allow(deprecated)]
-async fn second_opinion(
-    peer: &Peer<RoleServer>,
-    goal: &str,
-    question: &str,
-) -> Option<serde_json::Value> {
-    let asking = format!(
-        "A run driving a phone cannot decide, and you are the second opinion.\n\n\
-         The goal: {goal}\n\n\
-         What it is looking at, and what it was about to do:\n{question}\n\n\
-         Answer with one JSON object and nothing else.\n\
-         To act: {{\"operation\": \"<one of the operations listed>\", \"target\": \
-         <the row's number, when the operation needs one>}}.\n\
-         To type, when it asked what to type: {{\"text\": \"<the words>\"}}.\n\
-         To give up: {{\"operation\": \"stop\"}}.\n\n\
-         Name only an operation it listed and only a row it showed you. A row it does \
-         not have will be refused and you will be asked again."
-    );
-    let mut wanted = CreateMessageRequestParams::new(
-        vec![SamplingMessage::new(
-            Role::User,
-            SamplingMessageContentBlock::text(asking),
-        )],
-        SAY_AT_MOST,
-    );
-    wanted.system_prompt = Some(
-        "You pick from what a screen actually offers. You never invent a row, an operation \
-         or a coordinate."
-            .to_owned(),
-    );
-    let answered = peer.create_message(wanted).await.ok()?;
-    // Whatever it said, only the shape the desk reads is written, and only
-    // the fields it knows. A model that answered with prose around the object
-    // still gets its object used.
-    let said = answered
-        .message
-        .content
-        .into_vec()
-        .into_iter()
-        .find_map(|block| block.as_text().map(|text| text.text.clone()))?;
-    let object = said.find('{').and_then(|from| {
-        said.rfind('}')
-            .and_then(|to| said.get(from..=to))
-            .and_then(|slice| serde_json::from_str::<serde_json::Value>(slice).ok())
-    })?;
-    answer_from(&object)
-}
-
-/// How often a watched run is looked in on.
-const ASKED_EVERY_MS: u64 = 400;
-
-/// How much a second opinion is allowed to say. It answers with one small
-/// object, and a budget is required.
-const SAY_AT_MOST: u32 = 200;
