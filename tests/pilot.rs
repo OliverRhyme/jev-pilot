@@ -467,13 +467,14 @@ fn naming_the_app_brings_it_to_the_front_before_anything_is_judged() {
         Some(&Command::Launch("com.android.settings".into())),
         "the named app is brought to the front first",
     );
-    // An app takes seconds to start. Observing straight after the launch sees
-    // the screen it was launched from, and the run spends its first judgement
-    // deciding what to do about a launcher it has already left.
+    // Nothing else is done to the device on the way in. An app takes seconds
+    // to start, and it is waited for by looking rather than by a fixed pause
+    // — see `a_launched_app_is_waited_for_until_it_has_drawn_something`.
     assert_eq!(
-        pilot.device().performed.get(1),
-        Some(&Command::Settle),
-        "the launch is given time to land before anything is read",
+        pilot.device().performed.len(),
+        1,
+        "launching is the only thing done before the first judgement: {:?}",
+        pilot.device().performed,
     );
     // Having been launched, the run is in it — not "away from" the launcher it
     // never belonged to.
@@ -878,6 +879,54 @@ impl Device for Bouncing {
         // it keeps coming back to.
         Ok(if read % 3 == 1 {
             screen_of(&["Go Back", "Summary"])
+        } else {
+            screen_of(&["Go Back", "Continue"])
+        })
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        Ok(())
+    }
+}
+
+/// An app that has been launched is not on screen yet, and the fixed pause
+/// after launching either ends too early or wastes what it does not need.
+/// Measured: the first step of a run read an empty screen for 983ms, then
+/// spent a whole judgement — a paid one — deciding to wait.
+///
+/// Waiting for the app to draw something is not a judgement. It is waiting.
+#[test]
+fn a_launched_app_is_waited_for_until_it_has_drawn_something() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![answer("done", None, 0.99, 0.97); 4]),
+    };
+    let mut pilot = Pilot::new(SlowToDraw::default(), judge, &Android)
+        .about(Some("com.example.wallet".into()));
+
+    pilot.pursue("do the thing").expect("the run completes");
+
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 1, "no judgement is spent on an empty screen");
+    assert!(
+        !seen[0]["rows"].as_object().expect("rows").is_empty(),
+        "the first judgement is about a screen with something on it: {}",
+        seen[0],
+    );
+}
+
+/// An app that shows nothing for its first few readings, as one starting does.
+#[derive(Default)]
+struct SlowToDraw {
+    reads: u32,
+}
+
+impl Device for SlowToDraw {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        self.reads += 1;
+        Ok(if self.reads <= 3 {
+            Snapshot::new(Vec::new()).expect("an empty screen")
         } else {
             screen_of(&["Go Back", "Continue"])
         })

@@ -631,12 +631,41 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// How many screens back a run remembers having been on.
     pub const MEMORY: usize = 12;
 
+    /// How long a named app is given to put something on screen.
+    ///
+    /// Longer than a transition's budget: this is a cold start, which loads a
+    /// process before it draws anything.
+    pub const LAUNCH_BUDGET_MS: u64 = 8_000;
+
     /// Wait for the screen to become something other than `before`.
     ///
     /// Returns whether it did. The reads are cheap through the helper — about
     /// 60ms — so this costs a fraction of the fixed delay it replaces, and
     /// unlike a fixed delay it is right for both a quick transition and a slow
     /// one.
+    /// Wait until the screen has something on it, or the budget runs out.
+    ///
+    /// Not a judgement: nothing about an app that has not drawn yet is worth
+    /// asking a model about, and the only answer available is to wait.
+    fn waited_for_it_to_draw(&mut self) -> Result<(), Failure<D, J, X, C>> {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(Self::LAUNCH_BUDGET_MS);
+        while std::time::Instant::now() < deadline {
+            if self
+                .device
+                .observe()
+                .map_err(RunError::Device)?
+                .worth_acting_on()
+            {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(Self::CHANGE_POLL_MS));
+        }
+        // Out of time. A screen that is still empty is the run's problem to
+        // judge, not a reason to refuse to start.
+        Ok(())
+    }
+
     fn settled_on_a_new_screen(&mut self, before: u64) -> Result<bool, Failure<D, J, X, C>> {
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(Self::CHANGE_BUDGET_MS);
@@ -866,13 +895,15 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             self.device
                 .perform(&Command::Launch(app))
                 .map_err(RunError::Device)?;
-            // An app takes seconds to start. Reading straight after the launch
-            // returns the screen it was launched from, and the run spends its
-            // first judgement deciding what to do about a launcher it has
-            // already left.
-            self.device
-                .perform(&Command::Settle)
-                .map_err(RunError::Device)?;
+            // An app takes seconds to start, and for most of them it has
+            // nothing on screen. Reading straight after the launch returns
+            // the screen it was launched from; reading a moment later returns
+            // an empty one. Either way the run spends its first judgement —
+            // a paid one — deciding to wait, which is not a judgement.
+            //
+            // Measured: 983ms of empty readings followed by a whole step
+            // whose only outcome was `wait`.
+            self.waited_for_it_to_draw()?;
         }
         let launcher = self.device.home_screen_app();
         for index in 1..=self.limit {
