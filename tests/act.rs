@@ -82,3 +82,37 @@ fn leaving_the_app_costs_more_than_an_ordinary_gesture() {
     );
     assert_eq!(Operation::Back.consequence(), Consequence::Ordinary);
 }
+
+/// Every operation must be reachable by the name it is offered under. A
+/// caller answering an impasse names one, and a name that resolves to nothing
+/// is an answer that cannot be carried out.
+///
+/// A list of names kept by hand somewhere else goes stale the moment an
+/// operation is added: `return_to_app` and `close_keyboard` were both offered
+/// by the catalog and unknown to the command line, where an unrecognised name
+/// silently ended the run.
+#[test]
+fn every_operation_can_be_found_by_the_name_it_is_offered_under() {
+    for operation in Operation::all() {
+        assert_eq!(
+            Operation::from_key(operation.key()),
+            Some(*operation),
+            "{} is offered but cannot be named back",
+            operation.key(),
+        );
+    }
+    assert_eq!(Operation::from_key("bogus"), None);
+}
+
+/// The platform's operations are drawn from the same set, so nothing can be
+/// offered on a screen that could not then be named.
+#[test]
+fn a_platform_offers_nothing_that_cannot_be_named() {
+    for operation in Android.operations() {
+        assert!(
+            Operation::all().contains(operation),
+            "{} is offered by Android and is not among the operations",
+            operation.key(),
+        );
+    }
+}

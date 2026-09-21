@@ -39,23 +39,6 @@ use std::rc::Rc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
-const OPERATIONS: &[Operation] = &[
-    Operation::Tap,
-    Operation::TypeText,
-    Operation::DoubleTap,
-    Operation::LongPress,
-    Operation::SwipeLeft,
-    Operation::SwipeRight,
-    Operation::ScrollUp,
-    Operation::ScrollDown,
-    Operation::Back,
-    Operation::Home,
-    Operation::AppSwitcher,
-    Operation::Submit,
-    Operation::Wait,
-    Operation::Done,
-    Operation::Blocked,
-];
 
 /// Where a question goes, and where an answer may come from.
 ///
@@ -169,10 +152,25 @@ impl Desk {
             }),
             &describe(impasse),
         )?;
-        Ok(match reply {
-            Answer::Typed(line) => parse_typed(&line).unwrap_or(Resolution::Stop),
+        let understood = match reply {
+            Answer::Typed(line) => parse_typed(&line),
             Answer::File(value) => resolve_json(&value),
-        })
+        };
+        // Saying so, rather than stopping. The alternative discards a run
+        // over a misspelling, and says nothing about why.
+        Ok(understood.unwrap_or_else(|| {
+            eprintln!(
+                "jev-pilot: that answer named no action this screen offers; \
+                 the run is stopping. Offered here: {}",
+                impasse
+                    .operations
+                    .iter()
+                    .map(|operation| operation.key())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            Resolution::Stop
+        }))
     }
 
     /// Ask what belongs in a field.
@@ -215,20 +213,23 @@ impl Desk {
 }
 
 /// An answer written as JSON, resolved through the same catalog a typed one is.
-fn resolve_json(value: &serde_json::Value) -> Resolution {
-    let Some(name) = value.get("operation").and_then(serde_json::Value::as_str) else {
-        return Resolution::Stop;
-    };
-    let Some(operation) = OPERATIONS.iter().find(|o| o.key() == name).copied() else {
-        return Resolution::Stop;
-    };
-    Resolution::Choose {
-        operation,
+///
+/// `None` is an answer that named nothing this crate knows. It is not a
+/// refusal: a misspelled operation that quietly ends a run is a run thrown
+/// away over a typo, and the name a caller reaches for is the one the catalog
+/// just offered them.
+fn resolve_json(value: &serde_json::Value) -> Option<Resolution> {
+    let name = value.get("operation").and_then(serde_json::Value::as_str)?;
+    if name == "stop" {
+        return Some(Resolution::Stop);
+    }
+    Some(Resolution::Choose {
+        operation: Operation::from_key(name)?,
         target: value
             .get("target")
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| usize::try_from(n).ok()),
-    }
+    })
 }
 
 /// How long a question waits for an answer before the run gives up.
@@ -246,7 +247,7 @@ fn parse_typed(line: &str) -> Option<Resolution> {
     if name == "stop" {
         return Some(Resolution::Stop);
     }
-    let operation = OPERATIONS.iter().find(|o| o.key() == name).copied()?;
+    let operation = Operation::from_key(name)?;
     Some(Resolution::Choose {
         operation,
         target: words.next().and_then(|n| n.parse().ok()),

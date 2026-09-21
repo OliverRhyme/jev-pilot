@@ -131,6 +131,18 @@ pub enum Operation {
 }
 
 impl Operation {
+    /// Every operation there is, in the order they are listed.
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        ALL
+    }
+
+    /// The operation offered under this name, if there is one.
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        ALL.iter().copied().find(|candidate| candidate.key() == key)
+    }
+
     /// The name this operation is offered and answered under.
     #[must_use]
     pub const fn key(self) -> &'static str {
@@ -242,32 +254,37 @@ impl serde::Serialize for Operation {
     }
 }
 
+/// Every operation there is.
+///
+/// One list, because a second one kept by hand goes stale the moment an
+/// operation is added — and an operation that cannot be named back is one a
+/// caller can be offered and then not allowed to choose.
+const ALL: &[Operation] = &[
+    Operation::Tap,
+    Operation::TypeText,
+    Operation::DoubleTap,
+    Operation::LongPress,
+    Operation::SwipeLeft,
+    Operation::SwipeRight,
+    Operation::Peek,
+    Operation::ScrollUp,
+    Operation::ScrollDown,
+    Operation::Back,
+    Operation::Home,
+    Operation::CloseKeyboard,
+    Operation::Return,
+    Operation::AppSwitcher,
+    Operation::Submit,
+    Operation::Wait,
+    Operation::Done,
+    Operation::Blocked,
+];
+
 impl<'de> serde::Deserialize<'de> for Operation {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = std::borrow::Cow::<str>::deserialize(deserializer)?;
-        [
-            Self::Tap,
-            Self::TypeText,
-            Self::DoubleTap,
-            Self::LongPress,
-            Self::SwipeLeft,
-            Self::SwipeRight,
-            Self::Peek,
-            Self::ScrollUp,
-            Self::ScrollDown,
-            Self::Back,
-            Self::Home,
-            Self::CloseKeyboard,
-            Self::Return,
-            Self::AppSwitcher,
-            Self::Submit,
-            Self::Wait,
-            Self::Done,
-            Self::Blocked,
-        ]
-        .into_iter()
-        .find(|candidate| candidate.key() == raw)
-        .ok_or_else(|| serde::de::Error::custom(format!("not an operation: {raw}")))
+        Self::from_key(&raw)
+            .ok_or_else(|| serde::de::Error::custom(format!("not an operation: {raw}")))
     }
 }
 
