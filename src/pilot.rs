@@ -324,6 +324,22 @@ pub struct StepReport<'s> {
     pub goal_met: Progress,
     /// How likely the screen was an error state.
     pub is_error_screen: f64,
+    /// How long reading the screen took, in milliseconds.
+    ///
+    /// Apart from the step's own total because they are spent very
+    /// differently: a screen read through an accessibility helper costs tens
+    /// of milliseconds and one read through the shell costs thousands, and a
+    /// run that has quietly fallen back to the shell looks exactly like a run
+    /// that is waiting on a slow judgement.
+    pub read_ms: u64,
+    /// How long the whole step took, in milliseconds.
+    pub step_ms: u64,
+    /// How much of that was spent waiting for somebody to answer.
+    ///
+    /// A step that stops to ask spends most of its wall time on the person
+    /// typing, and counting that as the step's cost makes the timings useless
+    /// for the one purpose they have. The work is `step_ms` less this.
+    pub waited_ms: u64,
 }
 
 /// A failure from one of a run's four parts.
@@ -663,6 +679,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         answers: &StepAnswers,
         chosen: Option<&Act>,
         repeating: Option<u32>,
+        spent: (u64, u64, u64),
     ) {
         let Some(observer) = self.observer.as_mut() else {
             return;
@@ -682,6 +699,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),
             goal_met: answers.goal_met.progress(),
             is_error_screen: answers.is_error_screen.noul,
+            read_ms: spent.0,
+            step_ms: spent.1,
+            waited_ms: spent.2,
         });
     }
 
@@ -856,7 +876,12 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         }
         let launcher = self.device.home_screen_app();
         for index in 1..=self.limit {
+            let began = std::time::Instant::now();
+            // Time this step spent on somebody else, accumulated as it is
+            // asked for.
+            let waited = std::cell::Cell::new(0_u64);
             let snapshot = self.device.observe().map_err(RunError::Device)?;
+            let read_ms = elapsed_ms(began);
             if origin.is_none()
                 && let Some(app) = snapshot.app()
                 && launcher.as_deref() != Some(app)
@@ -914,7 +939,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             let decided = catalog.resolve(&answers, &self.floors);
 
             if answers.is_error_screen.noul > self.certainty {
-                self.report(index, &snapshot, &answers, None, repeated);
+                self.report(index, &snapshot, &answers, None, repeated, (read_ms, elapsed_ms(began), waited.get()));
                 return Ok(Ending::ErrorScreen);
             }
             // A screen with nothing on it is not evidence. Mid-transition the
@@ -937,7 +962,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 continue;
             }
             if !blind && reached == Progress::Achieved {
-                self.report(index, &snapshot, &answers, None, repeated);
+                self.report(index, &snapshot, &answers, None, repeated, (read_ms, elapsed_ms(began), waited.get()));
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
             // An acceptance criterion is the caller's own definition of done,
@@ -959,7 +984,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 && !self.criteria.is_empty()
                 && answers.unmet(&self.criteria, self.certainty).is_none()
             {
-                self.report(index, &snapshot, &answers, None, repeated);
+                self.report(index, &snapshot, &answers, None, repeated, (read_ms, elapsed_ms(began), waited.get()));
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
 
@@ -975,10 +1000,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                         previous: previous.as_deref(),
                         lately: &recent,
                     };
-                    if let Some(decision) = self.consult(&taken, &because)? {
+                    let asking = std::time::Instant::now();
+                    let answered = self.consult(&taken, &because);
+                    waited.set(waited.get().saturating_add(elapsed_ms(asking)));
+                    if let Some(decision) = answered? {
                         decision
                     } else {
-                        self.report(index, &snapshot, &answers, None, repeated);
+                        self.report(index, &snapshot, &answers, None, repeated, (read_ms, elapsed_ms(began), waited.get()));
                         return Ok(Ending::Uncertain { because });
                     }
                 }
@@ -996,6 +1024,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     let field = snapshot
                         .resolve(into)
                         .map_err(|stale| RunError::Unreachable(TapError::Stale(stale)))?;
+                    let asking = std::time::Instant::now();
                     let text = self
                         .composer
                         .compose(&Writing {
@@ -1005,7 +1034,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             rows: &rows,
                             previous: previous.as_deref(),
                         })
-                        .map_err(RunError::Composition)?;
+                        .map_err(RunError::Composition);
+                    waited.set(waited.get().saturating_add(elapsed_ms(asking)));
+                    let text = text?;
                     Act::TypeText { into, text }
                 }
             };
@@ -1013,7 +1044,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // Reported once the act is settled, so a step resolved by an
             // escalation is logged with what was actually sent to the device
             // rather than with the refusal that preceded it.
-            self.report(index, &snapshot, &answers, Some(&act), repeated);
+            self.report(index, &snapshot, &answers, Some(&act), repeated, (read_ms, elapsed_ms(began), waited.get()));
 
             // A verdict ends the run. It resolves to no command, so without
             // this the loop carries on driving a screen it has just declared
@@ -1086,7 +1117,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 }
                 Reached::Nothing => {}
                 Reached::Unreachable => {
-                    self.report(index, &snapshot, &answers, None, repeated);
+                    self.report(index, &snapshot, &answers, None, repeated, (read_ms, elapsed_ms(began), waited.get()));
                     return Ok(Ending::Uncertain {
                         because: Indecision::Covered,
                     });
@@ -1205,6 +1236,11 @@ fn describe(
         state["fields"] = serde_json::Value::Object(fields);
     }
     state
+}
+
+/// Milliseconds since an instant, saturated rather than wrapped.
+fn elapsed_ms(since: std::time::Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Describe an action the way the next step should hear about it.

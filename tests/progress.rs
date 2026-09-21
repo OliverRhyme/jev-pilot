@@ -157,3 +157,69 @@ impl Device for PinPad {
         Ok(())
     }
 }
+
+/// A run that is slow gives no account of where the time went. The steps are
+/// there and the actions are there, and nothing says whether a step spent its
+/// seconds reading the screen, waiting on a judgement, or settling after the
+/// act — so "it is slow" can only be answered by guessing or by measuring the
+/// whole thing again from outside.
+#[test]
+fn a_step_is_reported_with_how_long_its_parts_took() {
+    let seen = std::cell::RefCell::new(Vec::new());
+    {
+        let mut pilot = Pilot::new(
+            PinPad,
+            Scripted(RefCell::new(vec![turn("done", 1.9)])),
+            &Android,
+        )
+        .watching(|report: &StepReport<'_>| {
+            seen.borrow_mut().push((report.read_ms, report.step_ms));
+        });
+        pilot.pursue("enter the PIN").expect("the run completes");
+    }
+
+    let seen = seen.borrow();
+    let (read, step) = seen[0];
+    assert!(
+        read <= step,
+        "reading the screen is part of the step, not longer than it: {read} > {step}",
+    );
+}
+
+/// A step that stops to ask spends most of its wall time waiting for a person
+/// to type, and counting that as the step's cost makes the timings useless for
+/// the one purpose they have. Measured: a step of 26 seconds, 90 milliseconds
+/// of which was the machine.
+#[test]
+fn time_spent_waiting_for_an_answer_is_reported_apart_from_the_work() {
+    let seen = std::cell::RefCell::new(Vec::new());
+    {
+        let mut pilot = Pilot::new(
+            PinPad,
+            Scripted(RefCell::new(vec![turn("tap", 0.2), turn("done", 1.9)])),
+            &Android,
+        )
+        .writing_with(|_: &jev_pilot::pilot::Writing<'_>| -> Result<Box<str>, Infallible> {
+            Ok("unused".into())
+        })
+        .escalating_to(
+            |_: &jev_pilot::pilot::Impasse<'_>| -> Result<jev_pilot::pilot::Resolution, Infallible> {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                Ok(jev_pilot::pilot::Resolution::Stop)
+            },
+        )
+        .requiring(jev_pilot::judgment::Confidence::new(0.99).expect("a floor"))
+        .watching(|report: &StepReport<'_>| {
+            seen.borrow_mut().push((report.waited_ms, report.step_ms));
+        });
+        let _ = pilot.pursue("enter the PIN");
+    }
+
+    let seen = seen.borrow();
+    let (waited, step) = seen[0];
+    assert!(waited >= 400, "the wait is counted: {waited}ms");
+    assert!(
+        step.saturating_sub(waited) < 400,
+        "and the work is what is left: {step}ms total, {waited}ms of it waiting",
+    );
+}

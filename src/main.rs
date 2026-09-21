@@ -567,6 +567,9 @@ fn transcribe(to: &std::path::Path, step: &jev_pilot::pilot::StepReport<'_>) {
         "screen_says": step.says,
         "unavailable": step.unavailable,
         "repeating": step.repeating,
+        "read_ms": step.read_ms,
+        "step_ms": step.step_ms,
+        "waited_ms": step.waited_ms,
         "chosen": step.chosen.map(|act| format!("{act:?}")),
         "operation_confidence": step.operation_confidence.get(),
         "target_confidence": step.target_confidence.map(jev_pilot::judgment::Confidence::get),
@@ -587,11 +590,20 @@ fn transcribe(to: &std::path::Path, step: &jev_pilot::pilot::StepReport<'_>) {
 
 fn report(step: &jev_pilot::pilot::StepReport<'_>) {
     println!(
-        "step {}  {} rows  goal_met {}  error {:.2}",
+        "step {}  {} rows  goal_met {}  error {:.2}  {}ms (read {}ms{})",
         step.index,
         step.rows.len(),
         step.goal_met,
-        step.is_error_screen
+        step.is_error_screen,
+        // The work, not the wall clock: a step that stopped to ask spent most
+        // of its time on the person answering.
+        step.step_ms.saturating_sub(step.waited_ms),
+        step.read_ms,
+        if step.waited_ms > 0 {
+            format!(", asked {}ms", step.waited_ms)
+        } else {
+            String::new()
+        },
     );
     let target = step
         .target_confidence
