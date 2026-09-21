@@ -519,6 +519,13 @@ impl Catalog {
             if *operation == Operation::CloseKeyboard && !snapshot.keyboard_open() {
                 continue;
             }
+            // The two resolve to the same gesture, so offering both asks the
+            // model to choose between two spellings of one action and splits
+            // its confidence across them. While there is a keyboard, the one
+            // on offer is the one that says what it does to the keyboard.
+            if *operation == Operation::Back && snapshot.keyboard_open() {
+                continue;
+            }
             // A tap with nothing to tap is not an option worth offering.
             if operation.needs_tap_target() && snapshot.is_empty() {
                 continue;

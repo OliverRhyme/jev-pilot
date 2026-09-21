@@ -250,3 +250,27 @@ fn a_screen_under_a_keyboard_offers_closing_it() {
         "there is no keyboard to close",
     );
 }
+
+/// `back` and `close_keyboard` resolve to the same gesture, so offering both
+/// asks the model to choose between two spellings of one action and splits its
+/// confidence across them. Measured on a form with the keyboard up: back at
+/// 0.57, then — the keyboard now gone — back again at 0.43, which navigated
+/// off the form and discarded what had been typed into it.
+///
+/// While there is a keyboard, the one on offer is the one that says what it
+/// does to the keyboard.
+#[test]
+fn going_back_is_not_offered_twice_under_two_names() {
+    let snapshot = Android.parse_hierarchy(SETTINGS).expect("fixture parses");
+    let covered = Catalog::for_screen(&snapshot.with_keyboard_open(true), &Android);
+
+    assert!(covered.operations().contains(&Operation::CloseKeyboard));
+    assert!(
+        !covered.operations().contains(&Operation::Back),
+        "with a keyboard up, back is how you close it, and it is already offered as that",
+    );
+
+    let settled = Android.parse_hierarchy(SETTINGS).expect("fixture parses");
+    let clear = Catalog::for_screen(&settled, &Android);
+    assert!(clear.operations().contains(&Operation::Back));
+}

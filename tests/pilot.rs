@@ -1,6 +1,6 @@
 //! The loop: observe, judge, act, repeat.
 
-use jev_pilot::act::{Indecision, Outcome, SystemAct};
+use jev_pilot::act::{Direction, Indecision, Outcome};
 use jev_pilot::device::{Command, Device};
 use jev_pilot::judgment::Confidence;
 use jev_pilot::pilot::{Ending, Judge, Pilot};
@@ -123,9 +123,14 @@ fn the_loop_stops_rather_than_acting_on_an_uncertain_answer() {
 }
 
 /// A goal that is never reached must end, not spin.
+///
+/// Answered with `scroll_down` rather than `back`: the fake raises and lowers
+/// its keyboard between steps, and with one up the way back is offered as
+/// closing it instead, so a script naming `back` would be testing the
+/// catalog rather than the step limit.
 #[test]
 fn the_loop_gives_up_after_its_step_limit() {
-    let turns = vec![answer("back", None, 0.99, 0.02); 3];
+    let turns = vec![answer("scroll_down", None, 0.99, 0.02); 3];
     let mut pilot = Pilot::new(Fake::default(), Scripted::new(turns), &Android).limited_to(3);
 
     let ending = pilot
@@ -136,7 +141,7 @@ fn the_loop_gives_up_after_its_step_limit() {
     assert_eq!(pilot.device().performed.len(), 3);
     assert!(matches!(
         pilot.device().performed[0],
-        Command::System(SystemAct::Back)
+        Command::Scroll(Direction::Down)
     ));
 }
 
