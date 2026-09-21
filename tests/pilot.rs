@@ -631,8 +631,12 @@ impl Device for Oscillating {
             screen_of(&["Go Back"])
         })
     }
-    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
-        self.acts += 1;
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        // Waiting is not one of the two screens taking turns, and the loop
+        // waits of its own accord.
+        if !matches!(command, Command::Settle) {
+            self.acts += 1;
+        }
         Ok(())
     }
 }
@@ -1164,4 +1168,62 @@ fn an_action_that_changed_nothing_is_waited_out_rather_than_repeated() {
         "it waits instead: {:?}",
         pilot.device().performed,
     );
+}
+
+/// A sheet whose scrim renders before its contents offers exactly one row,
+/// and that row is the way out of it. Acting then taps the only thing there
+/// — dismissing the sheet that was just opened, which must then be opened
+/// again.
+///
+/// Measured on a transfer form: tap the source-account picker, read a screen
+/// of one row called `Dismiss`, tap it, and reopen the picker. The same shape
+/// as a step whose only rendered control was its Back button.
+///
+/// One row is looked at twice before it is believed. A screen that genuinely
+/// offers one thing costs a moment; a screen still arriving stops costing a
+/// wasted action.
+#[test]
+fn a_screen_offering_a_single_row_is_looked_at_again_before_acting() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("tap", Some("A2"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    let mut pilot = Pilot::new(Unfurling::default(), judge, &Android);
+
+    pilot.pursue("choose an account").expect("the run completes");
+
+    let seen = seen.borrow();
+    assert_eq!(
+        seen[0]["rows"].as_object().expect("rows").len(),
+        3,
+        "the sheet is judged once it has unfurled, not while it is a scrim: {}",
+        seen[0],
+    );
+}
+
+/// A sheet that shows its scrim first and its contents a moment later.
+#[derive(Default)]
+struct Unfurling {
+    reads: u32,
+    performed: Vec<Command>,
+}
+
+impl Device for Unfurling {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        self.reads += 1;
+        Ok(if self.reads == 1 {
+            screen_of(&["Dismiss"])
+        } else {
+            screen_of(&["Dismiss", "Current account", "Savings account"])
+        })
+    }
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        self.performed.push(command.clone());
+        Ok(())
+    }
 }

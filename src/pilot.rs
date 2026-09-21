@@ -970,7 +970,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // Filled in as the step goes: zero until the act, since a step
             // that touches nothing settles nothing.
             let mut settled_ms = 0_u64;
-            let snapshot = self.device.observe().map_err(RunError::Device)?;
+            let mut snapshot = self.device.observe().map_err(RunError::Device)?;
+            // A sheet whose scrim renders before its contents offers exactly
+            // one row, and that row is the way out of it. Acting then taps
+            // the only thing there — dismissing what was just opened, which
+            // must then be opened again. Measured on a source-account
+            // picker, and again on a step whose only rendered control was
+            // its Back button.
+            //
+            // So one row is looked at twice before it is believed. A screen
+            // that genuinely offers one thing costs a moment; a screen still
+            // arriving stops costing a wasted action.
+            if snapshot.rows() == 1 {
+                self.device
+                    .perform(&Command::Settle)
+                    .map_err(RunError::Device)?;
+                snapshot = self.device.observe().map_err(RunError::Device)?;
+            }
             let read_ms = elapsed_ms(began);
             if origin.is_none()
                 && let Some(app) = snapshot.app()

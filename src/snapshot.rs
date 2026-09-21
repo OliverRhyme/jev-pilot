@@ -296,6 +296,12 @@ impl Snapshot {
         self.notices.iter().map(|notice| &**notice)
     }
 
+    /// How many rows this screen offers.
+    #[must_use]
+    pub const fn rows(&self) -> usize {
+        self.elements.len()
+    }
+
     /// Note how long the reader had seen the screen unchanged.
     #[must_use]
     pub const fn quiet_for(mut self, ms: Option<u32>) -> Self {
