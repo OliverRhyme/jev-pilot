@@ -646,6 +646,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// device is reporting silence, not a caller hoping for it.
     pub const QUIET_ENOUGH_MS: u64 = 120;
 
+    /// How many times a run may be on one screen before it is going in
+    /// circles.
+    ///
+    /// Four rather than three: a menu returned to twice on the way through a
+    /// flow is ordinary, and a loop shows itself quickly enough at four.
+    pub const VISITS_ALLOWED: u32 = 4;
+
     /// How many screens back a run remembers having been on.
     ///
     /// Long enough to span a lap of a flow: a transfer re-entered from its
@@ -941,9 +948,12 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         // makes an action look new the moment it stops working, which is
         // exactly when the repetition matters.
         let mut last_did: Option<String> = None;
-        // The last command actually sent, so a repeat of one that achieved
-        // nothing can be recognised before it is sent again.
-        let mut last_sent: Option<Command> = None;
+        // The last command sent, and the screen it was sent from. Both,
+        // because the same command from the same place is the repeat worth
+        // catching — a form that reformats what it was given changes enough
+        // to look like movement while being the same place, which is where a
+        // commit button gets pressed three times over.
+        let mut last_sent: Option<(u64, Command)> = None;
         let mut origin: Option<Box<str>> = self.app.clone();
         // Named rather than discovered: put the run where it was told to be,
         // before anything is judged about where it is.
@@ -1009,6 +1019,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             if visited.len() > Self::MEMORY {
                 visited.remove(0);
             }
+            let going_in_circles =
+                visited.iter().filter(|been| **been == here).count() >= Self::VISITS_ALLOWED as usize;
 
             // Said once it has actually happened twice: doing a thing once is
             // not repeating oneself, and a warning on every step is noise.
@@ -1044,6 +1056,30 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 .map_err(RunError::Judge);
             let judged_ms = elapsed_ms(judging);
             let answers = answers?;
+
+            // Two screens can take turns for ever, each changing into the
+            // other, so nothing looks like standing still: the guard against
+            // a screen that does not move never fires, and the guard against
+            // a repeated action sees a different screen each time.
+            //
+            // Being on one screen this many times is the shape of that, and
+            // of any longer round trip through a flow. Measured on a transfer
+            // form whose summary appeared and withdrew, and on a form
+            // re-entered from its own menu three times over.
+            if going_in_circles {
+                self.report(index, &snapshot, &answers, None, repeated, Spent {
+                    read_ms,
+                    step_ms: elapsed_ms(began),
+                    waited_ms: waited.get(),
+                    judged_ms,
+                    settled_ms,
+                });
+                return Ok(Ending::Uncertain {
+                    because: Indecision::NoProgress {
+                        repeated: Self::VISITS_ALLOWED,
+                    },
+                });
+            }
 
             let decided = catalog.resolve(&answers, &self.floors);
 
@@ -1225,9 +1261,10 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             match resolved {
                 Reached::Command(command) => {
                     let acting = std::time::Instant::now();
-                    // An action that changed nothing, chosen again, is the
-                    // one move that cannot help: the screen is the same, so
-                    // the judgement is the same, so the action is the same.
+                    // The same action from the same screen, chosen again, is
+                    // the one move that cannot help: the screen is the same,
+                    // so the judgement is the same, so the action is the
+                    // same.
                     // On a commit button backed by a network call each
                     // repeat may restart the work being waited for — and
                     // waiting is never harmful.
@@ -1236,7 +1273,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     // times while the app validated, the run stopped for
                     // want of progress, and the summary arrived moments
                     // later.
-                    if ineffective > 0 && last_sent.as_ref() == Some(&command) {
+                    if last_sent.as_ref() == Some(&(here, command.clone())) {
                         self.device
                             .perform(&Command::Settle)
                             .map_err(RunError::Device)?;
@@ -1270,7 +1307,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     // land as navigation and take the run off the form it is
                     // filling. Measured: two such steps in a row returned a
                     // transfer to the dashboard.
-                    last_sent = Some(command.clone());
+                    last_sent = Some((here, command.clone()));
                     if matches!(act, Act::CloseKeyboard)
                         && !self
                             .device

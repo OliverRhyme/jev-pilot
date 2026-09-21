@@ -858,12 +858,17 @@ fn a_screen_that_changes_and_changes_back_has_not_moved() {
 
     let ending = pilot.pursue("get past the form").expect("the run completes");
 
+    // Caught as a round trip rather than as a screen that will not move:
+    // each screen does change, into the other one, so only the count of
+    // times the run has been on each of them gives it away.
     assert_eq!(
         ending,
         Ending::Uncertain {
-            because: Indecision::NoProgress { repeated: 3 }
+            because: Indecision::NoProgress {
+                repeated: Pilot::<Bouncing, Scripted>::VISITS_ALLOWED
+            }
         },
-        "a button pressed three times on the same screen is standing still",
+        "two screens taking turns is going in circles",
     );
 }
 
