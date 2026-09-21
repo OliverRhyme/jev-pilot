@@ -926,6 +926,12 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         // looked up — so the guard against standing still never fires while
         // the button is pressed over and over.
         let mut repeating: u32 = 0;
+        // The last action on its own, apart from `previous`. They start the
+        // same, but `previous` is prose for the judge and gets a note
+        // appended when the screen did not move — comparing against that
+        // makes an action look new the moment it stops working, which is
+        // exactly when the repetition matters.
+        let mut last_did: Option<String> = None;
         let mut origin: Option<Box<str>> = self.app.clone();
         // Named rather than discovered: put the run where it was told to be,
         // before anything is judged about where it is.
@@ -1165,11 +1171,12 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             }
 
             let did = recount(&act, &snapshot);
-            repeating = if previous.as_deref() == Some(did.as_str()) {
+            repeating = if last_did.as_deref() == Some(did.as_str()) {
                 repeating.saturating_add(1)
             } else {
                 1
             };
+            last_did = Some(did.clone());
             lately.push(did.clone());
             if lately.len() > Self::MEMORY {
                 lately.remove(0);

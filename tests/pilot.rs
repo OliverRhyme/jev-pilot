@@ -1005,3 +1005,31 @@ impl Device for Quietening {
         Ok(())
     }
 }
+
+/// The repetition count is kept by comparing what was just done with what was
+/// done before. What was done before is also the sentence shown to the judge,
+/// and that sentence gets a note appended to it when the screen did not move
+/// — so the comparison stopped matching and the count silently reset.
+///
+/// Measured on a transfer form: five consecutive taps on the same Continue,
+/// counted as `None, None, None, 2, None`.
+#[test]
+fn repeating_is_counted_even_when_the_screen_never_moves() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![answer("tap", Some("A2"), 0.99, 0.02); 6]),
+    };
+    // Inert: every action leaves the screen exactly as it was, so every step
+    // after the first has the note appended to what it did.
+    let mut pilot = Pilot::new(Fake { inert: true, ..Fake::default() }, judge, &Android);
+
+    let _ = pilot.pursue("tap the same thing");
+
+    let seen = seen.borrow();
+    assert_eq!(
+        seen[2]["repeating"], 2,
+        "the third step has done the same thing twice: {}",
+        seen[2],
+    );
+}
