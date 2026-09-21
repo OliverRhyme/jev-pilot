@@ -791,6 +791,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         // Knowing it has been here before is what makes waiting the obvious
         // move rather than tapping again.
         let mut visited: Vec<u64> = Vec::new();
+        // How many times in a row the same thing has been done. Counted by
+        // what the action was, not by whether the screen moved: a form still
+        // validating swallows the tap on its commit button and changes
+        // anyway — reformatting the amount, filling in the payee it has just
+        // looked up — so the guard against standing still never fires while
+        // the button is pressed over and over.
+        let mut repeating: u32 = 0;
         let mut origin: Option<Box<str>> = self.app.clone();
         // Named rather than discovered: put the run where it was told to be,
         // before anything is judged about where it is.
@@ -831,6 +838,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 visited.remove(0);
             }
 
+            // Said once it has actually happened twice: doing a thing once is
+            // not repeating oneself, and a warning on every step is noise.
+            let repeated = (repeating >= 2).then_some(repeating);
             let questions = StepQuestions::checked(goal, &catalog, &self.criteria);
 
             let answers = self
@@ -846,6 +856,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             keyboard_open: snapshot.keyboard_open(),
                             says: &snapshot.notices().collect::<Vec<_>>(),
                             seen_before,
+                            repeating: repeated,
                         },
                     ),
                     &questions,
@@ -969,7 +980,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 }
             }
 
-            previous = Some(recount(&act, &snapshot));
+            let did = recount(&act, &snapshot);
+            repeating = if previous.as_deref() == Some(did.as_str()) {
+                repeating.saturating_add(1)
+            } else {
+                1
+            };
+            previous = Some(did);
             let resolved = self.reach(
                 &act,
                 &taken_at(
@@ -1049,6 +1066,8 @@ struct Standing<'s> {
     says: &'s [&'s str],
     /// How many steps ago this screen was last judged, if it was.
     seen_before: Option<u32>,
+    /// How many times in a row the same action has already been taken.
+    repeating: Option<u32>,
 }
 
 fn describe(
@@ -1063,6 +1082,7 @@ fn describe(
         keyboard_open,
         says,
         seen_before,
+        repeating,
     } = where_it_stands;
     // Rows are keyed the way the Choice offers them, so its options can be
     // bare keys and the text travels once rather than twice.
@@ -1089,6 +1109,13 @@ fn describe(
         if origin.is_some_and(|origin| origin != app) {
             state["started_in"] = origin.into();
         }
+    }
+    if let Some(times) = repeating {
+        // Said before the action is chosen, so the choice can be a different
+        // one. A button pressed while a form is still validating is ignored,
+        // and a button pressed once the form is ready is not — so doing it
+        // again is sometimes right and is never right without noticing.
+        state["repeating"] = times.into();
     }
     if let Some(ago) = seen_before {
         // How many steps back, rather than a bare flag: a screen returned to

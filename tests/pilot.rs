@@ -682,3 +682,62 @@ fn screen_of(labels: &[&str]) -> Snapshot {
     )
     .expect("a screen")
 }
+
+/// A form that is still validating swallows the tap on its commit button, and
+/// the screen changes anyway — the amount is reformatted, the payee name comes
+/// back from the server — so the guard against standing still never fires and
+/// the run taps the button again, and again.
+///
+/// Measured on a transfer form: `Continue` tapped on three consecutive steps,
+/// all of them saying "Step 1 of 3", the first two swallowed while the payee
+/// resolved. On a rail that honoured them instead, that is three submissions
+/// of the same money.
+///
+/// A run is told when it is about to repeat itself, so it can choose to wait.
+#[test]
+fn a_run_is_told_when_it_keeps_doing_the_same_thing() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    let mut pilot = Pilot::new(Validating::default(), judge, &Android);
+
+    pilot.pursue("continue past the form").expect("it completes");
+
+    let seen = seen.borrow();
+    // Doing a thing once, then twice, is not yet a pattern.
+    assert!(seen[0].get("repeating").is_none(), "{}", seen[0]);
+    assert!(seen[1].get("repeating").is_none(), "{}", seen[1]);
+    assert_eq!(
+        seen[2]["repeating"], 2,
+        "the same tap has already been made twice: {}",
+        seen[2],
+    );
+}
+
+/// A device whose screen changes after every action without the action having
+/// taken effect, as a form reformatting its own fields does.
+#[derive(Default)]
+struct Validating {
+    acts: usize,
+}
+
+impl Device for Validating {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        // The amount is rewritten each time, so no two readings are alike and
+        // nothing looks like standing still.
+        let amount = format!("{}.0{}", 50, self.acts);
+        Ok(screen_of(&["Go Back", &amount, "Continue"]))
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        self.acts += 1;
+        Ok(())
+    }
+}
