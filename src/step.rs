@@ -68,8 +68,6 @@ pub struct StepQuestions<'a> {
     pub goal_met: Question<Checking<'a>>,
     /// Whether the screen is an error state.
     pub is_error_screen: Question<&'static str>,
-    /// Whether the screen is still arriving, asked alongside everything else.
-    pub still_arriving: Question<&'static str>,
     /// One judgment per acceptance criterion, keyed `check_0`, `check_1`, ...
     ///
     /// Flattened into the same map as the rest, so they are evaluated in the
@@ -151,27 +149,6 @@ impl<'a> StepQuestions<'a> {
                     no: "An ordinary working screen".into(),
                 },
             },
-            // Asked on every step because it costs nothing to: the questions
-            // are answered in parallel against one state, so another one is
-            // roughly the latency of asking none.
-            //
-            // It is the question a polling loop cannot answer. Watching the
-            // screen tells you it stopped changing; it cannot tell a screen
-            // that has finished from one that is between two others and
-            // happens to be still for a moment. Acting on the second is this
-            // loop's most persistent failure — a login form that already says
-            // the session is active, a step whose only rendered control is
-            // its Back button.
-            still_arriving: Question::Noul {
-                instructions: "Is the current screen still arriving — mid-transition, \
-                               loading, or waiting on something it has already been told \
-                               to do?",
-                criteria: Poles {
-                    yes: "Half-drawn, loading, or reporting work that is still in flight"
-                        .into(),
-                    no: "Settled: what is on screen is what the app means to show".into(),
-                },
-            },
         }
     }
 }
@@ -179,12 +156,6 @@ impl<'a> StepQuestions<'a> {
 /// Everything one step learns back, keyed to match [`StepQuestions`].
 #[derive(Debug, Deserialize)]
 pub struct StepAnswers {
-    /// Whether the screen was judged to be still arriving.
-    ///
-    /// Defaulted, because a judge that does not answer it is not wrong — it
-    /// simply has nothing to say, and the run carries on as it did before.
-    #[serde(default)]
-    pub still_arriving: Option<Likelihood>,
     /// The operation the model chose.
     pub operation: ChosenOperation,
     /// The row it would act on, if the operation needs one.
