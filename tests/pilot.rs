@@ -1048,9 +1048,17 @@ fn repeating_is_counted_even_when_the_screen_never_moves() {
 /// nothing at all when actions work.
 #[test]
 fn an_action_that_changes_nothing_is_given_longer_the_next_time() {
+    // Different rows each time, so this is about the budget growing rather
+    // than about repeating one action — that is
+    // `an_action_that_changed_nothing_is_waited_out_rather_than_repeated`.
     let mut pilot = Pilot::new(
         Fake { inert: true, ..Fake::default() },
-        Scripted::new(vec![answer("tap", Some("A2"), 0.99, 0.02); 6]),
+        Scripted::new(vec![
+            answer("tap", Some("A2"), 0.99, 0.02),
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("tap", Some("A4"), 0.99, 0.02),
+            answer("tap", Some("A5"), 0.99, 0.02),
+        ]),
         &Android,
     );
 
@@ -1116,4 +1124,44 @@ impl Device for Closing {
         self.performed.push(command.clone());
         Ok(())
     }
+}
+
+/// An action that changed nothing, chosen again, is the one move that cannot
+/// help. The screen is the same, so the judgement is the same, so the action
+/// is the same — and on a commit button backed by a network call, each repeat
+/// may restart the work it is waiting for.
+///
+/// Measured on a transfer form: Continue tapped five times while the app
+/// validated, the run stopped for want of progress, and the summary arrived
+/// moments later. Waiting is what was wanted, and waiting is never harmful.
+#[test]
+fn an_action_that_changed_nothing_is_waited_out_rather_than_repeated() {
+    let mut pilot = Pilot::new(
+        Fake { inert: true, ..Fake::default() },
+        Scripted::new(vec![answer("tap", Some("A2"), 0.99, 0.02); 6]),
+        &Android,
+    );
+
+    let _ = pilot.pursue("tap the same thing");
+
+    let taps = pilot
+        .device()
+        .performed
+        .iter()
+        .filter(|command| matches!(command, Command::Tap(_)))
+        .count();
+    assert_eq!(
+        taps, 1,
+        "the tap that changed nothing is not sent again: {:?}",
+        pilot.device().performed,
+    );
+    assert!(
+        pilot
+            .device()
+            .performed
+            .iter()
+            .any(|command| matches!(command, Command::Settle)),
+        "it waits instead: {:?}",
+        pilot.device().performed,
+    );
 }

@@ -941,6 +941,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         // makes an action look new the moment it stops working, which is
         // exactly when the repetition matters.
         let mut last_did: Option<String> = None;
+        // The last command actually sent, so a repeat of one that achieved
+        // nothing can be recognised before it is sent again.
+        let mut last_sent: Option<Command> = None;
         let mut origin: Option<Box<str>> = self.app.clone();
         // Named rather than discovered: put the run where it was told to be,
         // before anything is judged about where it is.
@@ -1206,6 +1209,44 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             match resolved {
                 Reached::Command(command) => {
                     let acting = std::time::Instant::now();
+                    // An action that changed nothing, chosen again, is the
+                    // one move that cannot help: the screen is the same, so
+                    // the judgement is the same, so the action is the same.
+                    // On a commit button backed by a network call each
+                    // repeat may restart the work being waited for — and
+                    // waiting is never harmful.
+                    //
+                    // Measured on a transfer form: Continue tapped five
+                    // times while the app validated, the run stopped for
+                    // want of progress, and the summary arrived moments
+                    // later.
+                    if ineffective > 0 && last_sent.as_ref() == Some(&command) {
+                        self.device
+                            .perform(&Command::Settle)
+                            .map_err(RunError::Device)?;
+                        settled_ms = elapsed_ms(acting);
+                        ineffective += 1;
+                        previous = Some(format!(
+                            "{} — still nothing, so this step waited instead of \
+                             doing it again",
+                            previous.as_deref().unwrap_or("Acted")
+                        ));
+                        self.report(index, &snapshot, &answers, Some(&act), repeated, Spent {
+                            read_ms,
+                            step_ms: elapsed_ms(began),
+                            waited_ms: waited.get(),
+                            judged_ms,
+                            settled_ms,
+                        });
+                        if ineffective >= Self::INEFFECTIVE_LIMIT {
+                            return Ok(Ending::Uncertain {
+                                because: Indecision::NoProgress {
+                                    repeated: ineffective,
+                                },
+                            });
+                        }
+                        continue;
+                    }
                     // Closing a keyboard that has already closed is going
                     // back. The catalog offered it from the screen as it was
                     // when this step began, and a keyboard dismissed by the
@@ -1213,6 +1254,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     // land as navigation and take the run off the form it is
                     // filling. Measured: two such steps in a row returned a
                     // transfer to the dashboard.
+                    last_sent = Some(command.clone());
                     if matches!(act, Act::CloseKeyboard)
                         && !self
                             .device
