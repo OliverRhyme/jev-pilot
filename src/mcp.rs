@@ -227,7 +227,7 @@ impl Pilot {
             Ok(run) => run,
             Err(said) => return Ok(said),
         };
-        Ok(waited(&name, until_it_wants_something(&desk, patience()).await))
+        Ok(waited(&name, until_it_wants_something(&desk, patience(), None).await))
     }
 
     /// Start a run and remember it, or say why not.
@@ -274,7 +274,9 @@ impl Pilot {
 
         match std::process::Command::new(binary())
             .args(&line)
-            .stdin(std::process::Stdio::null())
+            // Kept open, not because a run reads anything from it, but
+            // because it is how an answer written to the desk is announced.
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::from(log))
             .stderr(std::process::Stdio::from(complaints))
             .spawn()
@@ -331,31 +333,46 @@ impl Pilot {
                 "an answer needs an operation, a target or some text; this one said nothing",
             ));
         };
-        let desk = match self.accept(&run, &answer) {
-            Ok(desk) => desk,
+        // Read before the answer is written, so the question being replaced is
+        // known and cannot be handed back as a new one.
+        let (desk, asked) = match self.accept(&run, &answer) {
+            Ok(both) => both,
             Err(said) => return Ok(said),
         };
         // Waited on for the same reason as starting one: the next question
         // arrives as the result of the answer that led to it.
-        Ok(waited(&run, until_it_wants_something(&desk, patience()).await))
+        Ok(waited(
+            &run,
+            until_it_wants_something(&desk, patience(), asked.as_deref()).await,
+        ))
     }
 
     /// Put an answer on a run's desk, and say which desk it went to.
     ///
     /// Separate from the tool for the same reason as `launch`: the lock is
     /// given back before anything waits.
-    fn accept(&self, run: &str, answer: &serde_json::Value) -> Result<std::path::PathBuf, CallToolResult> {
-        let Ok(sessions) = self.sessions.lock() else {
+    fn accept(
+        &self,
+        run: &str,
+        answer: &serde_json::Value,
+    ) -> Result<(std::path::PathBuf, Option<String>), CallToolResult> {
+        let Ok(mut sessions) = self.sessions.lock() else {
             return Err(refused(&poisoned()));
         };
         let Some(desk) = sessions.desk_of(run) else {
             return Err(refused(&format!("no run on {run}")));
         };
         let desk = desk.to_path_buf();
-        match std::fs::write(desk.join("answer.json"), answer.to_string()) {
-            Ok(()) => Ok(desk),
-            Err(error) => Err(refused(&format!("could not answer {run}: {error}"))),
+        // Read before the answer is written: this is the question being
+        // answered, and waiting must not hand it back as a new one.
+        let asked = std::fs::read_to_string(desk.join("ask.json")).ok();
+        if let Err(error) = std::fs::write(desk.join("answer.json"), answer.to_string()) {
+            return Err(refused(&format!("could not answer {run}: {error}")));
         }
+        // Written first, so the run finds the answer already there when it
+        // looks. A nudge that arrived first would send it to an empty desk.
+        sessions.nudge(run);
+        Ok((desk, asked))
     }
 
     /// End a run that is still going.
@@ -507,12 +524,23 @@ pub enum Waited {
 /// gets a "still going" and the caller decides whether to wait again. Holding
 /// the call open until the run finished would trip a client's own timeout and
 /// lose the run behind it.
-pub async fn until_it_wants_something(desk: &std::path::Path, patience: std::time::Duration) -> Waited {
+///
+/// `answered` is the question the caller has just replied to, when it has. A
+/// run clears its desk in its own time, so for a moment after an answer is
+/// written the question it answers is still lying there, and reporting it
+/// would have the caller answer the same impasse for ever.
+pub async fn until_it_wants_something(
+    desk: &std::path::Path,
+    patience: std::time::Duration,
+    answered: Option<&str>,
+) -> Waited {
     let deadline = std::time::Instant::now() + patience;
     loop {
         // `ask.json` is written when a run stops to ask and taken away once it
         // has been answered, so its being there is the question.
-        if let Ok(question) = std::fs::read_to_string(desk.join("ask.json")) {
+        if let Ok(question) = std::fs::read_to_string(desk.join("ask.json"))
+            && answered != Some(question.as_str())
+        {
             return Waited::Asking(question);
         }
         if let Some(how) = ended(desk) {
@@ -536,7 +564,13 @@ fn ended(desk: &std::path::Path) -> Option<String> {
 }
 
 /// How often a waited-on run is looked at.
-const LOOKED_AT_EVERY_MS: u64 = 150;
+///
+/// Short, because this sits on the critical path of an impasse: a run that has
+/// stopped is doing nothing at all until the question reaches somebody, and
+/// every interval here is dead time added to a round trip that already costs a
+/// model call. Two stats on small files this often is nothing next to that, and
+/// it only happens while a call is waiting.
+const LOOKED_AT_EVERY_MS: u64 = 20;
 
 /// Turn a typed argument struct back into the JSON the pure helpers read.
 ///
@@ -746,6 +780,27 @@ impl Sessions {
     /// Remember a run this server started.
     pub fn remember(&mut self, name: String, desk: std::path::PathBuf, child: std::process::Child) {
         self.runs.insert(name, Run { desk, child });
+    }
+
+    /// Tell a run to look at its desk now.
+    ///
+    /// An empty line on the run's own input, which is the channel a person
+    /// types answers on. The run treats a blank one as "look again", so the
+    /// answer just written is picked up in the time a pipe takes rather than
+    /// at the run's next look. Without it every impasse costs that interval,
+    /// on the one path where a run is doing nothing at all.
+    ///
+    /// `false` when there is no such run, or its input has been closed.
+    pub fn nudge(&mut self, run: &str) -> bool {
+        use std::io::Write as _;
+
+        let Some(run) = self.runs.get_mut(run) else {
+            return false;
+        };
+        let Some(input) = run.child.stdin.as_mut() else {
+            return false;
+        };
+        input.write_all(b"\n").and_then(|()| input.flush()).is_ok()
     }
 
     /// Forget a run, ending it if it is still going.

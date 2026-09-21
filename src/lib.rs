@@ -33,6 +33,7 @@ pub mod act;
 pub mod cli;
 pub mod client;
 pub mod credential;
+pub mod desk;
 pub mod device;
 pub mod judgment;
 #[cfg(feature = "mcp")]

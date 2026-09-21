@@ -20,241 +20,22 @@
 //! Either way the answer resolves through the same catalog Jev was offered, so
 //! an outside decider inherits every constraint: it cannot name an operation
 //! the platform lacks, a row that is not on screen, or a coordinate.
-use core::fmt::Write as _;
+use std::io::Write as _;
+
 use jev_pilot::{
-    act::{Catalog, Operation},
+    act::Catalog,
     cli::{self, Invocation},
     client::http::SystemOne,
     credential::ApiKey,
+    desk::Desk,
     device::Device as _,
     device::adb::{Adb, AdbDevice},
     device::helper::BUNDLED,
-    judgment::Confidence,
-    pilot::{Impasse, Pilot, Resolution, Writing},
+    pilot::{Impasse, Pilot, Writing},
     platform::Android,
 };
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::Duration;
-
-
-/// Where a question goes, and where an answer may come from.
-///
-/// Both channels are live for every question. The terminal is read on its own
-/// thread, because a blocking read there would stop the file from being
-/// noticed, and the whole point is that either may answer.
-struct Desk {
-    dir: PathBuf,
-    typed: Receiver<String>,
-    /// Text the caller supplied up front, by the field it belongs in.
-    ///
-    /// Consulted before anyone is asked. A scripted run knows the words it
-    /// means to type — they are in the goal it was given — and stopping to ask
-    /// for each one is what keeps such a run from finishing unattended.
-    texts: Vec<(Box<str>, Box<str>)>,
-}
-
-impl Desk {
-    fn new(dir: PathBuf, texts: Vec<(Box<str>, Box<str>)>) -> std::io::Result<Self> {
-        std::fs::create_dir_all(&dir)?;
-        let (sender, typed) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for line in std::io::stdin().lines() {
-                let Ok(line) = line else { return };
-                if sender.send(line).is_err() {
-                    return;
-                }
-            }
-        });
-        Ok(Self { dir, typed, texts })
-    }
-
-    /// Text supplied for a field, matched by name.
-    ///
-    /// Contains rather than equals: a field is named by whatever the screen
-    /// calls it, which is a hint, a label or a caption, and rarely the short
-    /// name a caller would type. Case is ignored for the same reason.
-    fn supplied(&self, field: &str) -> Option<&str> {
-        let field = field.to_lowercase();
-        self.texts
-            .iter()
-            .find(|(name, _)| field.contains(&name.to_lowercase()))
-            .map(|(_, text)| &**text)
-    }
-
-    /// Put a question to both channels and wait for the first answer.
-    fn ask(&self, question: &serde_json::Value, prompt: &str) -> std::io::Result<Answer> {
-        let ask = self.dir.join("ask.json");
-        let answer = self.dir.join("answer.json");
-        let _ = std::fs::remove_file(&answer);
-        std::fs::write(&ask, serde_json::to_string_pretty(question)?)?;
-
-        print!("{prompt}");
-        std::io::stdout().flush()?;
-
-        // Drain anything typed before the question existed: it answered
-        // something else.
-        while self.typed.try_recv().is_ok() {}
-
-        // A question nobody is there to answer must not hold a run open for
-        // ever. A person at the terminal has as long as they like; a run with
-        // nothing attached to its desk gives up and says so.
-        let deadline = std::time::Instant::now() + Duration::from_secs(WAIT_SECONDS);
-        while std::time::Instant::now() < deadline {
-            if let Ok(raw) = std::fs::read_to_string(&answer)
-                && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw)
-            {
-                let _ = std::fs::remove_file(&ask);
-                let _ = std::fs::remove_file(&answer);
-                println!("[answered from {}]", answer.display());
-                return Ok(Answer::File(parsed));
-            }
-            match self.typed.try_recv() {
-                Ok(line) => {
-                    let _ = std::fs::remove_file(&ask);
-                    return Ok(Answer::Typed(line));
-                }
-                Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(100)),
-                // The terminal is gone; the file is still a way to answer.
-                Err(TryRecvError::Disconnected) => {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-        }
-        let _ = std::fs::remove_file(&ask);
-        Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("nobody answered within {WAIT_SECONDS}s"),
-        ))
-    }
-
-    /// Put an impasse to whoever is there, and resolve their answer.
-    fn choose(&self, impasse: &Impasse<'_>) -> Result<Resolution, std::io::Error> {
-        let reply = self.ask(
-            &serde_json::json!({
-                "kind": "which_action",
-                "step": impasse.step,
-                "goal": impasse.goal,
-                "why": impasse.because.to_string(),
-                "leaning": impasse.leaning.key(),
-                "operation_confidence": impasse.operation_confidence.get(),
-                "row_confidence": impasse.target_confidence.map(Confidence::get),
-                "torn_among": impasse.alternatives.iter().take(5)
-                    .map(|(n, p)| serde_json::json!([n, p])).collect::<Vec<_>>(),
-                "previous_action": impasse.previous,
-                "recent_actions": impasse.lately,
-                "operations": impasse.operations.iter().map(|o| o.key()).collect::<Vec<_>>(),
-                "rows": impasse.rows,
-                "screen_says": impasse.says,
-                "unavailable": impasse.unavailable,
-                "keyboard_open": impasse.keyboard_open,
-                "fields": impasse.fields,
-            }),
-            &describe(impasse),
-        )?;
-        let understood = match reply {
-            Answer::Typed(line) => parse_typed(&line),
-            Answer::File(value) => resolve_json(&value),
-        };
-        // Saying so, rather than stopping. The alternative discards a run
-        // over a misspelling, and says nothing about why.
-        Ok(understood.unwrap_or_else(|| {
-            eprintln!(
-                "jev-pilot: that answer named no action this screen offers; \
-                 the run is stopping. Offered here: {}",
-                impasse
-                    .operations
-                    .iter()
-                    .map(|operation| operation.key())
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
-            Resolution::Stop
-        }))
-    }
-
-    /// Ask what belongs in a field.
-    fn compose(&self, request: &Writing<'_>) -> Result<Box<str>, std::io::Error> {
-        if let Some(text) = self.supplied(&request.field.describe()) {
-            println!(
-                "\n  \u{2500}\u{2500} step {}: typing the text given for {}",
-                request.step,
-                request.field.describe(),
-            );
-            return Ok(text.into());
-        }
-        let prompt = format!(
-            "\n  \u{2500}\u{2500} step {}: what should go in {}?\n     goal: {}\n     text: ",
-            request.step,
-            request.field.describe(),
-            request.goal,
-        );
-        let reply = self.ask(
-            &serde_json::json!({
-                "kind": "what_to_type",
-                "step": request.step,
-                "goal": request.goal,
-                "field": request.field.describe(),
-                "previous_action": request.previous,
-                "rows": request.rows,
-            }),
-            &prompt,
-        )?;
-        let text = match reply {
-            Answer::Typed(line) => line.trim().to_owned(),
-            Answer::File(value) => value
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-        };
-        Ok(Box::<str>::from(text))
-    }
-}
-
-/// An answer written as JSON, resolved through the same catalog a typed one is.
-///
-/// `None` is an answer that named nothing this crate knows. It is not a
-/// refusal: a misspelled operation that quietly ends a run is a run thrown
-/// away over a typo, and the name a caller reaches for is the one the catalog
-/// just offered them.
-fn resolve_json(value: &serde_json::Value) -> Option<Resolution> {
-    let name = value.get("operation").and_then(serde_json::Value::as_str)?;
-    if name == "stop" {
-        return Some(Resolution::Stop);
-    }
-    Some(Resolution::Choose {
-        operation: Operation::from_key(name)?,
-        target: value
-            .get("target")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|n| usize::try_from(n).ok()),
-    })
-}
-
-/// How long a question waits for an answer before the run gives up.
-const WAIT_SECONDS: u64 = 300;
-
-enum Answer {
-    Typed(String),
-    File(serde_json::Value),
-}
-
-/// Read `tap 3`, `back`, `done` and the like, as a person would type them.
-fn parse_typed(line: &str) -> Option<Resolution> {
-    let mut words = line.split_whitespace();
-    let name = words.next()?;
-    if name == "stop" {
-        return Some(Resolution::Stop);
-    }
-    let operation = Operation::from_key(name)?;
-    Some(Resolution::Choose {
-        operation,
-        target: words.next().and_then(|n| n.parse().ok()),
-    })
-}
 
 fn main() -> std::process::ExitCode {
     match run() {
@@ -516,43 +297,6 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
     Ok(())
 }
 
-/// The impasse, written out for whoever is reading the terminal.
-fn describe(impasse: &Impasse<'_>) -> String {
-    let mut out = String::new();
-    let _ = writeln!(out, "\n  ── step {}: {}", impasse.step, impasse.because);
-    let _ = writeln!(out, "     goal      : {}", impasse.goal);
-    if let Some(previous) = impasse.previous {
-        let _ = writeln!(out, "     last did  : {previous}");
-    }
-    let _ = write!(
-        out,
-        "     leaning   : {} at {:.2}",
-        impasse.leaning,
-        impasse.operation_confidence.get()
-    );
-    match impasse.target_confidence {
-        Some(target) => {
-            let _ = writeln!(out, ", row at {:.2}", target.get());
-        }
-        None => {
-            let _ = writeln!(out);
-        }
-    }
-    for (index, row) in impasse.rows.iter().enumerate() {
-        let _ = writeln!(out, "     [{index}] {row}");
-    }
-    // Numbered separately from the rows, because typing is: on a form of
-    // three editable rows among five, answering `type` with a row's number
-    // types into the wrong field, or into nothing.
-    for (index, field) in impasse.fields.iter().enumerate() {
-        let _ = writeln!(out, "     type {index} -> {field}");
-    }
-    let _ = write!(
-        out,
-        "     tap <n> | type <n> | back | scroll_down | done | stop: "
-    );
-    out
-}
 
 /// One line per step, and one more for what it chose.
 /// Append one step to the run's transcript.
@@ -562,8 +306,7 @@ fn describe(impasse: &Impasse<'_>) -> String {
 /// One line per step, as JSON, so the answer is on disk when the question is
 /// asked afterwards rather than needing the run done again.
 fn transcribe(to: &std::path::Path, step: &jev_pilot::pilot::StepReport<'_>) {
-    use std::io::Write as _;
-
+    
     let line = serde_json::json!({
         "step": step.index,
         "app": step.app,

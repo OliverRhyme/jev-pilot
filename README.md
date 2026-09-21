@@ -146,6 +146,15 @@ A run is four calls rather than one that blocks until it is over:
 | `answer_run` | answer it — an operation and row it was offered, or the words to type — and come back with the next thing it wants |
 | `stop_run` | end it, leaving the device where it got to |
 
+Latency matters here more than anywhere else in the loop, because a run at an
+impasse is doing *nothing* — not observing, not judging, not tapping — until an
+answer reaches it. So neither direction waits on a timer if it can help it. The
+question is noticed within 20ms of the run writing it. The answer does not wait
+at all: the server keeps the run's own input open and writes an empty line to it
+once the answer is on the desk, and the run treats a blank line as "look now".
+That is the same channel a person types answers on, so the push path is the one
+that was already there.
+
 `start_run` and `answer_run` do not return the instant the run is under way.
 They wait, and come back with one of three things: the question the run stopped
 on, how it ended, or — after about forty-five seconds — that it is still

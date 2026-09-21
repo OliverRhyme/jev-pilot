@@ -185,13 +185,13 @@ async fn a_call_waits_until_the_run_wants_something() {
 
     // Nothing yet, so it comes back having waited rather than hanging for ever.
     assert!(matches!(
-        until_it_wants_something(&desk, std::time::Duration::from_millis(120)).await,
+        until_it_wants_something(&desk, std::time::Duration::from_millis(120), None).await,
         Waited::StillGoing,
     ));
 
     // The run asks, and the question is the answer to the call.
     std::fs::write(desk.join("ask.json"), r#"{"kind":"which_action"}"#).expect("asked");
-    let Waited::Asking(question) = until_it_wants_something(&desk, std::time::Duration::from_secs(2)).await
+    let Waited::Asking(question) = until_it_wants_something(&desk, std::time::Duration::from_secs(2), None).await
     else {
         panic!("it should come back with the question");
     };
@@ -213,7 +213,7 @@ async fn a_call_stops_waiting_once_the_run_is_over() {
     )
     .expect("a log");
 
-    let Waited::Ended(how) = until_it_wants_something(&desk, std::time::Duration::from_secs(2)).await
+    let Waited::Ended(how) = until_it_wants_something(&desk, std::time::Duration::from_secs(2), None).await
     else {
         panic!("it should come back saying it is over");
     };
@@ -238,4 +238,64 @@ fn a_status_says_how_a_finished_run_went() {
     let said = jev_pilot::mcp::status_of(&desk);
     assert!(said.contains("OutOfSteps"), "got {said}");
     assert!(said.contains("{\"step\":1}"), "the steps are still there: {said}");
+}
+
+/// Answering must not come straight back with the question that was just
+/// answered. The run takes the answer off its desk in its own time, so for a
+/// moment after the answer is written the old question is still lying there —
+/// and a caller told to answer it again would answer it for ever.
+#[tokio::test]
+async fn answering_does_not_come_back_with_the_question_it_answered() {
+    use jev_pilot::mcp::{Waited, until_it_wants_something};
+
+    let desk = std::env::temp_dir().join("jev-pilot-test-answered");
+    let _ = std::fs::remove_dir_all(&desk);
+    std::fs::create_dir_all(&desk).expect("a desk");
+    let asked = r#"{"kind":"which_action","step":3}"#;
+    std::fs::write(desk.join("ask.json"), asked).expect("asked");
+
+    // The run has not picked the answer up yet, so the stale question is still
+    // there. Waiting on it should not report it.
+    assert!(matches!(
+        until_it_wants_something(&desk, std::time::Duration::from_millis(120), Some(asked)).await,
+        Waited::StillGoing,
+    ));
+
+    // A different question is a real one.
+    std::fs::write(desk.join("ask.json"), r#"{"kind":"which_action","step":4}"#).expect("asked");
+    let Waited::Asking(question) =
+        until_it_wants_something(&desk, std::time::Duration::from_secs(2), Some(asked)).await
+    else {
+        panic!("the next question should come back");
+    };
+    assert!(question.contains("\"step\":4"), "got {question}");
+}
+
+/// Writing the answer is only half of it: the run is asleep on its desk until
+/// something tells it to look. The server keeps the run's input open for
+/// exactly that, so an answer costs a pipe write rather than a wait.
+#[test]
+fn answering_wakes_the_run_rather_than_leaving_it_to_look() {
+    use std::io::{BufRead as _, BufReader};
+
+    let mut child = std::process::Command::new("cat")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("a stand-in for a run");
+    let said = child.stdout.take().expect("its output");
+
+    let mut sessions = jev_pilot::mcp::Sessions::default();
+    sessions.remember(
+        "a-device".to_owned(),
+        std::env::temp_dir().join("jev-pilot-test-nudge"),
+        child,
+    );
+
+    assert!(sessions.nudge("a-device"), "it should have an input to write to");
+    let mut heard = String::new();
+    BufReader::new(said).read_line(&mut heard).expect("it woke up");
+    assert_eq!(heard, "\n", "a nudge is an empty line, never an answer");
+
+    assert!(!sessions.nudge("no-such-device"));
 }
