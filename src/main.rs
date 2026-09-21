@@ -571,6 +571,7 @@ fn transcribe(to: &std::path::Path, step: &jev_pilot::pilot::StepReport<'_>) {
         "screen_says": step.says,
         "unavailable": step.unavailable,
         "repeating": step.repeating,
+        "acted": step.acted,
         "read_ms": step.read_ms,
         "step_ms": step.step_ms,
         "waited_ms": step.waited_ms,

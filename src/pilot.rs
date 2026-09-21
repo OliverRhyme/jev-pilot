@@ -324,6 +324,13 @@ pub struct StepReport<'s> {
     pub goal_met: Progress,
     /// How likely the screen was an error state.
     pub is_error_screen: f64,
+    /// Whether the step carried its action out, or waited instead.
+    ///
+    /// Recorded because the two look identical otherwise: a step that chose
+    /// to tap and a step that chose to tap and waited instead both report the
+    /// same choice, and a record that cannot tell them apart says a run
+    /// repeated itself when it did not.
+    pub acted: bool,
     /// How long reading the screen took, in milliseconds.
     ///
     /// Apart from the step's own total because they are spent very
@@ -766,7 +773,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         snapshot: &Snapshot,
         answers: &StepAnswers,
         chosen: Option<&Act>,
-        repeating: Option<u32>,
+        went: Went,
         spent: Spent,
     ) {
         let Some(observer) = self.observer.as_mut() else {
@@ -780,13 +787,14 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 .collect(),
             says: snapshot.notices().map(ToOwned::to_owned).collect(),
             unavailable: snapshot.unavailable().map(ToOwned::to_owned).collect(),
-            repeating,
+            repeating: went.repeating,
             app: snapshot.app(),
             chosen,
             operation_confidence: answers.operation.confidence,
             target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),
             goal_met: answers.goal_met.progress(),
             is_error_screen: answers.is_error_screen.noul,
+            acted: went.acted,
             read_ms: spent.read_ms,
             step_ms: spent.step_ms,
             waited_ms: spent.waited_ms,
@@ -983,12 +991,16 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         // makes an action look new the moment it stops working, which is
         // exactly when the repetition matters.
         let mut last_did: Option<String> = None;
-        // The last command sent, and the screen it was sent from. Both,
-        // because the same command from the same place is the repeat worth
-        // catching — a form that reformats what it was given changes enough
-        // to look like movement while being the same place, which is where a
-        // commit button gets pressed three times over.
-        let mut last_sent: Option<(u64, Command)> = None;
+        // What was last done, and the screen it was done from. Both, because
+        // the same action from the same place is the repeat worth catching —
+        // a form that reformats what it was given changes enough to look like
+        // movement while being the same place, which is where a commit button
+        // gets pressed three times over.
+        //
+        // What was done rather than the command carrying it out: a command
+        // holds a point, so a button that shifts by a pixel between readings
+        // makes two taps on the same button look like two different acts.
+        let mut last_sent: Option<(u64, String)> = None;
         let mut origin: Option<Box<str>> = self.app.clone();
         // Named rather than discovered: put the run where it was told to be,
         // before anything is judged about where it is.
@@ -1102,7 +1114,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // form whose summary appeared and withdrew, and on a form
             // re-entered from its own menu three times over.
             if going_in_circles {
-                self.report(index, &snapshot, &answers, None, repeated, Spent {
+                self.report(index, &snapshot, &answers, None, Went { repeating: repeated, acted: false }, Spent {
                     read_ms,
                     step_ms: elapsed_ms(began),
                     waited_ms: waited.get(),
@@ -1119,7 +1131,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             let decided = catalog.resolve(&answers, &self.floors);
 
             if answers.is_error_screen.noul > self.certainty {
-                self.report(index, &snapshot, &answers, None, repeated, Spent {
+                self.report(index, &snapshot, &answers, None, Went { repeating: repeated, acted: false }, Spent {
                     read_ms,
                     step_ms: elapsed_ms(began),
                     waited_ms: waited.get(),
@@ -1148,7 +1160,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 continue;
             }
             if !blind && reached == Progress::Achieved {
-                self.report(index, &snapshot, &answers, None, repeated, Spent {
+                self.report(index, &snapshot, &answers, None, Went { repeating: repeated, acted: false }, Spent {
                     read_ms,
                     step_ms: elapsed_ms(began),
                     waited_ms: waited.get(),
@@ -1176,7 +1188,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 && !self.criteria.is_empty()
                 && answers.unmet(&self.criteria, self.certainty).is_none()
             {
-                self.report(index, &snapshot, &answers, None, repeated, Spent {
+                self.report(index, &snapshot, &answers, None, Went { repeating: repeated, acted: false }, Spent {
                     read_ms,
                     step_ms: elapsed_ms(began),
                     waited_ms: waited.get(),
@@ -1204,7 +1216,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     if let Some(decision) = answered? {
                         decision
                     } else {
-                        self.report(index, &snapshot, &answers, None, repeated, Spent {
+                        self.report(index, &snapshot, &answers, None, Went { repeating: repeated, acted: false }, Spent {
                     read_ms,
                     step_ms: elapsed_ms(began),
                     waited_ms: waited.get(),
@@ -1253,7 +1265,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 // Reported here rather than with the acting steps below: a
                 // verdict touches nothing, so there is no settle to wait for
                 // and nothing to be learned by reporting it later.
-                self.report(index, &snapshot, &answers, Some(&act), repeated, Spent {
+                self.report(index, &snapshot, &answers, Some(&act), Went { repeating: repeated, acted: true }, Spent {
                     read_ms,
                     step_ms: elapsed_ms(began),
                     waited_ms: waited.get(),
@@ -1280,6 +1292,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             if lately.len() > Self::MEMORY {
                 lately.remove(0);
             }
+            let doing = did.clone();
             previous = Some(did);
             let resolved = self.reach(
                 &act,
@@ -1308,7 +1321,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     // times while the app validated, the run stopped for
                     // want of progress, and the summary arrived moments
                     // later.
-                    if last_sent.as_ref() == Some(&(here, command.clone())) {
+                    if last_sent.as_ref() == Some(&(here, doing.clone())) {
                         self.device
                             .perform(&Command::Settle)
                             .map_err(RunError::Device)?;
@@ -1319,7 +1332,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                              doing it again",
                             previous.as_deref().unwrap_or("Acted")
                         ));
-                        self.report(index, &snapshot, &answers, Some(&act), repeated, Spent {
+                        self.report(index, &snapshot, &answers, Some(&act), Went { repeating: repeated, acted: false }, Spent {
                             read_ms,
                             step_ms: elapsed_ms(began),
                             waited_ms: waited.get(),
@@ -1342,7 +1355,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     // land as navigation and take the run off the form it is
                     // filling. Measured: two such steps in a row returned a
                     // transfer to the dashboard.
-                    last_sent = Some((here, command.clone()));
+                    last_sent = Some((here, doing.clone()));
                     if matches!(act, Act::CloseKeyboard)
                         && !self
                             .device
@@ -1351,7 +1364,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             .keyboard_open()
                     {
                         previous = Some("The keyboard was already away".to_owned());
-                        self.report(index, &snapshot, &answers, Some(&act), repeated, Spent {
+                        self.report(index, &snapshot, &answers, Some(&act), Went { repeating: repeated, acted: false }, Spent {
                             read_ms,
                             step_ms: elapsed_ms(began),
                             waited_ms: waited.get(),
@@ -1395,7 +1408,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             previous.as_deref().unwrap_or("Acted")
                         ));
                         if ineffective >= Self::INEFFECTIVE_LIMIT {
-                            self.report(index, &snapshot, &answers, Some(&act), repeated, Spent {
+                            self.report(index, &snapshot, &answers, Some(&act), Went { repeating: repeated, acted: true }, Spent {
                                 read_ms,
                                 step_ms: elapsed_ms(began),
                                 waited_ms: waited.get(),
@@ -1412,7 +1425,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 }
                 Reached::Nothing => {}
                 Reached::Unreachable => {
-                    self.report(index, &snapshot, &answers, None, repeated, Spent {
+                    self.report(index, &snapshot, &answers, None, Went { repeating: repeated, acted: false }, Spent {
                     read_ms,
                     step_ms: elapsed_ms(began),
                     waited_ms: waited.get(),
@@ -1429,7 +1442,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // settled, so the step's own cost includes both. A step resolved
             // by an escalation is logged with what was actually sent to the
             // device rather than with the refusal that preceded it.
-            self.report(index, &snapshot, &answers, Some(&act), repeated, Spent {
+            self.report(index, &snapshot, &answers, Some(&act), Went { repeating: repeated, acted: true }, Spent {
                 read_ms,
                 step_ms: elapsed_ms(began),
                 waited_ms: waited.get(),
@@ -1549,6 +1562,15 @@ fn describe(
         state["fields"] = serde_json::Value::Object(fields);
     }
     state
+}
+
+/// How a step turned out, apart from what it chose.
+#[derive(Debug, Clone, Copy)]
+struct Went {
+    /// How many times in a row this had already been done.
+    repeating: Option<u32>,
+    /// Whether the action was carried out, or waited out instead.
+    acted: bool,
 }
 
 /// Where a step's time went.
