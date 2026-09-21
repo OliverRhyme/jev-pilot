@@ -81,6 +81,7 @@ impl Platform for Android {
             .map(|snapshot| snapshot.with_keyboard_open(shows_input_method(&document)))
             .map(|snapshot| snapshot.in_app(app_of(&document)))
             .map(|snapshot| snapshot.saying(notices_of(&document)))
+            .map(|snapshot| snapshot.offering_but_refusing(refused_by(&document)))
             .map_err(HierarchyError::from)
     }
 }
@@ -224,21 +225,11 @@ fn notices_of(document: &roxmltree::Document) -> Vec<Box<str>> {
         let Some(label) = label_of(&node) else {
             continue;
         };
-        // A control that is present but switched off is worth saying, and
-        // worth saying as switched off. Named bare it reads as a way forward
-        // that the catalog does not offer, and the run goes looking for a row
-        // that is not there instead of doing the thing that enables it.
-        //
-        // Marked plainly rather than described. A login form disables its own
-        // Log in button until a password is typed, and wording that reads as
-        // an obstruction turns that ordinary state into an error screen:
-        // measured, `is_error_screen` went from 0.03 to 0.59 on one, purely
-        // on how the disabled controls were worded.
-        let label = if is_switched_off(&node) {
-            format!("{label} (disabled)").into_boxed_str()
-        } else {
-            label
-        };
+        // A control that is switched off is reported apart, as an action that
+        // cannot be taken rather than as something the screen says.
+        if is_switched_off(&node) {
+            continue;
+        }
         // The same caption often appears on a node and on the wrapper drawn
         // around it. Said once is what a person reads.
         if !notices.contains(&label) {
@@ -259,6 +250,26 @@ fn is_switched_off(node: &roxmltree::Node) -> bool {
             || node
                 .attribute("class")
                 .is_some_and(|class| class.contains("Button")))
+}
+
+/// The controls a screen shows and will not let anything act on.
+///
+/// A greyed-out button keeps its class and its focusability and drops
+/// `clickable`, so it never reaches the catalog. Named here, a run can tell a
+/// screen with no way on from one whose way on is waiting for something.
+fn refused_by(document: &roxmltree::Document) -> Vec<Box<str>> {
+    let mut refused: Vec<Box<str>> = Vec::new();
+    for node in document.descendants() {
+        if refused.len() >= MAX_NOTICES || within_input_method(&node) || !is_switched_off(&node) {
+            continue;
+        }
+        if let Some(label) = label_of(&node)
+            && !refused.contains(&label)
+        {
+            refused.push(label);
+        }
+    }
+    refused
 }
 
 /// How many notices travel with a screen.

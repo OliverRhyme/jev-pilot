@@ -147,6 +147,7 @@ impl Desk {
                 "operations": impasse.operations.iter().map(|o| o.key()).collect::<Vec<_>>(),
                 "rows": impasse.rows,
                 "screen_says": impasse.says,
+                "unavailable": impasse.unavailable,
                 "keyboard_open": impasse.keyboard_open,
                 "fields": impasse.fields,
             }),
@@ -359,6 +360,14 @@ fn observe(named: Option<&str>) -> Result<(), Box<dyn core::error::Error>> {
         if screen.keyboard_open() { "up" } else { "down" }
     );
     println!("app     : {}", screen.app().unwrap_or("unknown"));
+
+    let refused: Vec<&str> = screen.unavailable().collect();
+    if !refused.is_empty() {
+        println!("\non screen but not available:");
+        for control in refused {
+            println!("  {control}");
+        }
+    }
 
     let says: Vec<&str> = screen.notices().collect();
     if !says.is_empty() {

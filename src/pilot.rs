@@ -69,6 +69,11 @@ pub struct Impasse<'i> {
     /// The rows it covers are absent rather than refused, so a screen with no
     /// apparent way on often has one behind the keyboard.
     pub keyboard_open: bool,
+    /// Controls the screen shows and will not let anything act on.
+    ///
+    /// A greyed-out commit button is absent from the rows rather than offered
+    /// and refused, so a screen waiting on one input looks like a dead end.
+    pub unavailable: &'i [&'i str],
     /// The fields that can be typed into, in the order they are numbered.
     ///
     /// Separate from the rows because typing is numbered separately: a form
@@ -731,6 +736,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             .map(|(_, element)| element.describe())
             .collect();
         let says: Vec<&str> = snapshot.notices().collect();
+        let unavailable: Vec<&str> = snapshot.unavailable().collect();
         let fields: Vec<String> = catalog.fields_offered().map(|(_, at)| at.to_owned()).collect();
 
         // Sorted so the thing it was nearly beaten by comes first: that is the
@@ -757,6 +763,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 keyboard_open: snapshot.keyboard_open(),
                 fields: &fields,
                 says: &says,
+                unavailable: &unavailable,
                 operations: catalog.operations(),
                 previous,
             })
@@ -855,6 +862,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             origin: origin.as_deref(),
                             keyboard_open: snapshot.keyboard_open(),
                             says: &snapshot.notices().collect::<Vec<_>>(),
+                            unavailable: &snapshot.unavailable().collect::<Vec<_>>(),
                             seen_before,
                             repeating: repeated,
                         },
@@ -1064,6 +1072,8 @@ struct Standing<'s> {
     keyboard_open: bool,
     /// What the screen says, beyond what it offers to act on.
     says: &'s [&'s str],
+    /// Controls the screen shows and will not let anything act on.
+    unavailable: &'s [&'s str],
     /// How many steps ago this screen was last judged, if it was.
     seen_before: Option<u32>,
     /// How many times in a row the same action has already been taken.
@@ -1081,6 +1091,7 @@ fn describe(
         origin,
         keyboard_open,
         says,
+        unavailable,
         seen_before,
         repeating,
     } = where_it_stands;
@@ -1122,6 +1133,13 @@ fn describe(
         // after two steps is a loop, and one returned to after ten is a form
         // that was worked through and come back to.
         state["seen_before"] = ago.into();
+    }
+    if !unavailable.is_empty() {
+        // Named apart from the rows and from the words. A greyed-out commit
+        // button is not something the screen says, it is the way on waiting
+        // for something — and a screen that appears to have no way on is one
+        // a run starts trying to leave.
+        state["unavailable"] = unavailable.into();
     }
     if !says.is_empty() {
         // Apart from the rows, and unkeyed: none of it can be chosen, and a

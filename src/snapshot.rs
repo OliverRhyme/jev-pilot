@@ -223,6 +223,7 @@ pub struct Snapshot {
     keyboard_open: bool,
     app: Option<Box<str>>,
     notices: Box<[Box<str>]>,
+    unavailable: Box<[Box<str>]>,
     elements: Box<[Element]>,
 }
 
@@ -244,6 +245,7 @@ impl Snapshot {
             keyboard_open: false,
             app: None,
             notices: Box::default(),
+            unavailable: Box::default(),
             elements: elements.into_boxed_slice(),
         })
     }
@@ -292,6 +294,27 @@ impl Snapshot {
         self.notices.iter().map(|notice| &**notice)
     }
 
+    /// Note the controls that are present but cannot be used.
+    #[must_use]
+    pub fn offering_but_refusing(mut self, controls: Vec<Box<str>>) -> Self {
+        self.unavailable = controls.into_boxed_slice();
+        self
+    }
+
+    /// Controls the screen shows and will not let anything act on.
+    ///
+    /// A greyed-out button keeps its place on screen and drops the flags that
+    /// would make it a row, so it is absent from the catalog rather than
+    /// offered and refused. That absence reads as a screen with no way on,
+    /// when in truth there is a way on and something has to happen first.
+    ///
+    /// Apart from [`Self::notices`] deliberately: this is a fact about what
+    /// can be done, not a line of prose, and among the screen's words the
+    /// only thing marking it out is how it happens to be phrased.
+    pub fn unavailable(&self) -> impl Iterator<Item = &str> {
+        self.unavailable.iter().map(|control| &**control)
+    }
+
     /// Which application this screen belongs to, when the reader could say.
     ///
     /// The identifier the platform uses — a package name on Android, a bundle
@@ -326,9 +349,15 @@ impl Snapshot {
         // pad is identical after every digit but for the count it reports, and
         // a run entering one is otherwise stopped by the guard against
         // repeating itself.
-        for notice in &self.notices {
-            notice.hash(&mut hasher);
-        }
+        //
+        // Hashed as slices, not as a run of strings: a slice writes its own
+        // length first, so a control moving between these two lists is a
+        // different screen. Fed in one after the other they are the same
+        // stream either way — and "Continue" moving from unavailable to
+        // available is exactly the change worth noticing, since it is the
+        // moment a form has a way on.
+        self.notices.hash(&mut hasher);
+        self.unavailable.hash(&mut hasher);
         for element in &self.elements {
             element.label.hash(&mut hasher);
             element.detail.hash(&mut hasher);

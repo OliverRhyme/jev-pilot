@@ -571,25 +571,40 @@ fn words_that_are_not_rows_still_make_a_screen_a_different_screen() {
     assert_ne!(four.fingerprint(), five.fingerprint());
 }
 
-/// A control that is on the screen but switched off is worth saying, and worth
-/// saying *as* switched off. Named bare, it reads as a way forward that the
-/// catalog then does not offer, and the run goes looking for a row that is not
-/// there instead of doing the thing that would enable it.
+/// A control that is present but switched off is a fact about what can be
+/// done, not a line of prose. Kept among the screen's words it sits beside
+/// captions and insurance notices, where the only thing distinguishing it is
+/// how it happens to be worded — and wording alone once moved a login screen
+/// from 0.03 to 0.59 on "is this an error screen?".
 ///
-/// Measured on a transfer form: `Continue` present as a disabled button, the
-/// only live row being the source-account picker that enables it.
+/// It belongs with the actions, named as one that is not available.
 #[test]
-fn a_control_that_is_switched_off_is_named_as_switched_off() {
+fn a_disabled_control_is_listed_apart_from_what_the_screen_says() {
     const FORM: &str = include_str!("fixtures/disabled-continue.xml");
 
     let screen = Android.parse_hierarchy(FORM).expect("a screen");
+    let unavailable: Vec<&str> = screen.unavailable().collect();
     let notices: Vec<&str> = screen.notices().collect();
 
+    assert_eq!(unavailable, ["Continue"]);
     assert!(
-        notices.contains(&"Continue (disabled)"),
-        "{notices:?}",
+        !notices.iter().any(|said| said.contains("Continue")),
+        "a disabled control is not one of the screen's words: {notices:?}",
     );
-    assert!(!notices.contains(&"Continue"), "{notices:?}");
-    // Plain captions are unchanged: they were never offers.
+    // Captions are unaffected: they were never actions.
     assert!(notices.contains(&"Step 1 of 3"), "{notices:?}");
+}
+
+/// A button becoming available is the most important change a form makes, and
+/// a run that cannot see it has happened will not go looking for the row.
+#[test]
+fn a_control_becoming_available_makes_it_a_different_screen() {
+    const FORM: &str = include_str!("fixtures/disabled-continue.xml");
+
+    let off = Android.parse_hierarchy(FORM).expect("a screen");
+    let on = Android
+        .parse_hierarchy(&FORM.replace(r#"enabled="false""#, r#"enabled="true""#))
+        .expect("a screen");
+
+    assert_ne!(off.fingerprint(), on.fingerprint());
 }

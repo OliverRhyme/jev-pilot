@@ -741,3 +741,43 @@ impl Device for Validating {
         Ok(())
     }
 }
+
+/// A form whose commit button is greyed out shows a screen with no way on.
+/// The button is absent from the rows rather than offered and refused, so
+/// without being told, the judge sees a dead end and starts looking for a way
+/// out of it — which is how a run walks off a form it had nearly finished.
+#[test]
+fn the_state_names_the_controls_the_screen_will_not_let_it_use() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![answer("done", None, 0.99, 0.97)]),
+    };
+    let mut pilot = Pilot::new(HalfFilled, judge, &Android);
+
+    pilot.pursue("finish the form").expect("the run completes");
+
+    let seen = seen.borrow();
+    assert_eq!(
+        seen[0]["unavailable"],
+        serde_json::json!(["Continue"]),
+        "{}",
+        seen[0],
+    );
+}
+
+/// A transfer form with its Continue greyed out until a source account is
+/// chosen.
+struct HalfFilled;
+
+impl Device for HalfFilled {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        Ok(Android
+            .parse_hierarchy(include_str!("fixtures/disabled-continue.xml"))
+            .expect("fixture parses"))
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        Ok(())
+    }
+}
