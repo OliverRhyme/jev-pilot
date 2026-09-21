@@ -169,3 +169,73 @@ fn finished_with(device: &str) -> Sessions {
     sessions.remember(device.to_owned(), std::env::temp_dir(), child);
     sessions
 }
+
+/// A run that stops to ask should hand the question back as the answer to the
+/// call, rather than leaving the caller to go looking for it. There is no way
+/// for a server to call into a client's model — sampling did that and is
+/// deprecated — so the next best thing is not to return until there is
+/// something to say.
+#[tokio::test]
+async fn a_call_waits_until_the_run_wants_something() {
+    use jev_pilot::mcp::{Waited, until_it_wants_something};
+
+    let desk = std::env::temp_dir().join("jev-pilot-test-waiting");
+    let _ = std::fs::remove_dir_all(&desk);
+    std::fs::create_dir_all(&desk).expect("a desk");
+
+    // Nothing yet, so it comes back having waited rather than hanging for ever.
+    assert!(matches!(
+        until_it_wants_something(&desk, std::time::Duration::from_millis(120)).await,
+        Waited::StillGoing,
+    ));
+
+    // The run asks, and the question is the answer to the call.
+    std::fs::write(desk.join("ask.json"), r#"{"kind":"which_action"}"#).expect("asked");
+    let Waited::Asking(question) = until_it_wants_something(&desk, std::time::Duration::from_secs(2)).await
+    else {
+        panic!("it should come back with the question");
+    };
+    assert!(question.contains("which_action"), "got {question}");
+}
+
+/// A run that has finished says so, rather than being waited on until the call
+/// gives up.
+#[tokio::test]
+async fn a_call_stops_waiting_once_the_run_is_over() {
+    use jev_pilot::mcp::{Waited, until_it_wants_something};
+
+    let desk = std::env::temp_dir().join("jev-pilot-test-over");
+    let _ = std::fs::remove_dir_all(&desk);
+    std::fs::create_dir_all(&desk).expect("a desk");
+    std::fs::write(
+        desk.join("run.log"),
+        "step 1  4 rows\n\nending : Finished(Achieved)\n",
+    )
+    .expect("a log");
+
+    let Waited::Ended(how) = until_it_wants_something(&desk, std::time::Duration::from_secs(2)).await
+    else {
+        panic!("it should come back saying it is over");
+    };
+    assert!(how.contains("Finished(Achieved)"), "got {how}");
+}
+
+/// Asking after a run that is over should say how it went. The steps alone
+/// cannot say it: the last one looks exactly like the last one of a run that
+/// is still going.
+#[test]
+fn a_status_says_how_a_finished_run_went() {
+    let desk = std::env::temp_dir().join("jev-pilot-test-status-over");
+    let _ = std::fs::remove_dir_all(&desk);
+    std::fs::create_dir_all(&desk).expect("a desk");
+    std::fs::write(desk.join("steps.jsonl"), "{\"step\":1}\n").expect("a step");
+    std::fs::write(
+        desk.join("run.log"),
+        "step 1  4 rows\n\nending : OutOfSteps { limit: 1 }\n",
+    )
+    .expect("a log");
+
+    let said = jev_pilot::mcp::status_of(&desk);
+    assert!(said.contains("OutOfSteps"), "got {said}");
+    assert!(said.contains("{\"step\":1}"), "the steps are still there: {said}");
+}

@@ -202,8 +202,8 @@ impl Pilot {
     #[tool(
         description = "Drive the device towards a goal, written in plain words. THIS ACTS ON \
                        A REAL DEVICE: it taps, types and navigates, and on an app that moves \
-                       money or sends messages it will do those things. Returns at once; \
-                       watch it with run_status and answer it with answer_run. One run per \
+                       money or sends messages it will do those things. Waits for the run to want \
+                       something and returns its question, or says it is still working. One run per \
                        device — a device already being driven is refused rather than driven \
                        twice. Call observe first: a goal written for a screen nobody looked \
                        at is where most bad runs begin.",
@@ -219,32 +219,44 @@ impl Pilot {
         Parameters(args): Parameters<StartArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let arguments = to_value(&args);
-        let Some(mut line) = invocation("start_run", &arguments) else {
+        let Some(line) = invocation("start_run", &arguments) else {
             return Ok(refused("a run needs a goal"));
         };
 
-        let device = args.device.clone();
+        let (name, desk) = match self.launch(line, args.device.as_deref()) {
+            Ok(run) => run,
+            Err(said) => return Ok(said),
+        };
+        Ok(waited(&name, until_it_wants_something(&desk, patience()).await))
+    }
+
+    /// Start a run and remember it, or say why not.
+    ///
+    /// Apart from the tool it serves so that the lock on the sessions is taken
+    /// and given back here, with no waiting in between: a guard held across a
+    /// wait would keep every other call out for as long as this one waits.
+    fn launch(&self, mut line: Vec<String>, device: Option<&str>) -> Result<(String, std::path::PathBuf), CallToolResult> {
         let Ok(mut sessions) = self.sessions.lock() else {
-            return Ok(refused(&poisoned()));
+            return Err(refused(&poisoned()));
         };
         let busy = sessions.still_running();
         if let Some(already) = busy
             .iter()
-            .find(|running| device.as_deref().is_none_or(|asked| *running == asked))
+            .find(|running| device.is_none_or(|asked| *running == asked))
         {
-            return Ok(refused(&format!(
+            return Err(refused(&format!(
                 "{already} is already being driven. Watch it with run_status, answer it with \
                  answer_run, or end it with stop_run."
             )));
         }
 
-        let name = device.clone().unwrap_or_else(|| "the attached device".to_owned());
+        let name = device.map_or_else(|| "the attached device".to_owned(), ToOwned::to_owned);
         let desk = std::env::temp_dir().join(format!(
             "jev-pilot-mcp-{}",
             name.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
         ));
         if let Err(error) = std::fs::create_dir_all(&desk) {
-            return Ok(refused(&format!("could not make a desk for {name}: {error}")));
+            return Err(refused(&format!("could not make a desk for {name}: {error}")));
         }
         // The goal is the one positional and must stay last.
         let goal = line.pop().unwrap_or_default();
@@ -252,25 +264,26 @@ impl Pilot {
         line.push(desk.display().to_string());
         line.push(goal);
 
+        // Kept, because it is where the run says what it is doing and how it
+        // ended. Thrown away, a finished run could not say how it went.
+        let log = std::fs::File::create(desk.join("run.log"))
+            .and_then(|log| log.try_clone().map(|complaints| (log, complaints)));
+        let Ok((log, complaints)) = log else {
+            return Err(refused(&format!("could not keep a log for {name}")));
+        };
+
         match std::process::Command::new(binary())
             .args(&line)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log))
+            .stderr(std::process::Stdio::from(complaints))
             .spawn()
         {
             Ok(child) => {
-                sessions.remember(name.clone(), desk, child);
-                Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                    "a run is under way on {name}. It acts on the device from here.\n\n\
-                     It will stop and ask when it cannot decide. Nothing will call you: \
-                     check on it with run_status, and when it is waiting, reply with \
-                     answer_run. That is you being the second opinion, so look at what it \
-                     is asking rather than guessing — an operation it did not offer, or a \
-                     row it does not have, is refused and asked again."
-                ))]))
+                sessions.remember(name.clone(), desk.clone(), child);
+                Ok((name, desk))
             }
-            Err(error) => Ok(refused(&format!("could not start jev-pilot: {error}"))),
+            Err(error) => Err(refused(&format!("could not start jev-pilot: {error}"))),
         }
     }
 
@@ -300,7 +313,7 @@ impl Pilot {
         description = "Answer a run that stopped to ask. Name an operation it was offered, the \
                        row or field it applies to, or the words to type. This is how the \
                        caller becomes the second opinion a run escalates to, so it acts on \
-                       the device.",
+                       the device. Waits for the next question the way start_run does.",
         annotations(
             title = "Answer a run",
             read_only_hint = false,
@@ -318,17 +331,30 @@ impl Pilot {
                 "an answer needs an operation, a target or some text; this one said nothing",
             ));
         };
+        let desk = match self.accept(&run, &answer) {
+            Ok(desk) => desk,
+            Err(said) => return Ok(said),
+        };
+        // Waited on for the same reason as starting one: the next question
+        // arrives as the result of the answer that led to it.
+        Ok(waited(&run, until_it_wants_something(&desk, patience()).await))
+    }
+
+    /// Put an answer on a run's desk, and say which desk it went to.
+    ///
+    /// Separate from the tool for the same reason as `launch`: the lock is
+    /// given back before anything waits.
+    fn accept(&self, run: &str, answer: &serde_json::Value) -> Result<std::path::PathBuf, CallToolResult> {
         let Ok(sessions) = self.sessions.lock() else {
-            return Ok(refused(&poisoned()));
+            return Err(refused(&poisoned()));
         };
-        let Some(desk) = sessions.desk_of(&run) else {
-            return Ok(refused(&format!("no run on {run}")));
+        let Some(desk) = sessions.desk_of(run) else {
+            return Err(refused(&format!("no run on {run}")));
         };
+        let desk = desk.to_path_buf();
         match std::fs::write(desk.join("answer.json"), answer.to_string()) {
-            Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "answered the run on {run} with {answer}"
-            ))])),
-            Err(error) => Ok(refused(&format!("could not answer {run}: {error}"))),
+            Ok(()) => Ok(desk),
+            Err(error) => Err(refused(&format!("could not answer {run}: {error}"))),
         }
     }
 
@@ -412,19 +438,105 @@ floor whatever you pass, because a run that gives up on a guess has answered \
 wrongly rather than cheaply. Around 0.35 to 0.4 keeps most runs moving; the \
 default of 0.6 asks often.
 
-WHEN IT ASKS. A run that cannot decide stops and waits. Nothing will call you \
-about it: check with `run_status`, which says whether it is waiting and what \
-it wants. Then answer with `answer_run`, naming an operation it listed and a \
-row it showed you — an operation it did not offer, or a row it does not have, \
-is refused and you are asked again. You are the second opinion here, so read \
-what it is asking rather than guessing; it stopped precisely because the \
-obvious answer was not obvious.
+WHEN IT ASKS. A run that cannot decide stops and waits, and the question comes \
+back as the result of the call that caused it: `start_run` and `answer_run` \
+both hold on until the run wants something, is over, or has been working \
+quietly for a while. So a question is not something to go and look for — it is \
+handed to you, and you answer it with `answer_run`, naming an operation it \
+listed and a row it showed you. An operation it did not offer, or a row it \
+does not have, is refused and you are asked again. You are the second opinion \
+here, so read what it is asking rather than guessing; it stopped precisely \
+because the obvious answer was not obvious.
 
-A run left unanswered waits five minutes and then gives up, so `start_run` \
-and walking away is how a good run becomes a dead one. Check on it.
+If a call comes back saying the run is still working, it has only handed your \
+time back — the run is untouched. Call `run_status` to see where it has got \
+to, or `answer_run` when it next asks. A run left unanswered waits five \
+minutes and then gives up, so a run nobody comes back to is a run that dies \
+of it.
 
 ONE RUN PER DEVICE. A second run on the same phone would take turns at the \
 same screen with the first. Stop or finish the one that is there.";
+
+/// Say what came of waiting, in a way the caller can act on.
+fn waited(run: &str, how: Waited) -> CallToolResult {
+    let said = match how {
+        Waited::Asking(question) => format!(
+            "the run on {run} cannot decide, and is waiting for you.\n\n{question}\n\n\
+             You are the second opinion. Answer with answer_run, naming an operation it \
+             listed and a row it showed you — an operation it did not offer, or a row it \
+             does not have, is refused and you are asked again. It waits five minutes."
+        ),
+        Waited::Ended(how) => format!("the run on {run} is over.\n\n{how}"),
+        Waited::StillGoing => format!(
+            "the run on {run} is working and has not asked for anything. Call run_status \
+             to see where it has got to, or answer_run when it wants something."
+        ),
+    };
+    CallToolResult::success(vec![ContentBlock::text(said)])
+}
+
+/// How long a call will wait before handing the caller its time back.
+///
+/// Shorter than a client's own timeout, and shorter than the five minutes a
+/// run waits at an impasse, so a caller that keeps waiting is never the reason
+/// a run gives up.
+fn patience() -> std::time::Duration {
+    std::time::Duration::from_secs(45)
+}
+
+/// What came of waiting on a run.
+#[derive(Debug)]
+pub enum Waited {
+    /// It stopped to ask, and this is what it wants.
+    Asking(String),
+    /// It is over, and this is how it went.
+    Ended(String),
+    /// Neither yet. The caller was given its time back rather than held.
+    StillGoing,
+}
+
+/// Wait until a run wants something, is over, or has had long enough.
+///
+/// There is no way for a server to call into a client's model — sampling did
+/// that and is deprecated — so the next best thing is not to answer the call
+/// until there is something worth saying. A question then arrives as the
+/// result of the call that caused it, and the model that asked reads it in
+/// the ordinary way.
+///
+/// Bounded, because a client is waiting on this: a run that is simply working
+/// gets a "still going" and the caller decides whether to wait again. Holding
+/// the call open until the run finished would trip a client's own timeout and
+/// lose the run behind it.
+pub async fn until_it_wants_something(desk: &std::path::Path, patience: std::time::Duration) -> Waited {
+    let deadline = std::time::Instant::now() + patience;
+    loop {
+        // `ask.json` is written when a run stops to ask and taken away once it
+        // has been answered, so its being there is the question.
+        if let Ok(question) = std::fs::read_to_string(desk.join("ask.json")) {
+            return Waited::Asking(question);
+        }
+        if let Some(how) = ended(desk) {
+            return Waited::Ended(how);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Waited::StillGoing;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(LOOKED_AT_EVERY_MS)).await;
+    }
+}
+
+/// How a run ended, if it has.
+///
+/// Read from what the run itself printed. The line is the last thing it says
+/// and the only place the ending is written down.
+fn ended(desk: &std::path::Path) -> Option<String> {
+    let said = std::fs::read_to_string(desk.join("run.log")).ok()?;
+    let from = said.find("\nending : ")?;
+    Some(said[from..].trim().to_owned())
+}
+
+/// How often a waited-on run is looked at.
+const LOOKED_AT_EVERY_MS: u64 = 150;
 
 /// Turn a typed argument struct back into the JSON the pure helpers read.
 ///
@@ -581,7 +693,8 @@ fn run_pilot(args: &[String]) -> std::io::Result<String> {
 }
 
 /// How a run is getting on, as far as its desk can say.
-fn status_of(desk: &std::path::Path) -> String {
+#[must_use]
+pub fn status_of(desk: &std::path::Path) -> String {
     let mut said = String::new();
     match std::fs::read_to_string(desk.join("steps.jsonl")) {
         Ok(steps) if !steps.trim().is_empty() => {
@@ -595,8 +708,12 @@ fn status_of(desk: &std::path::Path) -> String {
     if let Ok(asking) = std::fs::read_to_string(desk.join("ask.json")) {
         said.push_str("\nit is waiting for an answer:\n");
         said.push_str(&asking);
+    } else if let Some(how) = ended(desk) {
+        said.push_str("\nit is over:\n");
+        said.push_str(&how);
+        said.push('\n');
     } else {
-        said.push_str("\nit is not waiting for anything\n");
+        said.push_str("\nit is working, and not waiting for anything\n");
     }
     said
 }

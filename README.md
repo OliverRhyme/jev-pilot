@@ -137,14 +137,28 @@ an `accept` claim checkable, how `text` keys are matched, what lowering the
 floor does and does not loosen. Every one of those rules is one that has cost a
 real run, so they are worth the words.
 
-A run is not one call that blocks until it is over:
+A run is four calls rather than one that blocks until it is over:
 
 | | |
 | --- | --- |
-| `start_run` | begin |
-| `run_status` | every step so far, and what it is asking if it is asking |
-| `answer_run` | answer it — an operation and row it was offered, or the words to type |
+| `start_run` | begin, and come back with the first thing it wants |
+| `run_status` | every step so far, what it is asking, or how it ended |
+| `answer_run` | answer it — an operation and row it was offered, or the words to type — and come back with the next thing it wants |
 | `stop_run` | end it, leaving the device where it got to |
+
+`start_run` and `answer_run` do not return the instant the run is under way.
+They wait, and come back with one of three things: the question the run stopped
+on, how it ended, or — after about forty-five seconds — that it is still
+working and the caller's time is its own again. That last one is why the wait is
+bounded: held open until a run finished, the call would trip a client's own
+timeout and lose the run behind it.
+
+Waiting is what makes the question reach a model at all. A run that asks and is
+never answered waits five minutes and then gives up, so a design where the
+caller has to think to come back and look is a design where good runs die of
+inattention. Returning the question *as the result of the call that caused it*
+puts it in front of the model in the ordinary way, with no callback and no
+protocol feature behind it — the client is already waiting for a tool result.
 
 A run is named by the device it drives, so there is no run id to carry: with one
 phone attached, none of these needs an argument at all. That is not only
@@ -157,9 +171,9 @@ Runs end when the conversation does. Left going, one carries on tapping at
 somebody's phone with nothing watching it and nothing able to answer it.
 
 **When a run cannot decide, the client answers it** — on its own turn, through
-`run_status` and `answer_run`. The model holding the conversation *is* the
-second opinion, and its answer is still an index into the catalog the run
-offered, never an action it invented.
+the result of the call it is already waiting on. The model holding the
+conversation *is* the second opinion, and its answer is still an index into the
+catalog the run offered, never an action it invented.
 
 There is a way for a server to call back into the client's model instead —
 `sampling/createMessage` — and this does not use it. [SEP-2577] deprecates
