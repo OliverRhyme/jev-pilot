@@ -781,3 +781,57 @@ impl Device for HalfFilled {
         Ok(())
     }
 }
+
+/// A PIN is entered one key at a time from a pad of identical-looking rows,
+/// and knowing which key comes next means knowing how many have gone in. With
+/// one step of memory that position has to be re-derived from scratch every
+/// step, and the derivation gets longer as the sequence goes on.
+///
+/// Measured entering a six-digit PIN: the operation stayed at 0.92-0.98 — it
+/// always knew to tap — while the row fell 0.95, 0.75, 0.70, 0.55, 0.31,
+/// 0.14, until the run stopped to ask which key. It was never unsure whether
+/// to tap; it was unsure which digit it was on.
+#[test]
+fn a_step_is_told_the_run_of_recent_actions_not_only_the_last() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("tap", Some("A1"), 0.99, 0.02),
+            answer("tap", Some("A2"), 0.99, 0.02),
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    let mut pilot = Pilot::new(Keypad::default(), judge, &Android);
+
+    pilot.pursue("enter the code").expect("the run completes");
+
+    let seen = seen.borrow();
+    assert!(seen[0].get("recent_actions").is_none(), "{}", seen[0]);
+    assert_eq!(
+        seen[3]["recent_actions"],
+        serde_json::json!(["Tapped one", "Tapped two", "Tapped three"]),
+        "oldest first, so the sequence reads as one: {}",
+        seen[3],
+    );
+}
+
+/// Three keys whose labels never change, and a counter that does — as a PIN
+/// pad reporting how many digits are in.
+#[derive(Default)]
+struct Keypad {
+    pressed: usize,
+}
+
+impl Device for Keypad {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        let counted = format!("{} of 3 entered", self.pressed);
+        Ok(screen_of(&["one", "two", "three", &counted]))
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        self.pressed += 1;
+        Ok(())
+    }
+}

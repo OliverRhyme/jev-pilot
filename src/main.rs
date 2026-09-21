@@ -144,6 +144,7 @@ impl Desk {
                 "torn_among": impasse.alternatives.iter().take(5)
                     .map(|(n, p)| serde_json::json!([n, p])).collect::<Vec<_>>(),
                 "previous_action": impasse.previous,
+                "recent_actions": impasse.lately,
                 "operations": impasse.operations.iter().map(|o| o.key()).collect::<Vec<_>>(),
                 "rows": impasse.rows,
                 "screen_says": impasse.says,
@@ -564,6 +565,8 @@ fn transcribe(to: &std::path::Path, step: &jev_pilot::pilot::StepReport<'_>) {
         "app": step.app,
         "rows": step.rows,
         "screen_says": step.says,
+        "unavailable": step.unavailable,
+        "repeating": step.repeating,
         "chosen": step.chosen.map(|act| format!("{act:?}")),
         "operation_confidence": step.operation_confidence.get(),
         "target_confidence": step.target_confidence.map(jev_pilot::judgment::Confidence::get),

@@ -92,6 +92,11 @@ pub struct Impasse<'i> {
     pub operations: &'i [Operation],
     /// What the previous step did, if there was one.
     pub previous: Option<&'i str>,
+    /// What the run has done lately, oldest first.
+    ///
+    /// A person asked which key comes next needs the run of keys already
+    /// pressed, not just the last of them.
+    pub lately: &'i [&'i str],
 }
 
 /// What a second opinion decided.
@@ -296,6 +301,13 @@ pub struct StepReport<'s> {
     pub rows: Vec<String>,
     /// What the screen said, beyond what it offered to act on.
     pub says: Vec<String>,
+    /// Controls the screen showed and would not let anything act on.
+    pub unavailable: Vec<String>,
+    /// How many times in a row the same action had already been taken.
+    ///
+    /// Recorded so the transcript says what the judge was told, rather than
+    /// leaving it to be inferred from the run of identical actions above it.
+    pub repeating: Option<u32>,
     /// Which application the screen belonged to, when the reader could say.
     ///
     /// Carried so a run can be explained afterwards. An ending of "blocked"
@@ -346,6 +358,7 @@ const fn taken_at<'s>(
     catalog: &'s Catalog,
     answers: &'s StepAnswers,
     previous: Option<&'s str>,
+    lately: &'s [&'s str],
 ) -> Taken<'s> {
     Taken {
         goal,
@@ -354,6 +367,7 @@ const fn taken_at<'s>(
         catalog,
         answers,
         previous,
+        lately,
     }
 }
 
@@ -365,6 +379,7 @@ struct Taken<'s> {
     catalog: &'s Catalog,
     answers: &'s StepAnswers,
     previous: Option<&'s str>,
+    lately: &'s [&'s str],
 }
 
 /// Drives one device towards a goal.
@@ -642,6 +657,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         snapshot: &Snapshot,
         answers: &StepAnswers,
         chosen: Option<&Act>,
+        repeating: Option<u32>,
     ) {
         let Some(observer) = self.observer.as_mut() else {
             return;
@@ -653,6 +669,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 .map(|(_, element)| element.describe())
                 .collect(),
             says: snapshot.notices().map(ToOwned::to_owned).collect(),
+            unavailable: snapshot.unavailable().map(ToOwned::to_owned).collect(),
+            repeating,
             app: snapshot.app(),
             chosen,
             operation_confidence: answers.operation.confidence,
@@ -731,6 +749,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             at.answers,
             at.previous,
         );
+        let lately = at.lately;
         let rows: Vec<String> = snapshot
             .refs()
             .map(|(_, element)| element.describe())
@@ -766,6 +785,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 unavailable: &unavailable,
                 operations: catalog.operations(),
                 previous,
+                lately,
             })
             .map_err(RunError::Escalation)?;
 
@@ -786,6 +806,15 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     #[allow(clippy::too_many_lines)]
     pub fn pursue(&mut self, goal: &str) -> RunResult<D, J, X, C> {
         let mut previous: Option<String> = None;
+        // What the run has done lately, oldest first. One step of memory is
+        // enough to tell an action that worked from one that did not; it is
+        // not enough to place yourself in a sequence. Entering a PIN on a pad
+        // of identical keys, the position has to be re-derived every step
+        // from the count the screen reports, and the derivation gets longer
+        // as the sequence goes on — measured, the row confidence fell from
+        // 0.95 to 0.14 across six digits while the operation stayed above
+        // 0.92 throughout.
+        let mut lately: Vec<String> = Vec::new();
         // How many actions in a row have left the screen exactly as it was.
         let mut ineffective: u32 = 0;
         // The app the goal is about: whichever one was in front when the run
@@ -848,6 +877,11 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // Said once it has actually happened twice: doing a thing once is
             // not repeating oneself, and a warning on every step is noise.
             let repeated = (repeating >= 2).then_some(repeating);
+            // Copied rather than borrowed: this step's own action joins the
+            // history below, and what was shown to the judge is what the
+            // escalation and the report must show too.
+            let so_far = lately.clone();
+            let recent: Vec<&str> = so_far.iter().map(String::as_str).collect();
             let questions = StepQuestions::checked(goal, &catalog, &self.criteria);
 
             let answers = self
@@ -865,6 +899,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             unavailable: &snapshot.unavailable().collect::<Vec<_>>(),
                             seen_before,
                             repeating: repeated,
+                            lately: &recent,
                         },
                     ),
                     &questions,
@@ -874,7 +909,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             let decided = catalog.resolve(&answers, &self.floors);
 
             if answers.is_error_screen.noul > self.certainty {
-                self.report(index, &snapshot, &answers, None);
+                self.report(index, &snapshot, &answers, None, repeated);
                 return Ok(Ending::ErrorScreen);
             }
             // A screen with nothing on it is not evidence. Mid-transition the
@@ -897,7 +932,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 continue;
             }
             if !blind && reached == Progress::Achieved {
-                self.report(index, &snapshot, &answers, None);
+                self.report(index, &snapshot, &answers, None, repeated);
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
             // An acceptance criterion is the caller's own definition of done,
@@ -919,7 +954,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 && !self.criteria.is_empty()
                 && answers.unmet(&self.criteria, self.certainty).is_none()
             {
-                self.report(index, &snapshot, &answers, None);
+                self.report(index, &snapshot, &answers, None, repeated);
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
 
@@ -933,11 +968,12 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                         catalog: &catalog,
                         answers: &answers,
                         previous: previous.as_deref(),
+                        lately: &recent,
                     };
                     if let Some(decision) = self.consult(&taken, &because)? {
                         decision
                     } else {
-                        self.report(index, &snapshot, &answers, None);
+                        self.report(index, &snapshot, &answers, None, repeated);
                         return Ok(Ending::Uncertain { because });
                     }
                 }
@@ -972,7 +1008,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // Reported once the act is settled, so a step resolved by an
             // escalation is logged with what was actually sent to the device
             // rather than with the refusal that preceded it.
-            self.report(index, &snapshot, &answers, Some(&act));
+            self.report(index, &snapshot, &answers, Some(&act), repeated);
 
             // A verdict ends the run. It resolves to no command, so without
             // this the loop carries on driving a screen it has just declared
@@ -994,6 +1030,10 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             } else {
                 1
             };
+            lately.push(did.clone());
+            if lately.len() > Self::MEMORY {
+                lately.remove(0);
+            }
             previous = Some(did);
             let resolved = self.reach(
                 &act,
@@ -1004,6 +1044,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     &catalog,
                     &answers,
                     previous.as_deref(),
+                    &recent,
                 ),
             )?;
             match resolved {
@@ -1040,7 +1081,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 }
                 Reached::Nothing => {}
                 Reached::Unreachable => {
-                    self.report(index, &snapshot, &answers, None);
+                    self.report(index, &snapshot, &answers, None, repeated);
                     return Ok(Ending::Uncertain {
                         because: Indecision::Covered,
                     });
@@ -1078,6 +1119,8 @@ struct Standing<'s> {
     seen_before: Option<u32>,
     /// How many times in a row the same action has already been taken.
     repeating: Option<u32>,
+    /// What the run has done lately, oldest first.
+    lately: &'s [&'s str],
 }
 
 fn describe(
@@ -1094,6 +1137,7 @@ fn describe(
         unavailable,
         seen_before,
         repeating,
+        lately,
     } = where_it_stands;
     // Rows are keyed the way the Choice offers them, so its options can be
     // bare keys and the text travels once rather than twice.
@@ -1120,6 +1164,11 @@ fn describe(
         if origin.is_some_and(|origin| origin != app) {
             state["started_in"] = origin.into();
         }
+    }
+    if !lately.is_empty() {
+        // Oldest first, so the run of them reads as a sequence rather than
+        // needing to be reversed to be understood.
+        state["recent_actions"] = lately.into();
     }
     if let Some(times) = repeating {
         // Said before the action is chosen, so the choice can be a different
