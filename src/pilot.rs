@@ -69,6 +69,13 @@ pub struct Impasse<'i> {
     /// The rows it covers are absent rather than refused, so a screen with no
     /// apparent way on often has one behind the keyboard.
     pub keyboard_open: bool,
+    /// The fields that can be typed into, in the order they are numbered.
+    ///
+    /// Separate from the rows because typing is numbered separately: a form
+    /// of three editable rows among five offers fields 0, 1 and 2, and
+    /// answering with a row's number types into the wrong one, or into
+    /// nothing.
+    pub fields: &'i [String],
     /// What the screen says, beyond what it offers to act on.
     ///
     /// A person deciding an impasse should not be shown less than the model
@@ -724,6 +731,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             .map(|(_, element)| element.describe())
             .collect();
         let says: Vec<&str> = snapshot.notices().collect();
+        let fields: Vec<String> = catalog.fields_offered().map(|(_, at)| at.to_owned()).collect();
 
         // Sorted so the thing it was nearly beaten by comes first: that is the
         // decision actually being asked about.
@@ -747,6 +755,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 alternatives: &alternatives,
                 rows: &rows,
                 keyboard_open: snapshot.keyboard_open(),
+                fields: &fields,
                 says: &says,
                 operations: catalog.operations(),
                 previous,

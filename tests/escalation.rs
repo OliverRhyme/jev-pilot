@@ -342,3 +342,43 @@ impl Device for PinPad {
         Ok(())
     }
 }
+
+/// An impasse offers `type <n>`, and `n` counts the fields, not the rows. The
+/// rows were listed and the fields were not, so there was nothing to count:
+/// on a form of three editable rows among five, the number to give was
+/// knowable only by working out which rows the catalog considered typeable.
+#[test]
+fn an_impasse_lists_the_fields_it_invites_a_number_for() {
+    let said = RefCell::new(Vec::new());
+    let mut pilot = Pilot::new(Typing, Scripted(RefCell::new(vec![unsure(); 30])), &Android)
+        .writing_with(|_: &jev_pilot::pilot::Writing<'_>| -> Result<Box<str>, Infallible> {
+            Ok("unused".into())
+        })
+        .requiring(floor())
+        .escalating_to(|impasse: &Impasse<'_>| -> Result<Resolution, Infallible> {
+            said.borrow_mut()
+                .extend(impasse.fields.iter().map(|f| (*f).to_owned()));
+            Ok(Resolution::Stop)
+        });
+
+    let _ = pilot.pursue("fill the form in");
+
+    let said = said.borrow();
+    assert_eq!(said.len(), 1, "one editable row means one field: {said:?}");
+    assert!(said[0].contains("Number to be loaded"), "{said:?}");
+}
+
+/// A form with one field among several rows.
+struct Typing;
+
+impl Device for Typing {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        Ok(Android
+            .parse_hierarchy(include_str!("fixtures/flutter-form.xml"))
+            .expect("fixture parses"))
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        Ok(())
+    }
+}

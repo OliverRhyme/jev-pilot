@@ -165,6 +165,7 @@ impl Desk {
                 "rows": impasse.rows,
                 "screen_says": impasse.says,
                 "keyboard_open": impasse.keyboard_open,
+                "fields": impasse.fields,
             }),
             &describe(impasse),
         )?;
@@ -524,6 +525,12 @@ fn describe(impasse: &Impasse<'_>) -> String {
     }
     for (index, row) in impasse.rows.iter().enumerate() {
         let _ = writeln!(out, "     [{index}] {row}");
+    }
+    // Numbered separately from the rows, because typing is: on a form of
+    // three editable rows among five, answering `type` with a row's number
+    // types into the wrong field, or into nothing.
+    for (index, field) in impasse.fields.iter().enumerate() {
+        let _ = writeln!(out, "     type {index} -> {field}");
     }
     let _ = write!(
         out,
