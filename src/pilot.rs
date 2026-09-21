@@ -646,6 +646,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// device is reporting silence, not a caller hoping for it.
     pub const QUIET_ENOUGH_MS: u64 = 120;
 
+    /// How many answers an impasse will hear before giving up on it.
+    ///
+    /// More than one, because an answer naming something the screen does not
+    /// offer is a misunderstanding rather than a decision; bounded, because
+    /// an answerer that keeps naming nothing is not going to start.
+    pub const ANSWERS_HEARD: u32 = 3;
+
     /// How many times a run may be on one screen before it is going in
     /// circles.
     ///
@@ -849,6 +856,15 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         at: &Taken<'_>,
         because: &Indecision,
     ) -> Result<Option<Decision>, Failure<D, J, X, C>> {
+        self.consult_once(at, because, 0)
+    }
+
+    fn consult_once(
+        &mut self,
+        at: &Taken<'_>,
+        because: &Indecision,
+        asked: u32,
+    ) -> Result<Option<Decision>, Failure<D, J, X, C>> {
         let (goal, step, snapshot, catalog, answers, previous) = (
             at.goal,
             at.step,
@@ -899,7 +915,26 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
 
         Ok(match resolution {
             Resolution::Stop => None,
-            Resolution::Choose { operation, target } => catalog.act_from(operation, target).ok(),
+            Resolution::Choose { operation, target } => {
+                match catalog.act_from(operation, target) {
+                    Ok(decision) => Some(decision),
+                    // Named something this screen does not offer. That is a
+                    // misunderstanding about what is on screen, not a
+                    // decision to stop — and whoever guessed is still there,
+                    // able to guess again now that the answer has been
+                    // refused. Measured: a login screen answered with "type
+                    // into the password field" at the moment the app had
+                    // swapped that field for "Logging in…", which ended a run
+                    // one step in.
+                    // Asked again with the refusal as the reason, so whoever
+                    // answers is told what was wrong with the last one rather
+                    // than the question they already answered.
+                    Err(refused) if asked < Self::ANSWERS_HEARD => {
+                        return self.consult_once(at, &refused, asked + 1);
+                    }
+                    Err(_) => None,
+                }
+            }
         })
     }
 

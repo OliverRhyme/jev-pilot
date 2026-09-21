@@ -382,3 +382,38 @@ impl Device for Typing {
         Ok(())
     }
 }
+
+/// An answer that names something this screen does not offer is a
+/// misunderstanding, not a decision to stop. Ending the run on it throws away
+/// the work done so far over a wrong guess about what was on screen — and the
+/// person who guessed is right there, able to guess again.
+///
+/// Measured: a login screen answered with "type into the password field" at
+/// the moment the app had swapped that field for "Logging in…", which ended
+/// a run one step in.
+#[test]
+fn an_answer_that_cannot_be_carried_out_is_asked_again() {
+    let asked = std::cell::Cell::new(0_u32);
+    let mut pilot = Pilot::new(Fake::default(), Scripted(RefCell::new(vec![unsure(); 30])), &Android)
+        .requiring(floor())
+        .escalating_to(|_: &Impasse<'_>| -> Result<Resolution, Infallible> {
+            asked.set(asked.get() + 1);
+            Ok(if asked.get() == 1 {
+                // A row this screen does not have.
+                Resolution::Choose {
+                    operation: Operation::Tap,
+                    target: Some(9_999),
+                }
+            } else {
+                Resolution::Stop
+            })
+        });
+
+    let _ = pilot.pursue("Silence notifications");
+
+    assert_eq!(
+        asked.get(),
+        2,
+        "the first answer could not be carried out, so it asked once more",
+    );
+}
