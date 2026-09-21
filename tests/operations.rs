@@ -1,6 +1,6 @@
 //! The two-dimensional action space: what to do, and what to do it to.
 
-use jev_pilot::act::{Act, Catalog, Decision, Direction, Floors, Operation, Outcome};
+use jev_pilot::act::{Act, Catalog, Decision, Direction, Floors, Indecision, Operation, Outcome};
 use jev_pilot::device::{Command, command_for};
 use jev_pilot::judgment::Confidence;
 use jev_pilot::platform::{Android, Ios, Platform};
@@ -273,4 +273,74 @@ fn going_back_is_not_offered_twice_under_two_names() {
     let settled = Android.parse_hierarchy(SETTINGS).expect("fixture parses");
     let clear = Catalog::for_screen(&settled, &Android);
     assert!(clear.operations().contains(&Operation::Back));
+}
+
+/// A screen that offers the same thing twice splits the model's probability
+/// mass across both, and the split reads as uncertainty about what to act on.
+/// It is not: it is certainty about what to do, divided by an accident of how
+/// the screen names its controls.
+///
+/// Measured on a dialog offering `Close` and `CLOSE`: tap at 0.94, row at
+/// 0.34, and the run stopped to ask which of two identical buttons to press.
+#[test]
+fn mass_split_across_rows_of_the_same_name_is_not_uncertainty() {
+    use jev_pilot::snapshot::{Bounds, Element, Snapshot};
+
+    let row = |label: &str, top| Element {
+        label: label.into(),
+        detail: None,
+        editable: false,
+        bounds: Bounds::from_origin_size(0, top, 400, 80),
+    };
+    let snapshot = Snapshot::new(vec![
+        row("Keep editing", 0),
+        row("Close", 100),
+        row("CLOSE", 200),
+    ])
+    .expect("a screen");
+    let catalog = Catalog::for_screen(&snapshot, &Android);
+
+    let decided = catalog.resolve(
+        &answers(serde_json::json!({
+            "operation": { "type": "choice", "choice": "tap", "confidence": 0.94 },
+            "tap_target": {
+                "type": "choice", "choice": "A2", "confidence": 0.34,
+                "probabilities": { "A1": 0.32, "A2": 0.34, "A3": 0.34 }
+            },
+            "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+            "is_error_screen": { "type": "noul", "noul": 0.01 },
+        })),
+        &Floors::new(Confidence::new(0.6).expect("a floor")),
+    );
+
+    let Ok(Decision::Ready(act)) = decided else {
+        panic!("the two Closes are one choice worth 0.68: {decided:?}");
+    };
+    assert!(matches!(act, Act::Tap(_)), "got {act:?}");
+}
+
+/// Rows that merely both look plausible are still a split. Only rows that
+/// name the same thing are the same choice.
+#[test]
+fn mass_split_across_rows_of_different_names_stays_uncertainty() {
+    let snapshot = Android.parse_hierarchy(SETTINGS).expect("fixture parses");
+    let catalog = Catalog::for_screen(&snapshot, &Android);
+
+    let decided = catalog.resolve(
+        &answers(serde_json::json!({
+            "operation": { "type": "choice", "choice": "tap", "confidence": 0.94 },
+            "tap_target": {
+                "type": "choice", "choice": "A2", "confidence": 0.34,
+                "probabilities": { "A1": 0.32, "A2": 0.34, "A3": 0.34 }
+            },
+            "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+            "is_error_screen": { "type": "noul", "noul": 0.01 },
+        })),
+        &Floors::new(Confidence::new(0.6).expect("a floor")),
+    );
+
+    assert!(
+        matches!(decided, Err(Indecision::TooUncertain { .. })),
+        "three different rows are three choices: {decided:?}",
+    );
 }

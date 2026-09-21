@@ -791,7 +791,7 @@ impl Catalog {
 
         let chosen = answers.tap_target.as_ref().ok_or(Indecision::NoTarget)?;
         let floor = floors.for_target(operation);
-        if chosen.confidence < floor {
+        if chosen.confidence < floor && self.named_once(chosen) < floor.get() {
             return Err(Indecision::TooUncertain {
                 got: chosen.confidence,
                 floor,
@@ -857,6 +857,35 @@ impl Catalog {
                 what: format!("row {position}").into_boxed_str(),
             })?;
         Self::targeted(operation, handle).map(Decision::Ready)
+    }
+
+    /// What the chosen row is worth once rows of the same name are counted
+    /// together.
+    ///
+    /// A screen that offers the same thing twice splits the probability mass
+    /// across both, and the split reads as uncertainty about what to act on.
+    /// It is not: it is certainty about what to do, divided by an accident of
+    /// how the screen names its controls — measured on a dialog offering
+    /// `Close` and `CLOSE`, where the operation was 0.94 and the row 0.34.
+    ///
+    /// Same name, not same effect: this crate cannot know whether two
+    /// controls do the same thing, only that the screen calls them the same
+    /// thing. That is the whole claim, and it is why the comparison is on the
+    /// text a person would read rather than on anything about the widgets.
+    fn named_once(&self, chosen: &crate::judgment::Chosen) -> f64 {
+        let Some(name) = self
+            .targets
+            .iter()
+            .find(|(id, ..)| *id == chosen.choice)
+            .map(|(_, _, text)| text.trim().to_lowercase())
+        else {
+            return 0.0;
+        };
+        self.targets
+            .iter()
+            .filter(|(_, _, text)| text.trim().to_lowercase() == name)
+            .filter_map(|(id, ..)| chosen.probabilities.get(id.to_string().as_str()))
+            .sum()
     }
 
     /// The rows this screen offers, keyed as the Choice offers them.
