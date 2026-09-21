@@ -643,20 +643,24 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// 60ms — so this costs a fraction of the fixed delay it replaces, and
     /// unlike a fixed delay it is right for both a quick transition and a slow
     /// one.
-    /// Wait until the screen has something on it, or the budget runs out.
+    /// Wait until `app` is in front with something drawn, or the budget runs
+    /// out.
     ///
-    /// Not a judgement: nothing about an app that has not drawn yet is worth
-    /// asking a model about, and the only answer available is to wait.
-    fn waited_for_it_to_draw(&mut self) -> Result<(), Failure<D, J, X, C>> {
+    /// Not a judgement: nothing about an app that has not come up yet is
+    /// worth asking a model about, and the only answer available is to wait.
+    ///
+    /// Both conditions, because either alone stops too early. A screen with
+    /// rows on it is the launcher for the first moment after a launch, and
+    /// the app is in front before it has drawn anything.
+    fn waited_for_it_to_draw(&mut self, app: &str) -> Result<(), Failure<D, J, X, C>> {
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(Self::LAUNCH_BUDGET_MS);
         while std::time::Instant::now() < deadline {
-            if self
-                .device
-                .observe()
-                .map_err(RunError::Device)?
-                .worth_acting_on()
-            {
+            let screen = self.device.observe().map_err(RunError::Device)?;
+            // A reader that cannot name the app can still say the screen has
+            // something on it, which is the best that can be done there.
+            let arrived = screen.app().is_none_or(|seen| seen == app);
+            if arrived && screen.worth_acting_on() {
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(Self::CHANGE_POLL_MS));
@@ -893,7 +897,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         // before anything is judged about where it is.
         if let Some(app) = self.app.clone() {
             self.device
-                .perform(&Command::Launch(app))
+                .perform(&Command::Launch(app.clone()))
                 .map_err(RunError::Device)?;
             // An app takes seconds to start, and for most of them it has
             // nothing on screen. Reading straight after the launch returns
@@ -903,7 +907,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             //
             // Measured: 983ms of empty readings followed by a whole step
             // whose only outcome was `wait`.
-            self.waited_for_it_to_draw()?;
+            self.waited_for_it_to_draw(app.as_ref())?;
         }
         let launcher = self.device.home_screen_app();
         for index in 1..=self.limit {

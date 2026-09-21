@@ -865,25 +865,28 @@ fn a_screen_that_changes_and_changes_back_has_not_moved() {
 
 /// A device that flashes a second screen after each action and returns to the
 /// first, as a form does when it rejects what it was given.
+///
+/// Counted from the last action rather than from the start, so that how often
+/// the settle happens to poll cannot change what it sees.
 #[derive(Default)]
 struct Bouncing {
-    reads: std::cell::Cell<u32>,
+    since_acting: u32,
 }
 
 impl Device for Bouncing {
     type Error = Infallible;
     fn observe(&mut self) -> Result<Snapshot, Infallible> {
-        let read = self.reads.get();
-        self.reads.set(read + 1);
-        // Every third reading is the screen it moves to; the rest are the one
-        // it keeps coming back to.
-        Ok(if read % 3 == 1 {
+        self.since_acting += 1;
+        // The first reading after acting catches the screen it moved to.
+        // Every reading after that is the one it came back to.
+        Ok(if self.since_acting == 1 {
             screen_of(&["Go Back", "Summary"])
         } else {
             screen_of(&["Go Back", "Continue"])
         })
     }
     fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        self.since_acting = 0;
         Ok(())
     }
 }
@@ -908,14 +911,21 @@ fn a_launched_app_is_waited_for_until_it_has_drawn_something() {
 
     let seen = seen.borrow();
     assert_eq!(seen.len(), 1, "no judgement is spent on an empty screen");
+    assert_eq!(
+        seen[0]["app"], "com.example.wallet",
+        "the first judgement is about the app, not the launcher it came from: {}",
+        seen[0],
+    );
     assert!(
         !seen[0]["rows"].as_object().expect("rows").is_empty(),
-        "the first judgement is about a screen with something on it: {}",
+        "and it has something on it: {}",
         seen[0],
     );
 }
 
-/// An app that shows nothing for its first few readings, as one starting does.
+/// The launcher, then nothing, then the app — as a cold start looks from
+/// outside: the screen it was launched from stays up, goes blank, and is
+/// replaced.
 #[derive(Default)]
 struct SlowToDraw {
     reads: u32,
@@ -925,13 +935,22 @@ impl Device for SlowToDraw {
     type Error = Infallible;
     fn observe(&mut self) -> Result<Snapshot, Infallible> {
         self.reads += 1;
-        Ok(if self.reads <= 3 {
-            Snapshot::new(Vec::new()).expect("an empty screen")
-        } else {
-            screen_of(&["Go Back", "Continue"])
+        Ok(match self.reads {
+            // Still on the launcher, which is full of rows and none of them
+            // are the app's.
+            1..=2 => screen_of(&["Phone", "Camera", "Wallet"])
+                .in_app(Some("com.example.launcher".into())),
+            3..=4 => Snapshot::new(Vec::new())
+                .expect("an empty screen")
+                .in_app(Some("com.example.wallet".into())),
+            _ => screen_of(&["Go Back", "Continue"])
+                .in_app(Some("com.example.wallet".into())),
         })
     }
     fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
         Ok(())
+    }
+    fn home_screen_app(&mut self) -> Option<Box<str>> {
+        Some("com.example.launcher".into())
     }
 }
