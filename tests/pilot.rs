@@ -835,3 +835,54 @@ impl Device for Keypad {
         Ok(())
     }
 }
+
+/// A screen that changes and changes back has not changed. Settling reported
+/// movement as soon as any reading differed from the screen acted on, so a
+/// transition that bounced — the next screen appearing and the app returning
+/// to the form behind it — reset the guard against standing still, and the
+/// button was pressed again on a screen identical to the one it was pressed
+/// on.
+///
+/// Measured on a transfer form: two consecutive steps with the same rows and
+/// the same words, both tapping Continue, with the summary appearing and
+/// withdrawing in between.
+#[test]
+fn a_screen_that_changes_and_changes_back_has_not_moved() {
+    let judge = Scripted::new(vec![answer("tap", Some("A2"), 0.99, 0.02); 30]);
+    let mut pilot = Pilot::new(Bouncing::default(), judge, &Android);
+
+    let ending = pilot.pursue("get past the form").expect("the run completes");
+
+    assert_eq!(
+        ending,
+        Ending::Uncertain {
+            because: Indecision::NoProgress { repeated: 3 }
+        },
+        "a button pressed three times on the same screen is standing still",
+    );
+}
+
+/// A device that flashes a second screen after each action and returns to the
+/// first, as a form does when it rejects what it was given.
+#[derive(Default)]
+struct Bouncing {
+    reads: std::cell::Cell<u32>,
+}
+
+impl Device for Bouncing {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        let read = self.reads.get();
+        self.reads.set(read + 1);
+        // Every third reading is the screen it moves to; the rest are the one
+        // it keeps coming back to.
+        Ok(if read % 3 == 1 {
+            screen_of(&["Go Back", "Summary"])
+        } else {
+            screen_of(&["Go Back", "Continue"])
+        })
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        Ok(())
+    }
+}

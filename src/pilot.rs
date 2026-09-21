@@ -624,14 +624,10 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     fn settled_on_a_new_screen(&mut self, before: u64) -> Result<bool, Failure<D, J, X, C>> {
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(Self::CHANGE_BUDGET_MS);
-        let mut moved = false;
         let mut last = before;
         while std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(Self::CHANGE_POLL_MS));
             let now = self.device.observe().map_err(RunError::Device)?.fingerprint();
-            if now != before {
-                moved = true;
-            }
             // A screen that has begun to change has not finished changing. A
             // view being built reports the rows it has so far, and acting on
             // that is acting on a screen that will not exist a moment later —
@@ -642,12 +638,21 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // Two readings that agree, then, rather than the first that
             // differs. The screen still has to have moved: unchanged twice
             // over is exactly the action that did nothing.
-            if moved && now == last {
+            //
+            // Measured against `before` each time, not against "did it ever
+            // differ". A screen that changes and changes back has not
+            // changed: a form rejecting what it was given shows the next
+            // screen and withdraws it, and treating that as movement resets
+            // the guard against standing still — so the button is pressed
+            // again on a screen identical to the one it was pressed on.
+            if now != before && now == last {
                 return Ok(true);
             }
             last = now;
         }
-        Ok(moved)
+        // Out of time. Whether it moved is whether it ended up somewhere
+        // else, not whether it passed through somewhere else.
+        Ok(last != before)
     }
 
     /// Tell the observer, if there is one, what this step saw and did.
