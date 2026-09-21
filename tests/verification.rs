@@ -306,3 +306,52 @@ fn a_run_is_not_finished_while_any_criterion_is_unconfirmed() {
         "the first step had a criterion unconfirmed and had to go on",
     );
 }
+
+/// Questions are answered in parallel against one state, so asking another
+/// one costs nothing measurable. The most useful thing to ask alongside
+/// "what should I do?" is whether the screen is finished arriving — because
+/// acting on a screen that is still being built has been this loop's most
+/// persistent failure, and no amount of polling can tell a slow transition
+/// from a finished one.
+#[test]
+fn every_step_asks_whether_the_screen_has_finished_arriving() {
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        Scripted::new(vec![verdict(0.99)]),
+        &Android,
+    );
+
+    let _ = pilot.pursue("do a thing");
+
+    let asked = &pilot.judge().asked.borrow()[0];
+    assert_eq!(asked["still_arriving"]["type"], "noul", "{asked}");
+}
+
+/// A screen that is still arriving is waited for, not acted on. The action
+/// chosen against a half-built screen is an action against rows that will not
+/// exist a moment later.
+#[test]
+fn a_screen_that_is_still_arriving_is_waited_for_rather_than_acted_on() {
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        Scripted::new(vec![
+            serde_json::json!({
+                "operation": { "type": "choice", "choice": "tap", "confidence": 0.99 },
+                "tap_target": { "type": "choice", "choice": "A1", "confidence": 0.99 },
+                "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+                "is_error_screen": { "type": "noul", "noul": 0.01 },
+                "still_arriving": { "type": "noul", "noul": 0.95 },
+            }),
+            verdict(0.99),
+        ]),
+        &Android,
+    );
+
+    let _ = pilot.pursue("do a thing");
+
+    assert!(
+        matches!(pilot.device().performed.first(), Some(Command::Settle)),
+        "the first thing done is to wait: {:?}",
+        pilot.device().performed,
+    );
+}

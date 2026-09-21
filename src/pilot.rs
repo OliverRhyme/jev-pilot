@@ -639,6 +639,10 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// stops repeating itself and asks.
     pub const INEFFECTIVE_LIMIT: u32 = 3;
 
+    /// How many times in a row a screen may be judged still arriving before
+    /// the run acts on it anyway.
+    pub const ARRIVALS_WAITED_OUT: u32 = 3;
+
     /// How many screens back a run remembers having been on.
     pub const MEMORY: usize = 12;
 
@@ -905,6 +909,11 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         // looked up — so the guard against standing still never fires while
         // the button is pressed over and over.
         let mut repeating: u32 = 0;
+        // How many times in a row the run has waited for a screen to finish
+        // arriving. Bounded: an app that always looks half-drawn to the judge
+        // would otherwise be waited for until the step budget ran out, which
+        // is a worse answer than acting on the best guess available.
+        let mut arrivals: u32 = 0;
         let mut origin: Option<Box<str>> = self.app.clone();
         // Named rather than discovered: put the run where it was told to be,
         // before anything is judged about where it is.
@@ -991,6 +1000,41 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             let answers = answers?;
 
             let decided = catalog.resolve(&answers, &self.floors);
+
+            // A screen that is still arriving is not a screen to act on: the
+            // rows chosen from it are rows that will not exist a moment
+            // later. Waiting is free of judgement — it asks nothing new and
+            // decides nothing — and the next step judges what the screen
+            // turned out to be.
+            //
+            // Answered in the same request as everything else, so knowing
+            // this costs no latency at all. It is the question a polling
+            // settle cannot answer: watching tells you a screen stopped
+            // changing, not whether it has finished.
+            if answers
+                .still_arriving
+                .is_some_and(|arriving| arriving.noul > self.certainty)
+                && arrivals < Self::ARRIVALS_WAITED_OUT
+            {
+                arrivals += 1;
+                self.report(index, &snapshot, &answers, None, repeated, Spent {
+                    read_ms,
+                    step_ms: elapsed_ms(began),
+                    waited_ms: waited.get(),
+                    judged_ms,
+                    settled_ms,
+                });
+                self.device
+                    .perform(&Command::Settle)
+                    .map_err(RunError::Device)?;
+                previous = Some(
+                    "Waited: the screen was still arriving and there was nothing settled \
+                     to act on"
+                        .to_owned(),
+                );
+                continue;
+            }
+            arrivals = 0;
 
             if answers.is_error_screen.noul > self.certainty {
                 self.report(index, &snapshot, &answers, None, repeated, Spent {
