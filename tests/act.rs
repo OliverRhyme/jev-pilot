@@ -116,3 +116,34 @@ fn a_platform_offers_nothing_that_cannot_be_named() {
         );
     }
 }
+
+/// Putting the keyboard away and going back are the same gesture and not the
+/// same act. Reported as "Pressed Back", the run's own memory says it
+/// navigated when it did not — and the next step, told it has just gone back,
+/// goes back again and leaves the form it was filling.
+///
+/// Measured on a transfer form: type, close keyboard, back, and round to the
+/// start of the flow. Three times in one run.
+#[test]
+fn putting_the_keyboard_away_is_not_recounted_as_going_back() {
+    use jev_pilot::act::{Act, Decision};
+    use jev_pilot::snapshot::{Bounds, Element, Snapshot};
+
+    let snapshot = Snapshot::new(vec![Element {
+        label: "Continue".into(),
+        detail: None,
+        editable: false,
+        bounds: Bounds::from_origin_size(0, 0, 400, 80),
+    }])
+    .expect("a screen")
+    .with_keyboard_open(true);
+    let catalog = Catalog::for_screen(&snapshot, &Android);
+
+    let Ok(Decision::Ready(act)) = catalog.act_from(Operation::CloseKeyboard, None) else {
+        panic!("closing the keyboard is offered while one is up");
+    };
+    assert!(
+        matches!(act, Act::CloseKeyboard),
+        "it is its own act, so it can be described as itself: {act:?}",
+    );
+}

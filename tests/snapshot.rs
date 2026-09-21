@@ -644,3 +644,65 @@ fn a_reader_that_cannot_say_how_quiet_it_is_says_nothing() {
         None,
     );
 }
+
+/// "Did anything change?" and "have I been here before?" are different
+/// questions, and one hash cannot answer both. A spinner moving a pixel is a
+/// change; it is not a different place. A form re-entered after a detour is
+/// the same place, and its rows sit at slightly different offsets.
+///
+/// Measured: three laps of one transfer flow, the same screen by rows, words
+/// and unavailable controls on steps 6, 11 and 23 — and the run's own
+/// revisit signal silent on every one of them, because the geometry had
+/// shifted underneath.
+#[test]
+fn where_a_screen_is_does_not_change_which_screen_it_is() {
+    use jev_pilot::snapshot::{Bounds, Element, Snapshot};
+
+    let rows = |top| {
+        vec![
+            Element {
+                label: "Account Number".into(),
+                detail: None,
+                editable: true,
+                bounds: Bounds::from_origin_size(0, top, 400, 80),
+            },
+            Element {
+                label: "Continue".into(),
+                detail: None,
+                editable: false,
+                bounds: Bounds::from_origin_size(0, top + 200, 400, 80),
+            },
+        ]
+    };
+    let here = Snapshot::new(rows(100)).expect("a screen");
+    let shifted = Snapshot::new(rows(140)).expect("a screen");
+
+    assert_ne!(
+        here.fingerprint(),
+        shifted.fingerprint(),
+        "moving is a change, which is what settling asks about",
+    );
+    assert_eq!(
+        here.place(),
+        shifted.place(),
+        "and it is the same place, which is what revisiting asks about",
+    );
+}
+
+/// A place is still what it offers and says, so a screen that gains a row is
+/// somewhere else.
+#[test]
+fn a_screen_that_gains_a_row_is_a_different_place() {
+    use jev_pilot::snapshot::{Bounds, Element, Snapshot};
+
+    let row = |label: &str| Element {
+        label: label.into(),
+        detail: None,
+        editable: false,
+        bounds: Bounds::from_origin_size(0, 0, 400, 80),
+    };
+    let before = Snapshot::new(vec![row("Account Number")]).expect("a screen");
+    let after = Snapshot::new(vec![row("Account Number"), row("Continue")]).expect("a screen");
+
+    assert_ne!(before.place(), after.place());
+}

@@ -341,6 +341,13 @@ pub enum Act {
     },
     /// Perform a system gesture.
     System(SystemAct),
+    /// Put the soft keyboard away.
+    ///
+    /// The same gesture as [`SystemAct::Back`] on Android and not the same
+    /// act. Told it "pressed Back", a run's memory says it navigated when it
+    /// did not, and the next step goes back again — off the form it was
+    /// filling. Measured on a transfer form, three laps of one run.
+    CloseKeyboard,
     /// Bring the named application back to the foreground.
     ///
     /// Carries the identifier rather than reading it from the screen: the
@@ -655,9 +662,8 @@ impl Catalog {
         Ok(match operation {
             Operation::ScrollUp => Act::Scroll(Direction::Up),
             Operation::ScrollDown => Act::Scroll(Direction::Down),
-            // Back dismisses an IME on Android, and closing the keyboard is
-            // offered only where one is up, so it cannot navigate instead.
-            Operation::Back | Operation::CloseKeyboard => Act::System(SystemAct::Back),
+            Operation::Back => Act::System(SystemAct::Back),
+            Operation::CloseKeyboard => Act::CloseKeyboard,
             Operation::Home => Act::System(SystemAct::Home),
             Operation::AppSwitcher => Act::System(SystemAct::AppSwitcher),
             Operation::Submit => Act::System(SystemAct::Submit),

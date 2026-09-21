@@ -975,7 +975,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             if self.types {
                 catalog = catalog.accepting_text();
             }
-            let here = snapshot.fingerprint();
+            let here = snapshot.place();
             let seen_before = visited
                 .iter()
                 .rev()
@@ -1430,6 +1430,7 @@ fn recount(act: &Act, snapshot: &Snapshot) -> String {
         Act::TypeText { into, text } => format!("Typed {text:?} into {}", named(*into)),
         Act::Scroll(direction) => format!("Scrolled {direction:?}"),
         Act::System(gesture) => format!("Pressed {gesture:?}"),
+        Act::CloseKeyboard => "Put the keyboard away".to_owned(),
         Act::Return(app) => format!("Returned to {app}"),
         Act::Wait => "Waited for the screen to settle".to_owned(),
         Act::Finish(outcome) => format!("Declared {outcome:?}"),

@@ -96,6 +96,9 @@ pub fn command_for(act: &Act, snapshot: &Snapshot) -> Result<Option<Command>, Ta
             text: text.clone(),
         }),
         Act::System(gesture) => Some(Command::System(*gesture)),
+        // Back dismisses an IME on Android, and closing the keyboard is
+        // offered only where one is up, so it cannot navigate instead.
+        Act::CloseKeyboard => Some(Command::System(SystemAct::Back)),
         Act::Return(app) => Some(Command::Launch(app.clone())),
         Act::Scroll(direction) => Some(Command::Scroll(*direction)),
         Act::Wait => Some(Command::Settle),

@@ -350,6 +350,35 @@ impl Snapshot {
         self.app.as_deref()
     }
 
+    /// Which screen this is, as against what state it is in.
+    ///
+    /// The rows it offers, the words it says, the controls it refuses and
+    /// whether a keyboard is up — and deliberately not where any of it sits.
+    /// A form re-entered after a detour is the same place with its rows at
+    /// slightly different offsets, and a spinner moving a pixel is the same
+    /// place too.
+    ///
+    /// Apart from [`Self::fingerprint`] because they answer different
+    /// questions. Settling asks "did anything change?", where a pixel counts.
+    /// Revisiting asks "have I been here before?", where it must not —
+    /// measured on three laps of one transfer flow, whose identical screens
+    /// went unrecognised because the geometry had shifted underneath.
+    #[must_use]
+    pub fn place(&self) -> u64 {
+        use core::hash::{Hash as _, Hasher as _};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.keyboard_open.hash(&mut hasher);
+        self.notices.hash(&mut hasher);
+        self.unavailable.hash(&mut hasher);
+        for element in &self.elements {
+            element.label.hash(&mut hasher);
+            element.detail.hash(&mut hasher);
+            element.editable.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// What is on this screen, as one number.
     ///
     /// Two reads of an unchanged screen give the same value; a screen that has
