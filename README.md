@@ -123,10 +123,20 @@ A run is not one call that blocks until it is over:
 
 | | |
 | --- | --- |
-| `start_run` | begin, and get back a name for the run |
+| `start_run` | begin |
 | `run_status` | every step so far, and what it is asking if it is asking |
 | `answer_run` | answer it — an operation and row it was offered, or the words to type |
 | `stop_run` | end it, leaving the device where it got to |
+
+A run is named by the device it drives, so there is no run id to carry: with one
+phone attached, none of these needs an argument at all. That is not only
+convenience — it makes *one run per device* structural. Two runs on one screen
+take turns at it, each undoing what the other has just done, and an identifier of
+their own would make that look like an ordinary thing to ask for. A device
+already being driven is refused, and told to watch, answer or stop the run it has.
+
+Runs end when the conversation does. Left going, one carries on tapping at
+somebody's phone with nothing watching it and nothing able to answer it.
 
 Every tool runs the `jev-pilot` binary rather than driving the loop in-process,
 so the server cannot drift from the command line it is a face for, and an

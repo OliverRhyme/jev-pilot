@@ -232,26 +232,35 @@ fn an_empty_answer_is_refused() {
     assert_eq!(jev_pilot::mcp::answer_from(&serde_json::json!({})), None);
 }
 
-/// Runs are named by this server, not by the caller, so one conversation
-/// cannot reach into another's run by guessing a name it was never given.
+/// A run is named by the device it drives, because that is what it is. Two
+/// runs on one phone are two processes taking turns at the same screen, and an
+/// identifier of their own would make that look like an ordinary thing to ask
+/// for.
 #[test]
-fn runs_are_named_by_the_server() {
-    let mut sessions = Sessions::default();
-    let first = sessions.name_a_run();
-    let second = sessions.name_a_run();
+fn a_run_is_named_by_the_device_it_drives() {
+    use jev_pilot::mcp::which_run;
 
-    assert_ne!(first, second);
-    assert!(first.starts_with("run-"), "got {first}");
+    // One run in flight, and nothing to say about which: there is only one.
+    assert_eq!(which_run(None, &["abc123"]), Ok("abc123".to_owned()));
+    assert_eq!(which_run(Some("abc123"), &["abc123"]), Ok("abc123".to_owned()));
+
+    // Two devices, two runs. Now it matters which.
+    let torn = which_run(None, &["abc123", "def456"]).expect_err("ambiguous");
+    assert!(torn.contains("abc123") && torn.contains("def456"), "got {torn}");
+
+    // Nothing running at all.
+    assert!(which_run(None, &[]).is_err());
+    assert!(which_run(Some("abc123"), &["def456"]).is_err());
 }
 
-/// Asking after a run nobody started is a failed call, not a panic and not a
-/// silence.
+/// Asking after a run when nothing is being driven is a failed call that says
+/// how to begin one, not a panic and not a silence.
 #[test]
-fn asking_after_an_unknown_run_is_a_failed_call() {
+fn asking_after_a_run_when_none_is_in_flight_is_a_failed_call() {
     let answer = handle(
         &serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": { "name": "run_status", "arguments": { "run": "run-404" } },
+            "params": { "name": "run_status", "arguments": {} },
         }),
         &mut Sessions::default(),
     )
@@ -259,7 +268,7 @@ fn asking_after_an_unknown_run_is_a_failed_call() {
 
     assert_eq!(answer["result"]["isError"], true);
     let said = answer["result"]["content"][0]["text"].as_str().expect("text");
-    assert!(said.contains("run-404"), "got {said}");
+    assert!(said.contains("start_run"), "got {said}");
 }
 
 /// Requests arrive one JSON object per line and answers go back the same way.
@@ -291,4 +300,89 @@ fn a_conversation_is_one_object_per_line() {
     assert_eq!(lines[0]["id"], 1);
     assert_eq!(lines[1]["error"]["code"], -32700);
     assert_eq!(lines[2]["id"], 2);
+}
+
+/// A device already being driven does not get a second run. Two runs on one
+/// screen take turns at it, each undoing what the other just did, and neither
+/// knows the other is there.
+#[test]
+fn a_device_already_being_driven_is_not_driven_again() {
+    let answer = handle(
+        &serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {
+                "name": "start_run",
+                "arguments": { "device": "abc123", "goal": "do a thing" },
+            },
+        }),
+        &mut driving("abc123"),
+    )
+    .expect("answered");
+
+    assert_eq!(answer["result"]["isError"], true);
+    let said = answer["result"]["content"][0]["text"].as_str().expect("text");
+    assert!(said.contains("abc123"), "got {said}");
+    assert!(
+        said.contains("stop_run") || said.contains("answer_run"),
+        "it should say what to do instead: {said}",
+    );
+}
+
+/// A run that has finished is not still driving anything, so the device is
+/// free. Otherwise one completed run would block that phone for the rest of
+/// the conversation.
+#[test]
+fn a_finished_run_leaves_the_device_free() {
+    let mut sessions = finished_with("abc123");
+
+    assert_eq!(sessions.still_running(), Vec::<String>::new());
+}
+
+/// A conversation that ends takes its runs with it. Left going, a run carries
+/// on tapping at somebody's phone with nothing watching it and nothing able to
+/// answer it.
+#[test]
+fn ending_the_conversation_ends_the_runs_it_started() {
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("a child that keeps going");
+    let id = child.id();
+    {
+        let mut sessions = Sessions::default();
+        sessions.remember("abc123".to_owned(), std::env::temp_dir(), child);
+        assert_eq!(sessions.still_running(), ["abc123"]);
+    }
+
+    // Reaped by the drop, so the pid is no longer a live `sleep`.
+    let alive = std::process::Command::new("ps")
+        .args(["-p", &id.to_string(), "-o", "comm="])
+        .output()
+        .expect("ps runs");
+    let named = String::from_utf8_lossy(&alive.stdout);
+    assert!(!named.contains("sleep"), "left running: {named}");
+}
+
+/// A session holding one run that is still going.
+fn driving(device: &str) -> Sessions {
+    let mut sessions = Sessions::default();
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("a child that keeps going");
+    sessions.remember(device.to_owned(), std::env::temp_dir(), child);
+    sessions
+}
+
+/// A session holding one run that has ended, as a conversation has afterwards.
+fn finished_with(device: &str) -> Sessions {
+    let mut sessions = Sessions::default();
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("a child that exits at once");
+    // Waited for here, so the test is about a run that has definitely ended
+    // rather than about how quickly `true` gets round to it.
+    child.wait().expect("it exits");
+    sessions.remember(device.to_owned(), std::env::temp_dir(), child);
+    sessions
 }

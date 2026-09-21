@@ -31,14 +31,16 @@ const SPOKEN: &[&str] = &[PROTOCOL, "2025-03-26", "2024-11-05"];
 #[derive(Debug, Default)]
 pub struct Sessions {
     runs: std::collections::BTreeMap<String, Run>,
-    started: u32,
 }
 
 impl Sessions {
-    /// A name for a run nobody has used yet.
-    pub fn name_a_run(&mut self) -> String {
-        self.started = self.started.saturating_add(1);
-        format!("run-{}", self.started)
+    /// The devices with a run still going on them.
+    ///
+    /// Asked rather than remembered, because a run ends on its own: the child
+    /// is reaped here, so a finished run stops holding its device.
+    pub fn still_running(&mut self) -> Vec<String> {
+        self.runs.retain(|_, run| !run.finished());
+        self.runs.keys().cloned().collect()
     }
 
     /// Where a run keeps its desk, if this server started it.
@@ -65,11 +67,59 @@ impl Sessions {
     }
 }
 
+impl Drop for Sessions {
+    /// A conversation that ends takes its runs with it.
+    ///
+    /// Left going, a run carries on tapping at somebody's phone with nothing
+    /// watching it and nothing able to answer it when it asks.
+    fn drop(&mut self) {
+        for (_, run) in std::mem::take(&mut self.runs) {
+            let mut run = run;
+            let _ = run.child.kill();
+            let _ = run.child.wait();
+        }
+    }
+}
+
 /// One run, and where it keeps its desk.
 #[derive(Debug)]
 struct Run {
     desk: std::path::PathBuf,
     child: std::process::Child,
+}
+
+impl Run {
+    /// Whether this run has ended on its own.
+    fn finished(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
+    }
+}
+
+/// Which run a call is about.
+///
+/// A run is named by the device it drives, because that is what it is. Naming
+/// them separately would make two runs on one phone look like an ordinary
+/// thing to ask for, and it is not: they would take turns at the same screen,
+/// each undoing what the other had just done.
+///
+/// # Errors
+/// Returns what to say to the caller when there is no such run, or when there
+/// is more than one and the call did not say which.
+pub fn which_run(asked: Option<&str>, running: &[&str]) -> Result<String, String> {
+    match (asked, running) {
+        (Some(device), _) if running.contains(&device) => Ok(device.to_owned()),
+        (Some(device), []) => Err(format!("nothing is being driven, so no run on {device}")),
+        (Some(device), _) => Err(format!(
+            "no run on {device}; these are being driven: {}",
+            running.join(", ")
+        )),
+        (None, [only]) => Ok((*only).to_owned()),
+        (None, []) => Err("no run is in flight; start_run begins one".to_owned()),
+        (None, _) => Err(format!(
+            "more than one run is in flight; name a device: {}",
+            running.join(", ")
+        )),
+    }
 }
 
 /// Hold a conversation: one JSON object per line in, one per line out.
@@ -187,13 +237,10 @@ fn tools() -> Vec<serde_json::Value> {
         }
         schema
     };
-    let run = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "run": { "type": "string", "description": "Which run, as start_run named it." },
-        },
-        "required": ["run"],
-    });
+    // A run is named by the device it drives, so naming the device is the
+    // only thing these ever need — and only when more than one is being
+    // driven at once.
+    let run = named(serde_json::json!({}));
 
     let mut offered = looking(&tool, &device, &named);
     offered.extend(acting(&tool, &named, &run));
@@ -254,8 +301,9 @@ fn acting(
             "Drive the device towards a goal, written in plain words. THIS \
              ACTS ON A REAL DEVICE: it taps, types and navigates, and on an \
              app that moves money or sends messages it will do those things. \
-             Returns at once with a name for the run; watch it with \
-             run_status and answer it with answer_run.",
+             Returns at once; watch it with run_status and answer it with \
+             answer_run. One run per device — a device already being driven \
+             is refused rather than driven twice.",
             named(serde_json::json!({
                 "goal": {
                     "type": "string",
@@ -292,7 +340,8 @@ fn acting(
             "run_status",
             "How a run is getting on: every step it has taken, whether it is \
              waiting for an answer and what it is asking, and how it ended if \
-             it has. Changes nothing.",
+             it has. Changes nothing. Name a device only when more than one \
+             is being driven.",
             run.clone(),
             true,
             false,
@@ -306,7 +355,10 @@ fn acting(
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "run": { "type": "string", "description": "Which run, as start_run named it." },
+                    "device": {
+                        "type": "string",
+                        "description": "Which device's run, when more than one is being driven.",
+                    },
                     "operation": {
                         "type": "string",
                         "description": "One of the operations the run listed, or `stop` to end it.",
@@ -317,7 +369,6 @@ fn acting(
                     },
                     "text": { "type": "string", "description": "The words, when it asked for some." },
                 },
-                "required": ["run"],
             }),
             false,
             true,
@@ -438,13 +489,7 @@ fn call(params: &serde_json::Value, sessions: &mut Sessions) -> serde_json::Valu
         .get("arguments")
         .cloned()
         .unwrap_or(serde_json::json!({}));
-    let named_run = || {
-        arguments
-            .get("run")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    };
+
     match name {
         "observe" | "devices" | "helper" => match invocation(name, &arguments) {
             Some(args) => match run_pilot(&args) {
@@ -454,17 +499,20 @@ fn call(params: &serde_json::Value, sessions: &mut Sessions) -> serde_json::Valu
             None => failed(&format!("{name} was given arguments it cannot use")),
         },
         "start_run" => start(&arguments, sessions),
-        "run_status" => {
-            let run = named_run();
-            match sessions.desk_of(&run) {
+        "run_status" => match resolve(&arguments, sessions) {
+            Ok(run) => match sessions.desk_of(&run) {
                 Some(desk) => said_so(&status_of(desk)),
-                None => failed(&unknown(&run)),
-            }
-        }
+                None => failed(&format!("no run on {run}")),
+            },
+            Err(said) => failed(&said),
+        },
         "answer_run" => {
-            let run = named_run();
+            let run = match resolve(&arguments, sessions) {
+                Ok(run) => run,
+                Err(said) => return failed(&said),
+            };
             let Some(desk) = sessions.desk_of(&run) else {
-                return failed(&unknown(&run));
+                return failed(&format!("no run on {run}"));
             };
             let Some(answer) = answer_from(&arguments) else {
                 return failed(
@@ -477,14 +525,13 @@ fn call(params: &serde_json::Value, sessions: &mut Sessions) -> serde_json::Valu
                 Err(error) => failed(&format!("could not answer {run}: {error}")),
             }
         }
-        "stop_run" => {
-            let run = named_run();
-            if sessions.forget(&run) {
-                said_so(&format!("{run} stopped; the device is left where it got to"))
-            } else {
-                failed(&unknown(&run))
-            }
-        }
+        "stop_run" => match resolve(&arguments, sessions) {
+            Ok(run) if sessions.forget(&run) => said_so(&format!(
+                "the run on {run} is stopped; the device is left where it got to"
+            )),
+            Ok(run) => failed(&format!("no run on {run}")),
+            Err(said) => failed(&said),
+        },
         // Reported inside the result rather than as a transport fault: the
         // call was understood and refused, which is a thing the asking model
         // can read and act on.
@@ -492,8 +539,13 @@ fn call(params: &serde_json::Value, sessions: &mut Sessions) -> serde_json::Valu
     }
 }
 
-fn unknown(run: &str) -> String {
-    format!("no run called {run}; start_run names them")
+/// Which run a call is about, given what it said and what is in flight.
+fn resolve(arguments: &serde_json::Value, sessions: &mut Sessions) -> Result<String, String> {
+    let running = sessions.still_running();
+    which_run(
+        arguments.get("device").and_then(serde_json::Value::as_str),
+        &running.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
 }
 
 /// Begin a run, and hand back the name to watch it by.
@@ -501,8 +553,26 @@ fn start(arguments: &serde_json::Value, sessions: &mut Sessions) -> serde_json::
     let Some(mut args) = invocation("start_run", arguments) else {
         return failed("a run needs a goal");
     };
-    let name = sessions.name_a_run();
-    let desk = std::env::temp_dir().join(format!("jev-pilot-mcp-{name}"));
+    // Named by the device it will drive, and refused when that device is
+    // already being driven: two runs on one screen take turns at it, each
+    // undoing what the other has just done, and neither knows the other is
+    // there.
+    let asked = arguments.get("device").and_then(serde_json::Value::as_str);
+    let busy = sessions.still_running();
+    if let Some(already) = busy
+        .iter()
+        .find(|device| asked.is_none_or(|asked| *device == asked))
+    {
+        return failed(&format!(
+            "{already} is already being driven. Watch it with run_status, \
+             answer it with answer_run, or end it with stop_run."
+        ));
+    }
+    let name = asked.unwrap_or("the attached device").to_owned();
+    let desk = std::env::temp_dir().join(format!(
+        "jev-pilot-mcp-{}",
+        name.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
+    ));
     if let Err(error) = std::fs::create_dir_all(&desk) {
         return failed(&format!("could not make a desk for {name}: {error}"));
     }
@@ -522,8 +592,9 @@ fn start(arguments: &serde_json::Value, sessions: &mut Sessions) -> serde_json::
         Ok(child) => {
             sessions.remember(name.clone(), desk, child);
             said_so(&format!(
-                "{name} started. It acts on the device from here. Watch it with \
-                 run_status, and when it asks, answer it with answer_run."
+                "a run is under way on {name}. It acts on the device from here. \
+                 Watch it with run_status, and when it asks, answer it with \
+                 answer_run."
             ))
         }
         Err(error) => failed(&format!("could not start jev-pilot: {error}")),
