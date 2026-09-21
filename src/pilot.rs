@@ -872,6 +872,28 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 self.report(index, &snapshot, &answers, None);
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
+            // An acceptance criterion is the caller's own definition of done,
+            // and a progress score is the model's guess at it. Until this, the
+            // criteria could only veto a success, never declare one — so a run
+            // standing on a finished screen the model under-rated carried on,
+            // off that screen and back through the flow it had just completed.
+            //
+            // Measured driving a bank transfer: the receipt was on screen,
+            // `goal_met` said "under way", and the run pressed Back and began
+            // a second transfer. The criteria were answered on that very step
+            // and nothing looked at them.
+            //
+            // Every criterion, or none of it counts: a run asked for two
+            // things and shown one of them is not finished. With no criteria
+            // given there is nothing to be satisfied by, and the progress
+            // score above remains the only word on it.
+            if !blind
+                && !self.criteria.is_empty()
+                && answers.unmet(&self.criteria, self.certainty).is_none()
+            {
+                self.report(index, &snapshot, &answers, None);
+                return Ok(Ending::Finished(Outcome::Achieved));
+            }
 
             let decision = match decided {
                 Ok(decision) => decision,

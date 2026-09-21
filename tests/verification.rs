@@ -233,3 +233,76 @@ fn a_plain_string_is_still_a_criterion() {
     );
     assert!(asked["check_0"]["criteria"]["true"].is_string());
 }
+
+/// An acceptance criterion is the caller's own definition of done, and a
+/// `goal_met` score is the model's guess at it. The criteria could only ever
+/// veto a success, never declare one — so a run standing on a finished screen
+/// the model under-rated kept going, off the screen and back through the flow
+/// it had just completed.
+///
+/// Measured driving a bank transfer: step 24 was the receipt, `goal_met` said
+/// "under way", and the run pressed Back and began a second transfer of real
+/// money. Nothing in the loop looked at the criteria that were being answered
+/// on that very step.
+#[test]
+fn criteria_that_all_hold_end_the_run_whatever_the_progress_score_says() {
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        // Says "keep going, press back", while confirming the criterion.
+        Scripted::new(vec![
+            serde_json::json!({
+                "operation": { "type": "choice", "choice": "back", "confidence": 0.99 },
+                "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+                "is_error_screen": { "type": "noul", "noul": 0.01 },
+                "check_0": { "type": "noul", "noul": 0.97 },
+            });
+            20
+        ]),
+        &Android,
+    )
+    .confirming(["A transfer receipt is showing"]);
+
+    let ending = pilot.pursue("transfer fifty pesos").expect("it completes");
+
+    assert_eq!(ending, Ending::Finished(Outcome::Achieved));
+    assert!(
+        pilot.device().performed.is_empty(),
+        "nothing should have been done to a screen that already satisfies the goal: {:?}",
+        pilot.device().performed,
+    );
+}
+
+/// One criterion holding is not all of them holding. A run asked for two
+/// things and shown one of them is not finished, and must go on until the
+/// other holds too.
+#[test]
+fn a_run_is_not_finished_while_any_criterion_is_unconfirmed() {
+    let half = serde_json::json!({
+        "operation": { "type": "choice", "choice": "back", "confidence": 0.99 },
+        "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+        "is_error_screen": { "type": "noul", "noul": 0.01 },
+        "check_0": { "type": "noul", "noul": 0.97 },
+        "check_1": { "type": "noul", "noul": 0.10 },
+    });
+    let both = serde_json::json!({
+        "operation": { "type": "choice", "choice": "back", "confidence": 0.99 },
+        "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+        "is_error_screen": { "type": "noul", "noul": 0.01 },
+        "check_0": { "type": "noul", "noul": 0.97 },
+        "check_1": { "type": "noul", "noul": 0.97 },
+    });
+    let mut pilot = Pilot::new(Fake::default(), Scripted::new(vec![half, both]), &Android)
+        .confirming([
+            "A transfer receipt is showing",
+            "It carries a reference number",
+        ]);
+
+    let ending = pilot.pursue("transfer fifty pesos").expect("it completes");
+
+    assert_eq!(ending, Ending::Finished(Outcome::Achieved));
+    assert_eq!(
+        pilot.judge().asked.borrow().len(),
+        2,
+        "the first step had a criterion unconfirmed and had to go on",
+    );
+}
