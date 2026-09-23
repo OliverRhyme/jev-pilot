@@ -1,6 +1,6 @@
 [package]
 name = "jev-pilot"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.98"
 description = "Drive a mobile UI with TypeSafe Jev as the System One decision provider: code enumerates the valid actions, the model only selects one."
@@ -47,10 +47,6 @@ mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
 
 # docs.rs renders every feature, and marks which items need which.
 # The server is a binary of its own, and only exists when its feature is on.
-[[bin]]
-name = "jev-pilot-mcp"
-required-features = ["mcp"]
-
 [[bin]]
 name = "jev-pilot"
 path = "src/main.rs"

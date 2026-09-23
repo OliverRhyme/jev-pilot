@@ -38,7 +38,7 @@ cargo check --lib --no-default-features --features android   # likewise ios, htt
 - Running against hardware: `cargo run -- "<goal>"` (the `jev-pilot` binary; `--help` shows the
   flags), plus `cargo run -- observe`, `devices`, `helper [install]`. You need `TYPESAFE_API_KEY`
   or `TYPESAFE_API_KEY_FILE` (see `.env.example`) and an attached Android device.
-- MCP server: `cargo run --features mcp --bin jev-pilot-mcp`.
+- MCP server: `cargo run --features mcp -- mcp` (the `mcp` subcommand of the one binary).
 
 ## Architecture
 
@@ -73,7 +73,7 @@ Command → device`.
   `uiautomator dump` unbinds the helper's accessibility service.
 - **`desk`**: where an impasse question goes. The terminal (stdin) and `<desk>/answer.json` are
   both live, and whichever answers first wins. A blank stdin line means "check the desk now".
-- **`mcp`** (feature `mcp`, binary `jev-pilot-mcp`, built on `rmcp`): every tool runs the
+- **`mcp`** (feature `mcp`, subcommand `jev-pilot mcp`, built on `rmcp`): every tool runs the
   `jev-pilot` binary instead of driving the loop in-process, so the MCP server and the CLI cannot
   drift apart. A run is keyed by its device serial, which allows one run per device. `start_run` and
   `answer_run` block for up to about 45s and return the run's question, its ending, or "still

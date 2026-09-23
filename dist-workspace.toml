@@ -17,6 +17,5 @@ install-path = "~/.jev-pilot/bin"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
-# Build the MCP server too: a release ships both programs, and the server runs
-# the command line installed beside it.
+# Build with the MCP server, so a release's one program serves `jev-pilot mcp`.
 features = ["mcp"]

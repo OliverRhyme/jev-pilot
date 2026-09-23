@@ -339,21 +339,3 @@ fn a_run_can_be_given_its_steps_and_keys() {
     assert!(joined.contains("--keys 246810"), "{joined}");
     assert_eq!(args.last().map(String::as_str), Some("send fifty pesos"));
 }
-
-/// The command line is found beside the server by its file name, and on
-/// Windows that name ends in `.exe`. Looked for without it, the server found
-/// nothing beside itself and fell back to whatever `jev-pilot` was on the path.
-#[test]
-fn the_command_line_is_looked_for_under_its_platform_file_name() {
-    let beside = jev_pilot::mcp::command_line_beside(
-        std::path::Path::new("C:/tools/jev-pilot-mcp.exe"),
-        ".exe",
-    );
-    assert_eq!(beside, std::path::Path::new("C:/tools/jev-pilot.exe"));
-
-    let beside = jev_pilot::mcp::command_line_beside(
-        std::path::Path::new("/usr/local/bin/jev-pilot-mcp"),
-        "",
-    );
-    assert_eq!(beside, std::path::Path::new("/usr/local/bin/jev-pilot"));
-}

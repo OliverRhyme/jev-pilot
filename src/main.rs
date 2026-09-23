@@ -47,6 +47,31 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// Serve MCP over stdin and stdout until the client goes away.
+///
+/// One thread. Nothing here is compute, and each run is a separate process
+/// with a loop that waits on one thing at a time.
+#[cfg(feature = "mcp")]
+fn serve_mcp() -> Result<(), Box<dyn core::error::Error>> {
+    use rmcp::ServiceExt as _;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let serving = jev_pilot::mcp::Pilot::new()
+            .serve(rmcp::transport::stdio())
+            .await?;
+        serving.waiting().await?;
+        Ok(())
+    })
+}
+
+#[cfg(not(feature = "mcp"))]
+fn serve_mcp() -> Result<(), Box<dyn core::error::Error>> {
+    Err("this build has no MCP server; it is built with the `mcp` feature".into())
+}
+
 fn run() -> Result<(), Box<dyn core::error::Error>> {
     match cli::parse(std::env::args().skip(1))? {
         Invocation::Help => {
@@ -54,6 +79,7 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
             Ok(())
         }
         Invocation::Devices => list_devices(),
+        Invocation::Mcp => serve_mcp(),
         Invocation::Observe { device } => observe(device.as_deref()),
         Invocation::Helper { device, install } => manage_helper(device.as_deref(), install),
         Invocation::Run {

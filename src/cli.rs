@@ -40,6 +40,12 @@ pub enum Invocation {
         /// Where questions are written for another decider to answer.
         desk: Option<std::path::PathBuf>,
     },
+    /// Serve the Model Context Protocol over stdin and stdout.
+    ///
+    /// A subcommand rather than a second program: each tool call runs this
+    /// same executable, so there is one file to install and nothing beside it
+    /// to find.
+    Mcp,
     /// Report on the on-device helper, or install it.
     Helper {
         /// Which device, when more than one is attached.
@@ -119,6 +125,15 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
             let _ = args.next();
             return Ok(Invocation::Devices);
         }
+        Some("mcp") => {
+            let _ = args.next();
+            // Configured once in a client and then forgotten, so a stray
+            // argument is refused rather than ignored.
+            if let Some(other) = args.next() {
+                return Err(CliError::UnknownFlag(other));
+            }
+            return Ok(Invocation::Mcp);
+        }
         Some("observe") => {
             let _ = args.next();
             let mut device = None;
@@ -132,16 +147,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
         }
         Some("helper") => {
             let _ = args.next();
-            let mut install = false;
-            let mut device = None;
-            while let Some(word) = args.next() {
-                match word.as_str() {
-                    "install" => install = true,
-                    "--device" | "-d" => device = Some(value(&mut args, "--device")?),
-                    other => return Err(CliError::UnknownFlag(other.to_owned())),
-                }
-            }
-            return Ok(Invocation::Helper { device, install });
+            return helper(args);
         }
         _ => {}
     }
@@ -213,6 +219,20 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
     })
 }
 
+/// The rest of `helper`: whether to install, and on which device.
+fn helper(mut args: impl Iterator<Item = String>) -> Result<Invocation, CliError> {
+    let mut install = false;
+    let mut device = None;
+    while let Some(word) = args.next() {
+        match word.as_str() {
+            "install" => install = true,
+            "--device" | "-d" => device = Some(value(&mut args, "--device")?),
+            other => return Err(CliError::UnknownFlag(other.to_owned())),
+        }
+    }
+    Ok(Invocation::Helper { device, install })
+}
+
 /// A `--text` value: the field's name, then `=`, then the words.
 ///
 /// Split once: a value may hold an `=`, and a field name that does is not
@@ -261,6 +281,7 @@ USAGE
   jev-pilot devices                   list attached devices
   jev-pilot observe                   print what the next step would be offered
   jev-pilot helper [install]          report on, or install, the on-device helper
+  jev-pilot mcp                       serve MCP over stdio, for an agent to drive runs
 
 OPTIONS
   -d, --device <serial>   which device, when more than one is attached

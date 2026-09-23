@@ -272,3 +272,11 @@ fn steps_and_keys_can_be_given_on_the_command_line() {
     assert_eq!(plan, ["Log in", "Open Transfer"]);
     assert_eq!(keys.as_deref(), Some("246810"));
 }
+
+/// The MCP server is a subcommand of the one program rather than a second
+/// program beside it, so there is one file to install and nothing to find.
+#[test]
+fn the_mcp_server_is_a_subcommand() {
+    assert_eq!(parsed(&["mcp"]), Invocation::Mcp);
+    assert!(parse(["mcp".to_owned(), "--device".to_owned(), "x".to_owned()]).is_err());
+}

@@ -34,16 +34,13 @@ button, a tap aimed at nothing.
 
 ## Install
 
-One package, two programs, prebuilt for macOS (Apple silicon and Intel), Linux
+One program, `jev-pilot`, prebuilt for macOS (Apple silicon and Intel), Linux
 (x86-64 and ARM64) and Windows (x86-64). No Rust toolchain needed.
 
-| Program | What it is |
+| Command | What it does |
 | --- | --- |
-| `jev-pilot` | The command line. It observes, asks Jev, and drives the device. |
-| `jev-pilot-mcp` | An MCP server over stdio. Every tool runs the `jev-pilot` installed beside it, so the two cannot drift apart. |
-
-Because the server runs the command line rather than containing the loop, the two
-are always installed together, into one directory.
+| `jev-pilot "<goal>"` | Observes the screen, asks Jev, and drives the device. |
+| `jev-pilot mcp` | Serves the Model Context Protocol over stdio, so an agent can start runs and answer their questions. Each tool call runs this same program, so the server and the command line cannot drift apart. |
 
 ### 1. Install jev-pilot
 
@@ -59,11 +56,11 @@ Windows (PowerShell):
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/OliverRhyme/jev-pilot/releases/latest/download/jev-pilot-installer.ps1 | iex"
 ```
 
-Both put the two programs in `~/.jev-pilot/bin` (`%USERPROFILE%\.jev-pilot\bin` on
+Both put `jev-pilot` in `~/.jev-pilot/bin` (`%USERPROFILE%\.jev-pilot\bin` on
 Windows) and add it to your `PATH`; open a new terminal afterwards. To install by
 hand instead, download the archive for your platform from the
 [releases page](https://github.com/OliverRhyme/jev-pilot/releases), unpack it, and
-keep both programs in the same directory.
+put `jev-pilot` anywhere on your `PATH`.
 
 While the repository is private, the one-line installers cannot fetch anything
 for someone who is not signed in. With access and the GitHub CLI, download the
@@ -144,7 +141,7 @@ The server needs the key in its own environment: the client starts it, and it
 starts the command line, which inherits it. With Claude Code:
 
 ```console
-$ claude mcp add jev-pilot -s user -e TYPESAFE_API_KEY_FILE=/path/to/api-key -- jev-pilot-mcp
+$ claude mcp add jev-pilot -s user -e TYPESAFE_API_KEY_FILE=/path/to/api-key -- jev-pilot mcp
 ```
 
 Any other client, wherever it keeps its servers:
@@ -153,7 +150,8 @@ Any other client, wherever it keeps its servers:
 {
   "mcpServers": {
     "jev-pilot": {
-      "command": "jev-pilot-mcp",
+      "command": "jev-pilot",
+      "args": ["mcp"],
       "env": { "TYPESAFE_API_KEY_FILE": "/path/to/api-key" }
     }
   }
@@ -161,12 +159,12 @@ Any other client, wherever it keeps its servers:
 ```
 
 A client that does not start servers with your `PATH` needs the full path:
-`~/.jev-pilot/bin/jev-pilot-mcp`, or on Windows
-`C:\Users\<you>\.jev-pilot\bin\jev-pilot-mcp.exe`.
+`~/.jev-pilot/bin/jev-pilot`, or on Windows
+`C:\Users\<you>\.jev-pilot\bin\jev-pilot.exe`.
 
 ### Updating
 
-Run the installer again; it replaces both programs. A server already running
+Run the installer again; it replaces the program. A server already running
 keeps its old tool list until it is restarted, so reconnect it in the client
 afterwards — in Claude Code, `/mcp` and then reconnect `jev-pilot`.
 
@@ -174,11 +172,11 @@ A reconnect does not always replace the process. If the tools still lack a new
 argument, end the old server and reconnect:
 
 ```sh
-pkill jev-pilot-mcp                      # macOS, Linux
+pkill -f "jev-pilot mcp"                 # macOS, Linux
 ```
 
 ```powershell
-Stop-Process -Name jev-pilot-mcp         # Windows
+Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%jev-pilot%mcp%'" | Invoke-CimMethod -MethodName Terminate   # Windows
 ```
 
 ### From source
@@ -189,9 +187,8 @@ With Rust 1.98 or newer, from a clone:
 $ cargo install --path . --features mcp --locked
 ```
 
-This installs into `~/.cargo/bin` instead. Leave off `--features mcp` for the
-command line alone; the server brings an async runtime the command line does not
-need.
+This installs into `~/.cargo/bin` instead. Leave off `--features mcp` for a
+build without the server; it brings an async runtime nothing else needs.
 
 ### Releasing
 
@@ -275,7 +272,7 @@ then recognised the goal met at 0.87 on its own.
 
 ## Driving from another agent
 
-`jev-pilot-mcp` speaks the Model Context Protocol over stdin and stdout, so a
+`jev-pilot mcp` speaks the Model Context Protocol over stdin and stdout, so a
 model holding a conversation can drive a device — and, more to the point, can
 *be* the second opinion above. A run that cannot decide stops and asks; the
 caller answers it and the run carries on.
