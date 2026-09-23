@@ -652,3 +652,28 @@ fn losing_the_token_is_told_apart_from_losing_the_helper() {
         "a helper in trouble is not a helper that forgot us"
     );
 }
+
+/// Android writes a component whose class shares its package in the short
+/// form, `package/.Class`, and a device enabled through Settings holds it that
+/// way. Measured on a Pixel 8 Pro: the helper enabled as
+/// `dev.jevpilot.helper/.PilotAccessibilityService`, and every run reporting
+/// it switched off and reading screens through `uiautomator dump` instead, at
+/// about 3s a read.
+#[test]
+fn a_helper_enabled_under_its_short_name_is_enabled() {
+    use jev_pilot::device::helper::{BUNDLED, Provision};
+
+    let short = "dev.jevpilot.helper/.PilotAccessibilityService:com.cyb3rko.flashdim/.service.VolumeButtonService";
+
+    assert_eq!(
+        Provision::assess(Some(BUNDLED.version_code), short),
+        Provision::Ready
+    );
+    assert_eq!(
+        Provision::enabled_services_with_helper(short),
+        short,
+        "already there, so nothing is added"
+    );
+    let (without, _) = Provision::revival_of(short);
+    assert_eq!(without, "com.cyb3rko.flashdim/.service.VolumeButtonService");
+}

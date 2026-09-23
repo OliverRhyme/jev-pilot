@@ -969,8 +969,7 @@ impl AdbDevice {
             Self::run(&self.adb.set_enabled_services_args(&merged))?;
             Self::run(&self.adb.enable_accessibility_args())?;
             std::thread::sleep(std::time::Duration::from_millis(Self::ENABLE_SETTLE_MS));
-            if Self::run(&self.adb.enabled_services_args())?.contains(Provision::SERVICE_COMPONENT)
-            {
+            if Provision::helper_enabled(&Self::run(&self.adb.enabled_services_args())?) {
                 return Ok(());
             }
         }

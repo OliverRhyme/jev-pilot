@@ -137,6 +137,21 @@ impl Provision {
     pub const SERVICE_COMPONENT: &'static str =
         "dev.jevpilot.helper/dev.jevpilot.helper.PilotAccessibilityService";
 
+    /// The same component as Android shortens it when the class shares the
+    /// package, which is how Settings writes it.
+    const SERVICE_COMPONENT_SHORT: &'static str = "dev.jevpilot.helper/.PilotAccessibilityService";
+
+    /// Whether one entry of the setting names the helper, in either spelling.
+    fn names_helper(service: &str) -> bool {
+        service == Self::SERVICE_COMPONENT || service == Self::SERVICE_COMPONENT_SHORT
+    }
+
+    /// Whether the helper is among the enabled services, in either spelling.
+    #[must_use]
+    pub fn helper_enabled(enabled_services: &str) -> bool {
+        enabled_services.trim().split(':').any(Self::names_helper)
+    }
+
     /// What this device needs, from its installed version and enabled services.
     #[must_use]
     pub fn assess(installed: Option<u32>, enabled_services: &str) -> Self {
@@ -145,7 +160,7 @@ impl Provision {
             Some(version) if version < BUNDLED.version_code => {
                 Self::Outdated { installed: version }
             }
-            Some(_) if !enabled_services.contains(Self::SERVICE_COMPONENT) => Self::NotEnabled,
+            Some(_) if !Self::helper_enabled(enabled_services) => Self::NotEnabled,
             Some(_) => Self::Ready,
         }
     }
@@ -169,10 +184,7 @@ impl Provision {
         if current.is_empty() {
             return Self::SERVICE_COMPONENT.to_owned();
         }
-        if current
-            .split(':')
-            .any(|service| service == Self::SERVICE_COMPONENT)
-        {
+        if Self::helper_enabled(current) {
             return current.to_owned();
         }
         format!("{current}:{}", Self::SERVICE_COMPONENT)
@@ -194,7 +206,7 @@ impl Provision {
         let others: Vec<&str> = current
             .trim()
             .split(':')
-            .filter(|service| !service.is_empty() && *service != Self::SERVICE_COMPONENT)
+            .filter(|service| !service.is_empty() && !Self::names_helper(service))
             .collect();
         let without = if others.is_empty() {
             "null".to_owned()
