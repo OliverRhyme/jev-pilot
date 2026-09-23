@@ -360,7 +360,7 @@ impl Snapshot {
     ///
     /// The rows it offers, which of them can be reached, the words it says, the
     /// controls it refuses and whether a keyboard is up — and deliberately not
-    /// where any of it sits.
+    /// where any of it sits, nor what has been typed into its fields.
     /// A form re-entered after a detour is the same place with its rows at
     /// slightly different offsets, and a spinner moving a pixel is the same
     /// place too.
@@ -379,7 +379,13 @@ impl Snapshot {
         self.notices.hash(&mut hasher);
         self.unavailable.hash(&mut hasher);
         for (handle, element) in self.refs() {
-            element.label.hash(&mut hasher);
+            // A field's words are what was typed into it, and a form is the
+            // same place whatever it holds. Counted, a form that reformats its
+            // amount from "50" to "50.00" while a quote is on the way looked
+            // like somewhere new, and its Continue was pressed three times.
+            if !element.editable {
+                element.label.hash(&mut hasher);
+            }
             element.detail.hash(&mut hasher);
             element.editable.hash(&mut hasher);
             // Not where a row is, but whether it can be reached. A web page

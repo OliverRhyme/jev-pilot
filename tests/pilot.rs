@@ -1515,3 +1515,64 @@ fn a_run_entering_keys_points_its_questions_at_the_next_key() {
         );
     }
 }
+
+/// A form that reformats what was typed into it, and does nothing else, while
+/// the quote its Continue asked for is on its way.
+#[derive(Default)]
+struct Reformatting {
+    taps: usize,
+    reads: usize,
+}
+
+impl Device for Reformatting {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        use jev_pilot::snapshot::{Bounds, Element};
+        self.reads += 1;
+        let amount = if self.taps == 0 { "50" } else { "50.00" };
+        Ok(Snapshot::new(vec![
+            Element {
+                label: amount.into(),
+                detail: None,
+                editable: true,
+                bounds: Bounds::from_origin_size(0, 0, 400, 80),
+            },
+            Element {
+                label: "Continue".into(),
+                detail: None,
+                editable: false,
+                bounds: Bounds::from_origin_size(0, 200, 400, 80),
+            },
+        ])
+        .expect("a screen"))
+    }
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        if matches!(command, Command::Tap(_)) {
+            self.taps += 1;
+        }
+        Ok(())
+    }
+}
+
+/// A form is the same place whatever its fields hold. Measured on a transfer
+/// form: Continue's first tap turned "50" into "50.00" while its quote was on
+/// the way, the reformatted form looked like somewhere new, and Continue was
+/// tapped three times — here a quote each time, on a commit button a payment.
+#[test]
+fn a_button_is_not_pressed_again_because_a_field_reformatted_itself() {
+    let mut pilot = Pilot::new(
+        Reformatting::default(),
+        Scripted::new(vec![
+            answer("tap", Some("A2"), 0.99, 0.02),
+            answer("tap", Some("A2"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+        &Android,
+    );
+
+    pilot
+        .pursue("continue past the form")
+        .expect("the run completes");
+
+    assert_eq!(pilot.device().taps, 1, "the second tap was waited out");
+}
