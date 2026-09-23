@@ -715,6 +715,7 @@ impl Drop for DeepReader {
     }
 }
 
+#[cfg(feature = "http")]
 impl DeepReader {
     /// How long the instrumentation is given to let go of its `UiAutomation`
     /// before the package is stopped outright.
