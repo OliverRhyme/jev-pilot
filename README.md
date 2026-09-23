@@ -34,59 +34,88 @@ button, a tap aimed at nothing.
 
 ## Install
 
-One package, two programs:
+One package, two programs, prebuilt for macOS (Apple silicon and Intel), Linux
+(x86-64 and ARM64) and Windows (x86-64). No Rust toolchain needed.
 
-| Binary | What it is | Built |
-| --- | --- | --- |
-| `jev-pilot` | The command line. It observes, asks Jev, and drives the device. | always |
-| `jev-pilot-mcp` | An MCP server over stdio. Every tool runs the `jev-pilot` installed beside it, so the two cannot drift apart. | with the `mcp` feature |
+| Program | What it is |
+| --- | --- |
+| `jev-pilot` | The command line. It observes, asks Jev, and drives the device. |
+| `jev-pilot-mcp` | An MCP server over stdio. Every tool runs the `jev-pilot` installed beside it, so the two cannot drift apart. |
 
-Because the server runs the command line rather than containing the loop, **install
-them together and update them together**. A server left running an old copy keeps
-answering with the old tools.
+Because the server runs the command line rather than containing the loop, the two
+are always installed together, into one directory.
 
-### What you need
+### 1. Install jev-pilot
 
-- Rust 1.98 or newer (`rustup update stable`).
-- `adb` on your `PATH` — Android's [platform tools].
-- An Android device with USB or wireless debugging on and this computer
-  authorised. `adb devices` should list it as `device`, not `unauthorized`.
-- A TypeSafe API key.
+macOS and Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/OliverRhyme/jev-pilot/releases/latest/download/jev-pilot-installer.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/OliverRhyme/jev-pilot/releases/latest/download/jev-pilot-installer.ps1 | iex"
+```
+
+Both put the two programs in `~/.jev-pilot/bin` (`%USERPROFILE%\.jev-pilot\bin` on
+Windows) and add it to your `PATH`; open a new terminal afterwards. To install by
+hand instead, download the archive for your platform from the
+[releases page](https://github.com/OliverRhyme/jev-pilot/releases), unpack it, and
+keep both programs in the same directory.
+
+While the repository is private, the one-line installers cannot fetch anything
+for someone who is not signed in. With access and the GitHub CLI, download the
+archive directly — for example, on an Apple silicon Mac:
+
+```sh
+gh release download -R OliverRhyme/jev-pilot -p 'jev-pilot-aarch64-apple-darwin.tar.xz'
+```
+
+The archives are named `jev-pilot-<target>`: `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
+(`.tar.xz`), and `x86_64-pc-windows-msvc` (`.zip`).
+
+### 2. Install adb
+
+jev-pilot drives the phone through Android's `adb`:
+
+| | |
+| --- | --- |
+| macOS | `brew install --cask android-platform-tools` |
+| Windows | `winget install Google.PlatformTools` |
+| Debian, Ubuntu | `sudo apt install adb` |
+| Anything else | Android's [platform tools], unpacked and on your `PATH` |
 
 [platform tools]: https://developer.android.com/tools/releases/platform-tools
 
-### Build and install
+Then turn on USB or wireless debugging on the phone, connect it, and accept the
+prompt to trust this computer. `adb devices` should list it as `device`, not
+`unauthorized`.
 
-From a clone, both binaries into `~/.cargo/bin`:
+### 3. Give it your TypeSafe key
 
-```console
-$ cargo install --path . --features mcp --locked
-```
+Read at run time, never compiled in. Either variable works; the file wins when
+both are set, and is the better choice because the key stays out of the
+environment of every process you start.
 
-Leave off `--features mcp` for the command line alone; the server brings an async
-runtime the command line does not need. Straight from the repository, without a
-clone:
-
-```console
-$ cargo install --git https://github.com/OliverRhyme/jev-pilot --features mcp --locked
-```
-
-The crate is not published to crates.io, so there is no `cargo install jev-pilot`.
-
-### The API key
-
-Read at run time, never compiled in. Either works; the file wins when both are set:
+macOS and Linux, in your shell's profile:
 
 ```sh
-export TYPESAFE_API_KEY=ts-live-...
-export TYPESAFE_API_KEY_FILE=/path/to/typesafe-api-key   # preferred
+export TYPESAFE_API_KEY_FILE="$HOME/.config/typesafe/api-key"   # a file holding the key
+# or: export TYPESAFE_API_KEY=ts-live-...
 ```
 
-Running from this directory, `cp .env.example .env` and fill it in, then load it
-into the shell (`set -a; . ./.env; set +a`). The program itself does not read
-`.env`.
+Windows, once (applies to new terminals):
 
-### Check the device
+```powershell
+setx TYPESAFE_API_KEY_FILE "$env:USERPROFILE\.config\typesafe\api-key"
+```
+
+The programs do not read a `.env` file themselves.
+
+### 4. Check the device
 
 ```console
 $ jev-pilot devices           # the serials adb can see
@@ -101,28 +130,22 @@ screen. It is an accessibility service, so it can read every screen on that
 device; it answers only on loopback, to a caller holding a per-run token, and is
 built from the source in `helper/`. Nothing installs it except `helper install`.
 
-### Run a goal
+### 5. Run a goal
 
 ```console
-$ jev-pilot --app com.google.android.youtube \
-    --then "Tap Search" --then "Type opus 5.5 into the search box and submit" \
-    --then "Tap a video about Opus 5.5" --text "search=opus 5.5" \
-    --accept "A video is open in the player" --floor 0.4 \
-    "Find a video about Opus 5.5 and play it"
+$ jev-pilot --app com.google.android.youtube --then "Tap Search" --then "Type opus 5.5 into the search box and submit" --then "Tap a video about Opus 5.5" --text "search=opus 5.5" --accept "A video is open in the player" --floor 0.4 "Find a video about Opus 5.5 and play it"
 ```
 
 `jev-pilot --help` lists every flag. A run that cannot decide asks at the terminal.
 
-### Register the MCP server
+### 6. Register the MCP server (optional)
 
 The server needs the key in its own environment: the client starts it, and it
 starts the command line, which inherits it. With Claude Code:
 
 ```console
-$ claude mcp add jev-pilot -e TYPESAFE_API_KEY_FILE=/path/to/typesafe-api-key -- jev-pilot-mcp
+$ claude mcp add jev-pilot -s user -e TYPESAFE_API_KEY_FILE=/path/to/api-key -- jev-pilot-mcp
 ```
-
-That registers it for the current project; add `-s user` to have it in every one.
 
 Any other client, wherever it keeps its servers:
 
@@ -131,28 +154,53 @@ Any other client, wherever it keeps its servers:
   "mcpServers": {
     "jev-pilot": {
       "command": "jev-pilot-mcp",
-      "env": { "TYPESAFE_API_KEY_FILE": "/path/to/typesafe-api-key" }
+      "env": { "TYPESAFE_API_KEY_FILE": "/path/to/api-key" }
     }
   }
 }
 ```
 
-Use the absolute path (`~/.cargo/bin/jev-pilot-mcp`) if the client does not
-start servers with your shell's `PATH`.
+A client that does not start servers with your `PATH` needs the full path:
+`~/.jev-pilot/bin/jev-pilot-mcp`, or on Windows
+`C:\Users\<you>\.jev-pilot\bin\jev-pilot-mcp.exe`.
 
 ### Updating
 
-Re-run the same `cargo install`; it replaces both binaries. A server already
-running keeps its old tool list until it is restarted, so reconnect it in the
-client afterwards — in Claude Code, `/mcp` and then reconnect `jev-pilot`.
+Run the installer again; it replaces both programs. A server already running
+keeps its old tool list until it is restarted, so reconnect it in the client
+afterwards — in Claude Code, `/mcp` and then reconnect `jev-pilot`.
 
 A reconnect does not always replace the process. If the tools still lack a new
-argument, check when the running server started, and end it if it predates the
-install; the next reconnect starts the new one:
+argument, end the old server and reconnect:
+
+```sh
+pkill jev-pilot-mcp                      # macOS, Linux
+```
+
+```powershell
+Stop-Process -Name jev-pilot-mcp         # Windows
+```
+
+### From source
+
+With Rust 1.98 or newer, from a clone:
 
 ```console
-$ ps -o lstart=,command= -p "$(pgrep -d, jev-pilot-mcp)"
-$ pkill jev-pilot-mcp
+$ cargo install --path . --features mcp --locked
+```
+
+This installs into `~/.cargo/bin` instead. Leave off `--features mcp` for the
+command line alone; the server brings an async runtime the command line does not
+need.
+
+### Releasing
+
+Releases are built by [`dist`](https://opensource.axo.dev/cargo-dist/), configured
+in `dist-workspace.toml`. Pushing a version tag builds every platform on its own
+runner and publishes the archives and installers:
+
+```console
+$ git tag v0.1.0 && git push origin v0.1.0
 ```
 
 ## Why it is fast

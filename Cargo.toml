@@ -52,6 +52,11 @@ required-features = ["mcp"]
 name = "jev-pilot"
 path = "src/main.rs"
 
+# Released as prebuilt binaries even though it is never published to
+# crates.io; without this, `publish = false` hides it from `dist`.
+[package.metadata.dist]
+dist = true
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
@@ -67,3 +72,8 @@ missing_errors_doc = "warn"
 # UIAutomator, XCUITest, VoiceOver. Backticking them would imply they are items
 # in this crate rather than things in the world.
 doc_markdown = "allow"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
