@@ -6,6 +6,7 @@
 
 use crate::act::{
     Act, Catalog, Consequence, Decision, Direction, Floors, Indecision, Operation, Outcome,
+    SystemAct,
 };
 use crate::device::{Command, Device, command_for};
 use crate::judgment::{Confidence, Criterion, Progress};
@@ -711,6 +712,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// stops repeating itself and asks.
     pub const INEFFECTIVE_LIMIT: u32 = 3;
 
+    /// Above this, a screen is taken to commit, or to warn.
+    ///
+    /// Lower than [`Self::CERTAINTY`] on purpose: wrong one way costs a
+    /// question, and the other way a transfer nobody meant. Measured, screens
+    /// that were neither read under 0.11, and those that were 0.73 and above.
+    pub const SCREENED: f64 = 0.5;
+
     /// How long a screen must have gone without an accessibility event
     /// before the device's own account of it is taken as settled.
     ///
@@ -1273,7 +1281,22 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 });
             }
 
-            let decided = catalog.resolve(&answers, &self.floors);
+            // What acting here would cost is judged of the screen, not of the
+            // gesture: tapping Confirm Transfer is an ordinary tap that sends
+            // the money, and tapping Proceed on "you've made a similar
+            // transaction" overrides a warning meant for a person.
+            let screened = |answer: Option<crate::judgment::Likelihood>| {
+                answer.is_some_and(|likely| likely.noul > Self::SCREENED)
+            };
+            let floors = if screened(answers.commits) {
+                self.floors.committing()
+            } else {
+                self.floors
+            };
+            let mut decided = catalog.resolve(&answers, &floors);
+            if screened(answers.warns) && decided.as_ref().is_ok_and(goes_on) {
+                decided = Err(Indecision::Warned);
+            }
 
             if answers.is_error_screen.noul > self.certainty {
                 self.report(
@@ -1891,6 +1914,22 @@ fn elapsed_ms(since: std::time::Instant) -> u64 {
 }
 
 /// Describe an action the way the next step should hear about it.
+/// Whether a decision goes on past the screen rather than backing away from
+/// it or waiting on it.
+fn goes_on(decision: &Decision) -> bool {
+    match decision {
+        Decision::Ready(act) => !matches!(
+            act,
+            Act::System(SystemAct::Back)
+                | Act::CloseKeyboard
+                | Act::Wait
+                | Act::Scroll(_)
+                | Act::Finish(_)
+        ),
+        _ => true,
+    }
+}
+
 /// The row an act is aimed at, for an act aimed at one.
 const fn target_of(act: &Act) -> Option<ElementRef> {
     match act {

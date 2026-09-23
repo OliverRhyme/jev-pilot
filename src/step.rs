@@ -68,12 +68,60 @@ pub struct StepQuestions<'a> {
     pub goal_met: Question<Checking<'a>>,
     /// Whether the screen is an error state.
     pub is_error_screen: Question<&'static str>,
+    /// Whether this screen is the final confirmation of something that cannot
+    /// be undone, such as sending money or deleting.
+    pub commits: Question<Screening>,
+    /// Whether this screen is warning the user to reconsider before going on.
+    pub warns: Question<Screening>,
     /// One judgment per acceptance criterion, keyed `check_0`, `check_1`, ...
     ///
     /// Flattened into the same map as the rest, so they are evaluated in the
     /// same parallel pass and cost no additional round trip.
     #[serde(flatten)]
     pub checks: BTreeMap<Box<str>, Question<Confirming<'a>>>,
+}
+
+/// A yes-or-no question about the screen as a whole, with examples of each.
+///
+/// With examples, a transfer summary read 0.91 as a final confirmation where
+/// the bare question read it at 0.67.
+#[derive(Debug, Clone, Serialize)]
+pub struct Screening {
+    /// The judgment being asked.
+    pub question: &'static str,
+    /// Screens that are a yes.
+    pub examples_yes: &'static [&'static str],
+    /// Screens that are a no.
+    pub examples_no: &'static [&'static str],
+}
+
+impl Screening {
+    /// Is acting here the final confirmation of something that cannot be undone?
+    pub const COMMITS: Self = Self {
+        question: "Does the current screen ask for the final confirmation of an irreversible action?",
+        examples_yes: &[
+            "Confirm Transfer ₱50.00",
+            "Pay now",
+            "Delete account",
+            "Submit application",
+        ],
+        examples_no: &["Continue to review", "Select an account", "Enter amount"],
+    };
+
+    /// Is the screen warning the user to reconsider?
+    pub const WARNS: Self = Self {
+        question: "Is the current screen a warning that asks the user to reconsider before going on?",
+        examples_yes: &[
+            "It seems you've made a similar transaction. Proceed?",
+            "This cannot be undone. Delete?",
+            "This site may be unsafe. Continue?",
+        ],
+        examples_no: &[
+            "An announcement with a Close button",
+            "A login form",
+            "A confirmation summary of a transfer",
+        ],
+    };
 }
 
 /// The instructions for one acceptance criterion.
@@ -163,6 +211,20 @@ impl<'a> StepQuestions<'a> {
                 criteria: Progress::levels(),
             },
             checks,
+            commits: Question::Noul {
+                instructions: Screening::COMMITS,
+                criteria: Poles {
+                    yes: "Acting on this screen commits something that cannot be undone".into(),
+                    no: "Nothing on this screen is final".into(),
+                },
+            },
+            warns: Question::Noul {
+                instructions: Screening::WARNS,
+                criteria: Poles {
+                    yes: "The screen warns of a risk and asks whether to go on".into(),
+                    no: "The screen is not a warning".into(),
+                },
+            },
             is_error_screen: Question::Noul {
                 instructions: "Is the current screen an error, crash, or permission-denied state?",
                 criteria: Poles {
@@ -213,6 +275,12 @@ pub struct StepAnswers {
     pub goal_met: Graded,
     /// How likely the screen is an error state.
     pub is_error_screen: Likelihood,
+    /// Whether acting on this screen commits something that cannot be undone.
+    #[serde(default)]
+    pub commits: Option<Likelihood>,
+    /// Whether this screen is warning the user to reconsider.
+    #[serde(default)]
+    pub warns: Option<Likelihood>,
     /// One answer per acceptance criterion, keyed to match the questions.
     #[serde(flatten, default)]
     pub checks: BTreeMap<Box<str>, Likelihood>,

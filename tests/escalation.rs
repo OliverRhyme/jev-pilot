@@ -646,3 +646,104 @@ fn an_impasse_says_which_rows_are_covered() {
         "Result B, and only it, is under the toolbar"
     );
 }
+
+fn screening(commits: f64, warns: f64, operation: &str, confidence: f64) -> serde_json::Value {
+    serde_json::json!({
+        "operation": { "type": "choice", "choice": operation, "confidence": confidence },
+        "tap_target": { "type": "choice", "choice": "A2", "confidence": confidence },
+        "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+        "is_error_screen": { "type": "noul", "noul": 0.01 },
+        "commits": { "type": "noul", "noul": commits },
+        "warns": { "type": "noul", "noul": warns },
+    })
+}
+
+/// Going on past a warning is a person's decision, however sure the model is.
+/// Measured on a transfer: "It seems you've made a similar transaction — do you
+/// want to proceed?", and the run tapped Proceed at 0.94 without asking.
+#[test]
+fn a_screen_warning_the_user_off_is_asked_about_rather_than_acted_on() {
+    let asked = std::cell::Cell::new(false);
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        Scripted(RefCell::new(vec![screening(0.73, 0.89, "tap", 0.99)])),
+        &Android,
+    )
+    .escalating_to(|impasse: &Impasse<'_>| -> Result<Resolution, Infallible> {
+        asked.set(true);
+        assert!(
+            impasse.because.to_string().contains("warning"),
+            "{}",
+            impasse.because
+        );
+        Ok(Resolution::Stop)
+    });
+
+    let _ = pilot.pursue("Send fifty pesos");
+
+    assert!(asked.get(), "the warning went to a person");
+    assert!(
+        pilot.device().performed.is_empty(),
+        "{:?}",
+        pilot.device().performed
+    );
+}
+
+/// Backing away from a warning needs nobody's leave.
+#[test]
+fn backing_away_from_a_warning_is_not_asked_about() {
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        Scripted(RefCell::new(vec![
+            screening(0.73, 0.89, "back", 0.99),
+            screening(0.0, 0.0, "done", 0.99),
+        ])),
+        &Android,
+    )
+    .limited_to(2);
+
+    let _ = pilot.pursue("Cancel the transfer");
+
+    assert_eq!(
+        pilot.device().performed.first(),
+        Some(&Command::System(jev_pilot::act::SystemAct::Back))
+    );
+}
+
+/// A tap on the screen that commits the money is held to the floor for
+/// actions that cannot be undone, not the one for ordinary gestures.
+#[test]
+fn a_tap_on_a_screen_that_commits_is_held_to_the_higher_floor() {
+    use jev_pilot::act::{Consequence, Floors};
+    let low = Confidence::new(0.4).expect("valid");
+    let high = Confidence::new(0.6).expect("valid");
+    let floors = Floors::new(low).requiring_for(Consequence::Destructive, high);
+
+    let mut committing = Pilot::new(
+        Fake::default(),
+        Scripted(RefCell::new(vec![screening(0.91, 0.05, "tap", 0.5)])),
+        &Android,
+    )
+    .with_floors(floors);
+    let ending = committing
+        .pursue("Send fifty pesos")
+        .expect("the run completes");
+    assert!(matches!(ending, Ending::Uncertain { .. }), "{ending:?}");
+    assert!(committing.device().performed.is_empty());
+
+    let mut ordinary = Pilot::new(
+        Fake::default(),
+        Scripted(RefCell::new(vec![
+            screening(0.05, 0.05, "tap", 0.5),
+            screening(0.0, 0.0, "done", 0.99),
+        ])),
+        &Android,
+    )
+    .with_floors(floors)
+    .limited_to(2);
+    let _ = ordinary.pursue("Open the account");
+    assert!(matches!(
+        ordinary.device().performed.first(),
+        Some(Command::Tap(_))
+    ));
+}

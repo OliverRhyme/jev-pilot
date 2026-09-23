@@ -471,6 +471,23 @@ impl Floors {
     pub const fn for_target(&self, operation: Operation) -> Confidence {
         self.for_operation(operation)
     }
+
+    /// These floors on a screen where an ordinary tap cannot be taken back.
+    ///
+    /// A tap is ordinary by its gesture and not by its row: tapping "Confirm
+    /// Transfer" is the same gesture as tapping a list row, and it sends the
+    /// money. On such a screen every gesture is held to the destructive floor.
+    #[must_use]
+    pub fn committing(self) -> Self {
+        Self {
+            ordinary: if self.destructive.get() > self.ordinary.get() {
+                self.destructive
+            } else {
+                self.ordinary
+            },
+            ..self
+        }
+    }
 }
 
 /// What a step's answers resolved to.
@@ -524,6 +541,9 @@ pub enum Indecision {
     NoTarget,
     /// The row chosen is covered by whatever is drawn over it.
     Covered,
+    /// The screen is warning the user off, and going on past it is a person's
+    /// decision, however sure the model is.
+    Warned,
 }
 
 impl fmt::Display for Indecision {
@@ -542,6 +562,10 @@ impl fmt::Display for Indecision {
             ),
             Self::NoTarget => write!(f, "the operation needs a target and none was chosen"),
             Self::Covered => write!(f, "the row chosen is covered by what is drawn over it"),
+            Self::Warned => write!(
+                f,
+                "the screen is a warning asking whether to go on, and that is for a person to decide"
+            ),
         }
     }
 }
