@@ -76,7 +76,16 @@ missing_errors_doc = "warn"
 # in this crate rather than things in the world.
 doc_markdown = "allow"
 
-# The profile that 'dist' will build with
+# The profile that 'dist' will build with.
+#
+# Built for size, since a release is something people download. Whole-program
+# LTO in one codegen unit, optimising for size: on Apple silicon the two
+# programs went from 3.9MB each to 2.6MB and 2.1MB, and the archive from 1.83MB
+# to 1.39MB. The loop waits on the device and the network, not the CPU, so the
+# speed given up is not felt. Panics still unwind: the server runs each tool
+# call as its own task, and aborting would take the whole server down with one.
 [profile.dist]
 inherits = "release"
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
