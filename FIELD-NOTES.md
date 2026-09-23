@@ -167,3 +167,66 @@ fix: settle on a stable read rather than on a fixed delay.
   mid-run, with the run picking it up and carrying on, worked exactly as
   described — including handing back `stop` to end a run cleanly.
 - Generation stamping never mis-resolved a reference across a screen change.
+
+---
+
+## 2026-09-23 — Android, Chrome web search (Pixel 8 Pro)
+
+Goal: search Google for "jev latest update" in Chrome and open a blog post
+about it, through the MCP server, with `floor` 0.4. Three runs from Chrome on
+`about:blank`, then three more after the fixes below.
+
+| | endings | machine time / run | per step | read | rows |
+|---|---|---|---|---|---|
+| before | 2 achieved, 1 no-progress; 5 questions | 40–52s | 6.9s | 3.0s | 63 |
+| after | 2 achieved, 1 no-progress; 2 questions | 10–11s | 1.3s | 0.08s | 17 |
+
+### 1. The helper was enabled and reported switched off
+
+The secure setting held the helper as `dev.jevpilot.helper/.PilotAccessibilityService`,
+the short form Android writes for a class in its own package. The check looked
+only for the full form, so every run read screens with `uiautomator dump`.
+Accepting both spellings made reads about 40× faster and, because the helper
+reports only what is on screen, cut a results page from about 120 rows to 20.
+
+### 2. An answer about a covered row was remembered as the row
+
+Jev chose a result below the fold, the tap was refused as covered, and the
+answer was "scroll down". The run recorded the refused tap instead, so the next
+step was told it had already tapped the result, and the first real tap on it
+was treated as a repeat and waited out. The act carried out is now what the
+run remembers.
+
+### 3. A web page read whole does not move when scrolled
+
+With `uiautomator dump`, Chrome reports every row on the page, on screen or
+not. A scroll changed no row and no word, so the scrolled page counted as
+another visit to the same place, and four visits ended the run. Which rows can
+be reached is now part of a place.
+
+### 4. A covered row was a question when it was only a scroll away
+
+Jev picked the right result on its own, and the run still stopped to ask,
+because the result lay under the toolbar. A covered row wholly past every
+reachable row is now scrolled towards, for as long as scrolling moves the
+screen; a row under a dialog is still asked about. The question now also says
+which rows are covered.
+
+### 5. Page furniture diluted the choice
+
+About twenty "About this result" rows among 125, and the wanted result chosen
+at 0.20–0.39 every time. Rows whose name repeats more than three times are no
+longer offered to Jev; an escalation can still name them.
+
+### 6. Still open
+
+- A stale start: a run begun on the article the run before left open declared
+  the goal achieved at its first step. The ending now says when a run achieved
+  its goal without doing anything.
+- The results page loads after `Submit` returns, and Jev leans `wait` at 0.34–0.41,
+  just under the floor. Two of three runs asked for that.
+- Jev tapped a sentence of Google's AI Overview, which is not a link, at 0.93,
+  and chose it again on the unchanged screen until the run ended for going in
+  circles. A second opinion could have picked a real result; the run ended
+  instead of asking.
+- Time spent answering a covered-row question is not counted in `waited_ms`.
