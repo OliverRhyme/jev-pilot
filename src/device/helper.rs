@@ -251,12 +251,14 @@ impl Token {
     /// run could predict or reuse would keep authorising the first run's
     /// access after it should have ended.
     ///
+    /// Through `getrandom` rather than `/dev/urandom`, which does not exist on
+    /// Windows: there, reading it failed, and with it every run.
+    ///
     /// # Errors
     /// Returns [`std::io::Error`] when the entropy source cannot be read.
     pub fn random() -> std::io::Result<Self> {
-        use std::io::Read as _;
         let mut bytes = [0_u8; 16];
-        std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+        getrandom::fill(&mut bytes).map_err(std::io::Error::other)?;
         let mut hex = String::with_capacity(32);
         for byte in bytes {
             use std::fmt::Write as _;
