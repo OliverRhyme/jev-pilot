@@ -38,16 +38,15 @@ fn confidence_outside_the_unit_interval_does_not_exist() {
     assert!(Confidence::new(0.5).is_some());
 }
 
-/// Row text belongs in the state, not repeated in the options.
-///
-/// A Choice may carry `null` for an option that needs no description, and the
-/// rows are already in the state for the other questions to read. Sending each
-/// label twice measured 2187 input tokens against 1590 for the same request
-/// with the labels referenced instead — 27% more, for the same answer at the
-/// same confidence. Billing is on input tokens only, so the duplicate is pure
-/// waste.
+/// Each row option carries the row's own words, not a key to look up in the
+/// state. A bare key is a hop the model has to make, and on a PIN pad the hop
+/// is where it falls: `A2` is the key labelled "1", and asked for the digit 2
+/// with bare keys Jev chose `A2` — the key "1" — with 0.10 on the right one.
+/// With each option described by its label, the same request put 0.92 on the
+/// right key, and 0.70 against 0.10 four digits later. The labels travel twice,
+/// once in the state and once here, and that is the price of the answer.
 #[test]
-fn target_options_are_keys_only_with_the_text_left_in_the_state() {
+fn target_options_carry_the_words_of_the_row_they_name() {
     let snapshot = Android.parse_hierarchy(SETTINGS).expect("fixture parses");
     let catalog = Catalog::for_screen(&snapshot, &Android);
 
@@ -59,13 +58,14 @@ fn target_options_are_keys_only_with_the_text_left_in_the_state() {
     .expect("serializes");
 
     let criteria = wire["criteria"].as_object().expect("a criteria map");
-    assert!(criteria.contains_key("A3"));
-    assert!(
-        criteria.values().all(serde_json::Value::is_null),
-        "options carry no text of their own: {criteria:?}"
-    );
-    // And the question says where to look.
-    assert!(wire["instructions"].to_string().contains("rows"));
+    let rows: std::collections::HashMap<String, &str> = catalog
+        .rows()
+        .map(|(id, text)| (id.to_string(), text))
+        .collect();
+    assert!(!criteria.is_empty());
+    for (key, described) in criteria {
+        assert_eq!(described.as_str(), Some(rows[key]), "option {key}");
+    }
 }
 
 /// `Home` is not recoverable by going back. It discards the app's navigation
@@ -145,5 +145,64 @@ fn putting_the_keyboard_away_is_not_recounted_as_going_back() {
     assert!(
         matches!(act, Act::CloseKeyboard),
         "it is its own act, so it can be described as itself: {act:?}",
+    );
+}
+
+/// A Google results page offers "About this result" under every result, some
+/// twenty times. Rows a screen names identically that often cannot be told
+/// apart by what they say, and each one takes a share of the choice from the
+/// rows that can. Measured: the right result chosen at 0.20 to 0.39 among 125
+/// rows, below the floor every time.
+#[test]
+fn a_label_repeated_across_the_screen_is_not_offered_to_choose_from() {
+    use jev_pilot::snapshot::{Bounds, Element, Snapshot};
+
+    let row = |label: &str, top: i32| Element {
+        label: label.into(),
+        detail: None,
+        editable: false,
+        bounds: Bounds::from_origin_size(0, top, 400, 40),
+    };
+    let mut rows = vec![row("Result A", 0), row("Result B", 50)];
+    rows.extend((0..5).map(|n| row("About this result", 100 + 50 * n)));
+    let snapshot = Snapshot::new(rows).expect("a screen");
+
+    let catalog = Catalog::for_screen(&snapshot, &Android);
+
+    let offered: Vec<&str> = catalog.rows().map(|(_, text)| text).collect();
+    assert_eq!(offered, ["Result A", "Result B"]);
+}
+
+/// Left out of Jev's choice, not out of reach: an escalation numbers rows as
+/// the screen lists them, and may still name one of these.
+#[test]
+fn a_row_left_out_of_the_choice_can_still_be_named_by_an_escalation() {
+    use jev_pilot::act::{Act, Decision};
+    use jev_pilot::snapshot::{Bounds, Element, Snapshot};
+
+    let row = |label: &str, top: i32| Element {
+        label: label.into(),
+        detail: None,
+        editable: false,
+        bounds: Bounds::from_origin_size(0, top, 400, 40),
+    };
+    let mut rows: Vec<Element> = (0..5).map(|n| row("About this result", 50 * n)).collect();
+    rows.push(row("Result A", 300));
+    let snapshot = Snapshot::new(rows).expect("a screen");
+    let catalog = Catalog::for_screen(&snapshot, &Android);
+
+    let Ok(Decision::Ready(Act::Tap(first))) = catalog.act_from(Operation::Tap, Some(0)) else {
+        panic!("row 0 is on screen and can be tapped");
+    };
+    let Ok(Decision::Ready(Act::Tap(last))) = catalog.act_from(Operation::Tap, Some(5)) else {
+        panic!("row 5 is on screen and can be tapped");
+    };
+    assert_eq!(
+        snapshot.resolve(first).expect("current").label.as_ref(),
+        "About this result"
+    );
+    assert_eq!(
+        snapshot.resolve(last).expect("current").label.as_ref(),
+        "Result A"
     );
 }

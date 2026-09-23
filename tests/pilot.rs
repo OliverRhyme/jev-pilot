@@ -372,7 +372,9 @@ fn a_run_that_has_left_its_app_is_told_so_and_offered_the_way_back() {
     };
     let mut pilot = Pilot::new(Wandered::default(), judge, &Android);
 
-    pilot.pursue("open wifi settings").expect("the run completes");
+    pilot
+        .pursue("open wifi settings")
+        .expect("the run completes");
 
     let seen = seen.borrow();
     let first = &seen[0];
@@ -409,7 +411,9 @@ fn the_home_launcher_is_never_the_app_a_goal_is_about() {
     // Starts on the launcher, and is in Settings from the first tap onward.
     let mut pilot = Pilot::new(Arrived::default(), judge, &Android);
 
-    pilot.pursue("open wifi settings").expect("the run completes");
+    pilot
+        .pursue("open wifi settings")
+        .expect("the run completes");
 
     let seen = seen.borrow();
     assert_eq!(seen[1]["app"], "com.android.settings");
@@ -457,8 +461,8 @@ fn naming_the_app_brings_it_to_the_front_before_anything_is_judged() {
         seen: std::rc::Rc::clone(&seen),
         turns: std::cell::RefCell::new(vec![answer("done", None, 0.99, 0.97)]),
     };
-    let mut pilot = Pilot::new(Arrived::default(), judge, &Android)
-        .about(Some("com.android.settings".into()));
+    let mut pilot =
+        Pilot::new(Arrived::default(), judge, &Android).about(Some("com.android.settings".into()));
 
     pilot.pursue("turn wifi on").expect("the run completes");
 
@@ -570,7 +574,9 @@ fn a_screen_is_settled_when_it_stops_changing_not_when_it_starts() {
     };
     let mut pilot = Pilot::new(HalfBuilt::default(), judge, &Android);
 
-    pilot.pursue("get to the next screen").expect("it completes");
+    pilot
+        .pursue("get to the next screen")
+        .expect("it completes");
 
     let seen = seen.borrow();
     // The second judgement must be about the finished screen, never the one
@@ -713,7 +719,9 @@ fn a_run_is_told_when_it_keeps_doing_the_same_thing() {
     };
     let mut pilot = Pilot::new(Validating::default(), judge, &Android);
 
-    pilot.pursue("continue past the form").expect("it completes");
+    pilot
+        .pursue("continue past the form")
+        .expect("it completes");
 
     let seen = seen.borrow();
     // Doing a thing once, then twice, is not yet a pattern.
@@ -856,7 +864,9 @@ fn a_screen_that_changes_and_changes_back_has_not_moved() {
     let judge = Scripted::new(vec![answer("tap", Some("A2"), 0.99, 0.02); 30]);
     let mut pilot = Pilot::new(Bouncing::default(), judge, &Android);
 
-    let ending = pilot.pursue("get past the form").expect("the run completes");
+    let ending = pilot
+        .pursue("get past the form")
+        .expect("the run completes");
 
     // Caught as a round trip rather than as a screen that will not move:
     // each screen does change, into the other one, so only the count of
@@ -913,8 +923,8 @@ fn a_launched_app_is_waited_for_until_it_has_drawn_something() {
         seen: std::rc::Rc::clone(&seen),
         turns: std::cell::RefCell::new(vec![answer("done", None, 0.99, 0.97); 4]),
     };
-    let mut pilot = Pilot::new(SlowToDraw::default(), judge, &Android)
-        .about(Some("com.example.wallet".into()));
+    let mut pilot =
+        Pilot::new(SlowToDraw::default(), judge, &Android).about(Some("com.example.wallet".into()));
 
     pilot.pursue("do the thing").expect("the run completes");
 
@@ -952,8 +962,7 @@ impl Device for SlowToDraw {
             3..=4 => Snapshot::new(Vec::new())
                 .expect("an empty screen")
                 .in_app(Some("com.example.wallet".into())),
-            _ => screen_of(&["Go Back", "Continue"])
-                .in_app(Some("com.example.wallet".into())),
+            _ => screen_of(&["Go Back", "Continue"]).in_app(Some("com.example.wallet".into())),
         })
     }
     fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
@@ -1031,7 +1040,14 @@ fn repeating_is_counted_even_when_the_screen_never_moves() {
     };
     // Inert: every action leaves the screen exactly as it was, so every step
     // after the first has the note appended to what it did.
-    let mut pilot = Pilot::new(Fake { inert: true, ..Fake::default() }, judge, &Android);
+    let mut pilot = Pilot::new(
+        Fake {
+            inert: true,
+            ..Fake::default()
+        },
+        judge,
+        &Android,
+    );
 
     let _ = pilot.pursue("tap the same thing");
 
@@ -1061,7 +1077,10 @@ fn an_action_that_changes_nothing_is_given_longer_the_next_time() {
     // than about repeating one action — that is
     // `an_action_that_changed_nothing_is_waited_out_rather_than_repeated`.
     let mut pilot = Pilot::new(
-        Fake { inert: true, ..Fake::default() },
+        Fake {
+            inert: true,
+            ..Fake::default()
+        },
         Scripted::new(vec![
             answer("tap", Some("A2"), 0.99, 0.02),
             answer("tap", Some("A3"), 0.99, 0.02),
@@ -1072,7 +1091,9 @@ fn an_action_that_changes_nothing_is_given_longer_the_next_time() {
     );
 
     let began = std::time::Instant::now();
-    let ending = pilot.pursue("tap the same thing").expect("the run completes");
+    let ending = pilot
+        .pursue("tap the same thing")
+        .expect("the run completes");
     let spent = began.elapsed();
 
     assert!(
@@ -1106,7 +1127,9 @@ fn closing_a_keyboard_that_has_already_closed_does_nothing() {
     ]);
     let mut pilot = Pilot::new(Closing::default(), judge, &Android);
 
-    pilot.pursue("put the keyboard away").expect("the run completes");
+    pilot
+        .pursue("put the keyboard away")
+        .expect("the run completes");
 
     assert!(
         pilot.device().performed.is_empty(),
@@ -1146,7 +1169,10 @@ impl Device for Closing {
 #[test]
 fn an_action_that_changed_nothing_is_waited_out_rather_than_repeated() {
     let mut pilot = Pilot::new(
-        Fake { inert: true, ..Fake::default() },
+        Fake {
+            inert: true,
+            ..Fake::default()
+        },
         Scripted::new(vec![answer("tap", Some("A2"), 0.99, 0.02); 6]),
         &Android,
     );
@@ -1160,7 +1186,8 @@ fn an_action_that_changed_nothing_is_waited_out_rather_than_repeated() {
         .filter(|command| matches!(command, Command::Tap(_)))
         .count();
     assert_eq!(
-        taps, 1,
+        taps,
+        1,
         "the tap that changed nothing is not sent again: {:?}",
         pilot.device().performed,
     );
@@ -1199,7 +1226,9 @@ fn a_screen_offering_a_single_row_is_looked_at_again_before_acting() {
     };
     let mut pilot = Pilot::new(Unfurling::default(), judge, &Android);
 
-    pilot.pursue("choose an account").expect("the run completes");
+    pilot
+        .pursue("choose an account")
+        .expect("the run completes");
 
     let seen = seen.borrow();
     assert_eq!(
@@ -1243,7 +1272,14 @@ impl Device for Unfurling {
 #[test]
 fn waiting_does_not_count_towards_getting_nowhere() {
     let judge = Scripted::new(vec![answer("tap", Some("A2"), 0.99, 0.02); 30]);
-    let mut pilot = Pilot::new(Fake { inert: true, ..Fake::default() }, judge, &Android);
+    let mut pilot = Pilot::new(
+        Fake {
+            inert: true,
+            ..Fake::default()
+        },
+        judge,
+        &Android,
+    );
 
     let ending = pilot.pursue("press the key").expect("the run completes");
 
@@ -1261,3 +1297,221 @@ fn waiting_does_not_count_towards_getting_nowhere() {
     );
 }
 
+/// A run that finds its goal already met on the first screen has done nothing,
+/// and whoever started it should be able to tell. Measured: a search-and-open
+/// run started on the article the run before it had left open, declared the
+/// goal achieved, and had searched for nothing.
+#[test]
+fn a_run_can_say_how_many_actions_it_took() {
+    let mut idle = Pilot::new(
+        Fake::default(),
+        Scripted::new(vec![answer("done", None, 0.99, 0.97)]),
+        &Android,
+    );
+    let ending = idle.pursue("Open the article").expect("the run completes");
+    assert!(
+        matches!(ending, Ending::Finished(Outcome::Achieved)),
+        "{ending:?}"
+    );
+    assert_eq!(idle.actions_taken(), 0);
+
+    let mut busy = Pilot::new(
+        Fake::default(),
+        Scripted::new(vec![
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+        &Android,
+    );
+    busy.pursue("Open the article").expect("the run completes");
+    assert_eq!(busy.actions_taken(), 1);
+}
+
+/// A screen that has been still since before the action was sent says nothing
+/// about the action. Measured on a Flutter transfer form: `Continue` started a
+/// quote that took about a second, the helper still reported the screen quiet
+/// from before the tap, the run called the tap ineffective within 300ms, and
+/// tapped Continue three times. Putting the keyboard away was misjudged the
+/// same way.
+#[test]
+fn quiet_from_before_the_action_is_not_taken_as_its_result() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("tap", Some("A2"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    let mut pilot = Pilot::new(Slow::default(), judge, &Android);
+
+    pilot.pursue("continue").expect("the run completes");
+
+    let told = seen.borrow()[1]["previous_action"].to_string();
+    assert!(
+        !told.contains("did not change"),
+        "the tap did change the screen: {told}"
+    );
+}
+
+/// A device whose screen changes a few readings after an action, and which
+/// reports it quiet all the while, since nothing has been drawn yet.
+#[derive(Default)]
+struct Slow {
+    since_action: Option<u32>,
+}
+
+impl Device for Slow {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        let arrived = self.since_action.is_some_and(|reads| reads >= 4);
+        if let Some(reads) = self.since_action.as_mut() {
+            *reads += 1;
+        }
+        Ok(if arrived {
+            screen_of(&["Go Back", "Confirm Transfer"]).quiet_for(Some(200))
+        } else {
+            screen_of(&["Go Back", "Continue"]).quiet_for(Some(5_000))
+        })
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        self.since_action = Some(0);
+        Ok(())
+    }
+}
+
+/// A plan given to the pilot reaches the questions every step is asked.
+#[test]
+fn a_run_given_steps_asks_each_step_about_them() {
+    struct Asked(std::rc::Rc<std::cell::RefCell<Vec<serde_json::Value>>>);
+    impl Judge for Asked {
+        type Error = Infallible;
+        fn evaluate(
+            &self,
+            _state: serde_json::Value,
+            questions: &StepQuestions<'_>,
+        ) -> Result<StepAnswers, Infallible> {
+            self.0
+                .borrow_mut()
+                .push(serde_json::to_value(questions).expect("serializes"));
+            Ok(serde_json::from_value(answer("done", None, 0.99, 0.97)).expect("parses"))
+        }
+    }
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut pilot = Pilot::new(Fake::default(), Asked(std::rc::Rc::clone(&asked)), &Android)
+        .following(["Open Network and Internet", "Turn on Wi-Fi"]);
+
+    pilot.pursue("Turn on Wi-Fi").expect("the run completes");
+
+    assert_eq!(
+        asked.borrow()[0]["operation"]["instructions"]["goal"],
+        serde_json::json!(["Open Network and Internet", "Turn on Wi-Fi"])
+    );
+}
+
+/// A keypad that shows only how many digits are in, as a PIN pad does.
+#[derive(Default)]
+struct DigitPad {
+    entered: usize,
+}
+
+impl Device for DigitPad {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        let count = format!("{} digits entered", self.entered);
+        Ok(screen_of(&[
+            "Go Back", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "DEL", &count,
+        ]))
+    }
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        if matches!(command, Command::Tap(_)) {
+            self.entered += 1;
+        }
+        Ok(())
+    }
+}
+
+/// Which digit comes next is counting, and counting belongs in code. Told
+/// only "tap 2, 4, 6, 8, 1, 0 in that order" and a pad that says how many are
+/// in, Jev tapped 1, 2, 2, 2. Told the next key by name, it put 0.98 to 1.00
+/// on the right one.
+#[test]
+fn a_run_entering_keys_is_told_which_key_comes_next() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("tap", Some("A5"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    let mut pilot = Pilot::new(DigitPad::default(), judge, &Android).entering_keys("246");
+
+    pilot.pursue("enter the PIN").expect("the run completes");
+
+    let seen = seen.borrow();
+    assert_eq!(seen[0]["sequence"]["next_key"], "2", "{}", seen[0]);
+    assert_eq!(seen[0]["sequence"]["entered_so_far"], 0);
+    assert_eq!(seen[1]["sequence"]["next_key"], "4", "{}", seen[1]);
+    assert_eq!(seen[2]["sequence"]["next_key"], "6", "{}", seen[2]);
+}
+
+/// The keys are named only where they can be pressed.
+#[test]
+fn a_screen_without_the_keys_is_told_nothing_about_them() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![answer("done", None, 0.99, 0.97)]),
+    };
+    let mut pilot = Pilot::new(Fake::default(), judge, &Android).entering_keys("246");
+
+    pilot.pursue("open settings").expect("the run completes");
+
+    assert!(
+        seen.borrow()[0].get("sequence").is_none(),
+        "{}",
+        seen.borrow()[0]
+    );
+}
+
+/// The questions say to look at it, as well as the state carrying it: with a
+/// list of steps as the goal, the state alone left the operation at 0.62.
+#[test]
+fn a_run_entering_keys_points_its_questions_at_the_next_key() {
+    struct Asked(std::rc::Rc<std::cell::RefCell<Vec<serde_json::Value>>>);
+    impl Judge for Asked {
+        type Error = Infallible;
+        fn evaluate(
+            &self,
+            _state: serde_json::Value,
+            questions: &StepQuestions<'_>,
+        ) -> Result<StepAnswers, Infallible> {
+            self.0
+                .borrow_mut()
+                .push(serde_json::to_value(questions).expect("serializes"));
+            Ok(serde_json::from_value(answer("done", None, 0.99, 0.97)).expect("parses"))
+        }
+    }
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut pilot = Pilot::new(
+        DigitPad::default(),
+        Asked(std::rc::Rc::clone(&asked)),
+        &Android,
+    )
+    .entering_keys("246");
+
+    pilot.pursue("enter the PIN").expect("the run completes");
+
+    let asked = asked.borrow();
+    for head in ["operation", "tap_target"] {
+        assert!(
+            asked[0][head]["instructions"]["note"]
+                .to_string()
+                .contains("sequence.next_key"),
+            "{head}: {}",
+            asked[0][head]
+        );
+    }
+}

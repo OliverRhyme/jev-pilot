@@ -33,6 +33,10 @@ pub enum Invocation {
         app: Option<Box<str>>,
         /// Text to type, by the field it belongs in.
         texts: Vec<(Box<str>, Box<str>)>,
+        /// The goal's steps, in the order the app asks for them.
+        plan: Vec<String>,
+        /// Keys to press in order on a keypad, one character each.
+        keys: Option<String>,
         /// Where questions are written for another decider to answer.
         desk: Option<std::path::PathBuf>,
     },
@@ -151,6 +155,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
     let mut desk = None;
     let mut app: Option<Box<str>> = None;
     let mut texts: Vec<(Box<str>, Box<str>)> = Vec::new();
+    let mut plan = Vec::new();
+    let mut keys = None;
     let mut options_ended = false;
 
     while let Some(word) = args.next() {
@@ -177,16 +183,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
                     })?;
             }
             "--app" => app = Some(value(&mut args, "--app")?.into_boxed_str()),
-            "--text" => {
-                let got = value(&mut args, "--text")?;
-                // Split once: a value may hold an `=` and a field name that
-                // does is not worth the ambiguity.
-                let (field, text) = got.split_once('=').ok_or(CliError::BadValue {
-                    flag: "--text",
-                    got: got.clone(),
-                })?;
-                texts.push((field.into(), text.into()));
-            }
+            "--then" => plan.push(value(&mut args, "--then")?),
+            "--keys" => keys = Some(value(&mut args, "--keys")?),
+            "--text" => texts.push(field_text(value(&mut args, "--text")?)?),
             "--floor" => {
                 let got = value(&mut args, "--floor")?;
                 let parsed = got.parse::<f64>().ok().and_then(Confidence::new);
@@ -204,12 +203,28 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
         floors: floors_from(floor),
         app,
         texts,
+        plan,
+        keys,
         goal: goal.into_boxed_str(),
         device,
         accept,
         steps,
         desk,
     })
+}
+
+/// A `--text` value: the field's name, then `=`, then the words.
+///
+/// Split once: a value may hold an `=`, and a field name that does is not
+/// worth the ambiguity.
+fn field_text(got: String) -> Result<(Box<str>, Box<str>), CliError> {
+    match got.split_once('=') {
+        Some((field, text)) => Ok((field.into(), text.into())),
+        None => Err(CliError::BadValue {
+            flag: "--text",
+            got,
+        }),
+    }
 }
 
 /// What one number on the command line means for actions that cost differently.
@@ -259,6 +274,11 @@ OPTIONS
                           what to type into a field whose name contains
                           <field>; repeatable. Without it, a run stops and
                           asks for every field it means to fill
+      --then <step>       one step of the goal, in the order the app asks for
+                          it; repeatable. Each screen is then judged against
+                          the next unfinished step rather than the whole goal
+      --keys <keys>       keys to press in order on a keypad, such as a PIN;
+                          the run keeps count and names the next one
       --floor <0..1>      below this confidence the run asks you (default 0.6).
                           Lowering it applies to ordinary gestures only —
                           ending the run, and leaving the app, keep 0.6

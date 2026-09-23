@@ -4,11 +4,13 @@
 //! client, so the loop's control flow — the guards, the confidence floor, the
 //! step limit — is tested against scripted answers instead of against a model.
 
-use crate::act::{Act, Catalog, Consequence, Decision, Floors, Indecision, Operation, Outcome};
+use crate::act::{
+    Act, Catalog, Consequence, Decision, Direction, Floors, Indecision, Operation, Outcome,
+};
 use crate::device::{Command, Device, command_for};
 use crate::judgment::{Confidence, Criterion, Progress};
 use crate::platform::Platform;
-use crate::snapshot::{Element, Snapshot, TapError};
+use crate::snapshot::{Element, ElementRef, Snapshot, TapError};
 use crate::step::{StepAnswers, StepQuestions};
 use core::fmt;
 
@@ -64,6 +66,13 @@ pub struct Impasse<'i> {
     pub alternatives: &'i [(Box<str>, f64)],
     /// The rows on screen, in the order they were offered.
     pub rows: &'i [String],
+    /// Which of those rows are covered by something drawn over them, by
+    /// number.
+    ///
+    /// A covered row is refused however right it is, and a page read whole
+    /// offers every row on it, most of them out of reach. Whoever answers
+    /// needs to know which, or the answer is often a scroll away from working.
+    pub covered: &'i [usize],
     /// Whether a soft keyboard is covering part of the screen.
     ///
     /// The rows it covers are absent rather than refused, so a screen with no
@@ -435,6 +444,12 @@ pub struct Pilot<'p, D, J, X = Halt, C = Mute> {
     /// The application the goal is about, when the caller named one.
     app: Option<Box<str>>,
     observer: Option<Observer<'p>>,
+    /// What the last run sent to the device from its steps.
+    acted: u32,
+    /// The goal's steps in order, when the caller gave them.
+    plan: Vec<Box<str>>,
+    /// Keys to press in order on a keypad, one per label.
+    keys: Vec<Box<str>>,
 }
 
 impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
@@ -460,6 +475,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             types: self.types,
             app: self.app,
             observer: self.observer,
+            acted: self.acted,
+            plan: self.plan,
+            keys: self.keys,
         }
     }
 
@@ -483,6 +501,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             types: true,
             app: self.app,
             observer: self.observer,
+            acted: self.acted,
+            plan: self.plan,
+            keys: self.keys,
         }
     }
 }
@@ -503,6 +524,9 @@ impl<'p, D: Device, J: Judge> Pilot<'p, D, J, Halt, Mute> {
             types: false,
             app: None,
             observer: None,
+            acted: 0,
+            plan: Vec::new(),
+            keys: Vec::new(),
         }
     }
 }
@@ -617,6 +641,47 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         self
     }
 
+    /// Work through these steps, in this order, on the way to the goal.
+    ///
+    /// Each step is then asked about the next unfinished one rather than the
+    /// goal as a whole, which is the difference between finding one's place in
+    /// a list and working out from a sentence which part of it a screen is
+    /// for. The goal is still what success is judged against.
+    #[must_use]
+    pub fn following<S: Into<Box<str>>>(mut self, steps: impl IntoIterator<Item = S>) -> Self {
+        self.plan = steps.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Press these keys in order on a keypad, one character per key.
+    ///
+    /// Which key comes next is counting, and a PIN pad shows only how many
+    /// digits are in. Told "tap 2, 4, 6, 8, 1, 0 in that order", Jev tapped 1,
+    /// 2, 2, 2. So code keeps the count — the keys the run has pressed, less
+    /// any it deleted, starting over whenever the pad leaves the screen — and
+    /// names the next key, and Jev is left to find it and to judge that this
+    /// is the moment to press it.
+    #[must_use]
+    pub fn entering_keys(mut self, keys: &str) -> Self {
+        self.keys = keys
+            .chars()
+            .map(|key| key.to_string().into_boxed_str())
+            .collect();
+        self
+    }
+
+    /// How many actions the last run carried out on the device.
+    ///
+    /// Bringing the named app to the front is not counted, and neither is a
+    /// step that waited instead of repeating itself. A run that ends achieved
+    /// with none found its goal met on the screen it started on, which is
+    /// right for "make sure Wi-Fi is on" and a stale start for anything that
+    /// asked for work to be done.
+    #[must_use]
+    pub const fn actions_taken(&self) -> u32 {
+        self.acted
+    }
+
     /// The device being driven.
     pub const fn device(&self) -> &D {
         &self.device
@@ -720,7 +785,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         attempt: u32,
     ) -> Result<bool, Failure<D, J, X, C>> {
         let budget = Self::CHANGE_BUDGET_MS.saturating_mul(u64::from(attempt));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(budget);
+        let acted = std::time::Instant::now();
+        let deadline = acted + std::time::Duration::from_millis(budget);
         let mut last = before;
         while std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(Self::CHANGE_POLL_MS));
@@ -732,13 +798,29 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // needs two that agree — and watching cannot tell a screen that
             // has finished from one that is between two others and happens
             // to be still for a moment.
-            if screen
-                .quiet_for_ms()
-                .is_some_and(|quiet| u64::from(quiet) >= Self::QUIET_ENOUGH_MS)
-            {
-                return Ok(screen.fingerprint() != before);
-            }
+            //
+            // Except that a screen still since before the action says nothing
+            // about the action. A button that starts a network call draws
+            // nothing until the call returns, so the quiet on the first reading
+            // is the quiet from before the tap — measured on a transfer form
+            // whose Continue was judged dead within 300ms, and tapped three
+            // times while its quote came back. Unchanged counts as an answer
+            // only once the quiet began after the action.
             let now = screen.fingerprint();
+            if let Some(quiet) = screen
+                .quiet_for_ms()
+                .map(u64::from)
+                .filter(|quiet| *quiet >= Self::QUIET_ENOUGH_MS)
+            {
+                if now != before {
+                    return Ok(true);
+                }
+                if quiet < elapsed_ms(acted) {
+                    return Ok(false);
+                }
+                last = now;
+                continue;
+            }
             // A screen that has begun to change has not finished changing. A
             // view being built reports the rows it has so far, and acting on
             // that is acting on a screen that will not exist a moment later —
@@ -809,17 +891,42 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     /// reason to choose something else, not to abandon the run: the screen is
     /// fine, this one row is simply not reachable. `None` means even the second
     /// opinion had nothing to offer.
-    fn reach(&mut self, act: &Act, at: &Taken<'_>) -> Result<Reached, Failure<D, J, X, C>> {
+    ///
+    /// Returns the act as well as the command, because the act carried out is
+    /// not always the one chosen: an answer about a covered row replaces it,
+    /// and everything the run remembers doing has to follow the replacement.
+    ///
+    /// A covered row that lies past every row within reach is below or above
+    /// the fold, and is scrolled towards instead of asked about — for as long
+    /// as scrolling moves the screen. `may_scroll` is false once an action has
+    /// changed nothing, which is how a row pinned under a dialog, where no
+    /// scroll can help, still reaches a second opinion.
+    fn reach(
+        &mut self,
+        act: Act,
+        at: &Taken<'_>,
+        may_scroll: bool,
+    ) -> Result<(Reached, Act), Failure<D, J, X, C>> {
         fn settle(command: Option<Command>) -> Reached {
             command.map_or(Reached::Nothing, Reached::Command)
         }
-        match command_for(act, at.snapshot) {
-            Ok(command) => Ok(settle(command)),
+        match command_for(&act, at.snapshot) {
+            Ok(command) => Ok((settle(command), act)),
+            Err(TapError::Obscured(_))
+                if let Some(direction) = target_of(&act)
+                    .filter(|_| may_scroll)
+                    .and_then(|row| past_the_fold(at.snapshot, row)) =>
+            {
+                Ok((
+                    Reached::Command(Command::Scroll(direction)),
+                    Act::Scroll(direction),
+                ))
+            }
             Err(TapError::Obscured(_)) => match self.consult(at, &Indecision::Covered)? {
                 Some(Decision::Ready(instead)) => command_for(&instead, at.snapshot)
-                    .map(settle)
+                    .map(|command| (settle(command), instead))
                     .map_err(RunError::Unreachable),
-                _ => Ok(Reached::Unreachable),
+                _ => Ok((Reached::Unreachable, act)),
             },
             Err(stale) => Err(RunError::Unreachable(stale)),
         }
@@ -886,9 +993,18 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             .refs()
             .map(|(_, element)| element.describe())
             .collect();
+        let covered: Vec<usize> = snapshot
+            .refs()
+            .enumerate()
+            .filter(|(_, (handle, _))| snapshot.tap_point(*handle).is_err())
+            .map(|(number, _)| number)
+            .collect();
         let says: Vec<&str> = snapshot.notices().collect();
         let unavailable: Vec<&str> = snapshot.unavailable().collect();
-        let fields: Vec<String> = catalog.fields_offered().map(|(_, at)| at.to_owned()).collect();
+        let fields: Vec<String> = catalog
+            .fields_offered()
+            .map(|(_, at)| at.to_owned())
+            .collect();
 
         // Sorted so the thing it was nearly beaten by comes first: that is the
         // decision actually being asked about.
@@ -911,8 +1027,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),
                 alternatives: &alternatives,
                 rows: &rows,
+                covered: &covered,
                 keyboard_open: snapshot.keyboard_open(),
-                    fields: &fields,
+                fields: &fields,
                 says: &says,
                 unavailable: &unavailable,
                 operations: catalog.operations(),
@@ -956,6 +1073,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
     // and splitting it further scatters an order that has to be followed.
     #[allow(clippy::too_many_lines)]
     pub fn pursue(&mut self, goal: &str) -> RunResult<D, J, X, C> {
+        self.acted = 0;
         let mut previous: Option<String> = None;
         // What the run has done lately, oldest first. One step of memory is
         // enough to tell an action that worked from one that did not; it is
@@ -968,6 +1086,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         let mut lately: Vec<String> = Vec::new();
         // How many actions in a row have left the screen exactly as it was.
         let mut ineffective: u32 = 0;
+        // How many of `self.keys` have been pressed on the keypad now showing.
+        let mut entered: usize = 0;
         // The app the goal is about: whichever one was in front when the run
         // was given it. A run can only tell it has wandered off by comparing
         // against somewhere, and nothing else in a run names an app.
@@ -1051,8 +1171,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             {
                 origin = Some(app.into());
             }
-            let mut catalog = Catalog::for_screen(&snapshot, self.platform)
-                .returning_to(origin.as_deref());
+            let mut catalog =
+                Catalog::for_screen(&snapshot, self.platform).returning_to(origin.as_deref());
             if self.types {
                 catalog = catalog.accepting_text();
             }
@@ -1066,8 +1186,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             if visited.len() > Self::MEMORY {
                 visited.remove(0);
             }
-            let going_in_circles =
-                visited.iter().filter(|been| **been == here).count() >= Self::VISITS_ALLOWED as usize;
+            let going_in_circles = visited.iter().filter(|been| **been == here).count()
+                >= Self::VISITS_ALLOWED as usize;
 
             // Said once it has actually happened twice: doing a thing once is
             // not repeating oneself, and a warning on every step is noise.
@@ -1077,7 +1197,21 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // escalation and the report must show too.
             let so_far = lately.clone();
             let recent: Vec<&str> = so_far.iter().map(String::as_str).collect();
-            let questions = StepQuestions::checked(goal, &catalog, &self.criteria);
+            // A pad that has left the screen has been submitted, or cleared by
+            // whatever replaced it; the next one starts from nothing.
+            let keypad_here = !self.keys.is_empty()
+                && self
+                    .keys
+                    .iter()
+                    .all(|key| catalog.rows().any(|(_, text)| text.trim() == &**key));
+            if !keypad_here {
+                entered = 0;
+            }
+            let sequence = sequence_on(&self.keys, entered, &catalog);
+            let mut questions = StepQuestions::planned(goal, &self.plan, &catalog, &self.criteria);
+            if sequence.is_some() {
+                questions = questions.pointing_at_next_key();
+            }
 
             let judging = std::time::Instant::now();
             let answers = self
@@ -1096,6 +1230,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             seen_before,
                             repeating: repeated,
                             lately: &recent,
+                            sequence: sequence.as_ref(),
                         },
                     ),
                     &questions,
@@ -1114,13 +1249,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // form whose summary appeared and withdrew, and on a form
             // re-entered from its own menu three times over.
             if going_in_circles {
-                self.report(index, &snapshot, &answers, None, Went { repeating: repeated, acted: false }, Spent {
-                    read_ms,
-                    step_ms: elapsed_ms(began),
-                    waited_ms: waited.get(),
-                    judged_ms,
-                    settled_ms,
-                });
+                self.report(
+                    index,
+                    &snapshot,
+                    &answers,
+                    None,
+                    Went {
+                        repeating: repeated,
+                        acted: false,
+                    },
+                    Spent {
+                        read_ms,
+                        step_ms: elapsed_ms(began),
+                        waited_ms: waited.get(),
+                        judged_ms,
+                        settled_ms,
+                    },
+                );
                 return Ok(Ending::Uncertain {
                     because: Indecision::NoProgress {
                         repeated: Self::VISITS_ALLOWED,
@@ -1131,13 +1276,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             let decided = catalog.resolve(&answers, &self.floors);
 
             if answers.is_error_screen.noul > self.certainty {
-                self.report(index, &snapshot, &answers, None, Went { repeating: repeated, acted: false }, Spent {
-                    read_ms,
-                    step_ms: elapsed_ms(began),
-                    waited_ms: waited.get(),
-                    judged_ms,
-                    settled_ms,
-                });
+                self.report(
+                    index,
+                    &snapshot,
+                    &answers,
+                    None,
+                    Went {
+                        repeating: repeated,
+                        acted: false,
+                    },
+                    Spent {
+                        read_ms,
+                        step_ms: elapsed_ms(began),
+                        waited_ms: waited.get(),
+                        judged_ms,
+                        settled_ms,
+                    },
+                );
                 return Ok(Ending::ErrorScreen);
             }
             // A screen with nothing on it is not evidence. Mid-transition the
@@ -1160,13 +1315,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 continue;
             }
             if !blind && reached == Progress::Achieved {
-                self.report(index, &snapshot, &answers, None, Went { repeating: repeated, acted: false }, Spent {
-                    read_ms,
-                    step_ms: elapsed_ms(began),
-                    waited_ms: waited.get(),
-                    judged_ms,
-                    settled_ms,
-                });
+                self.report(
+                    index,
+                    &snapshot,
+                    &answers,
+                    None,
+                    Went {
+                        repeating: repeated,
+                        acted: false,
+                    },
+                    Spent {
+                        read_ms,
+                        step_ms: elapsed_ms(began),
+                        waited_ms: waited.get(),
+                        judged_ms,
+                        settled_ms,
+                    },
+                );
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
             // An acceptance criterion is the caller's own definition of done,
@@ -1188,13 +1353,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 && !self.criteria.is_empty()
                 && answers.unmet(&self.criteria, self.certainty).is_none()
             {
-                self.report(index, &snapshot, &answers, None, Went { repeating: repeated, acted: false }, Spent {
-                    read_ms,
-                    step_ms: elapsed_ms(began),
-                    waited_ms: waited.get(),
-                    judged_ms,
-                    settled_ms,
-                });
+                self.report(
+                    index,
+                    &snapshot,
+                    &answers,
+                    None,
+                    Went {
+                        repeating: repeated,
+                        acted: false,
+                    },
+                    Spent {
+                        read_ms,
+                        step_ms: elapsed_ms(began),
+                        waited_ms: waited.get(),
+                        judged_ms,
+                        settled_ms,
+                    },
+                );
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
 
@@ -1216,13 +1391,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     if let Some(decision) = answered? {
                         decision
                     } else {
-                        self.report(index, &snapshot, &answers, None, Went { repeating: repeated, acted: false }, Spent {
-                    read_ms,
-                    step_ms: elapsed_ms(began),
-                    waited_ms: waited.get(),
-                    judged_ms,
-                    settled_ms,
-                });
+                        self.report(
+                            index,
+                            &snapshot,
+                            &answers,
+                            None,
+                            Went {
+                                repeating: repeated,
+                                acted: false,
+                            },
+                            Spent {
+                                read_ms,
+                                step_ms: elapsed_ms(began),
+                                waited_ms: waited.get(),
+                                judged_ms,
+                                settled_ms,
+                            },
+                        );
                         return Ok(Ending::Uncertain { because });
                     }
                 }
@@ -1265,13 +1450,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 // Reported here rather than with the acting steps below: a
                 // verdict touches nothing, so there is no settle to wait for
                 // and nothing to be learned by reporting it later.
-                self.report(index, &snapshot, &answers, Some(&act), Went { repeating: repeated, acted: true }, Spent {
-                    read_ms,
-                    step_ms: elapsed_ms(began),
-                    waited_ms: waited.get(),
-                    judged_ms,
-                    settled_ms,
-                });
+                self.report(
+                    index,
+                    &snapshot,
+                    &answers,
+                    Some(&act),
+                    Went {
+                        repeating: repeated,
+                        acted: true,
+                    },
+                    Spent {
+                        read_ms,
+                        step_ms: elapsed_ms(began),
+                        waited_ms: waited.get(),
+                        judged_ms,
+                        settled_ms,
+                    },
+                );
                 match self.refuse_verdict(outcome, blind, &answers) {
                     Some(reason) => {
                         previous = Some(reason);
@@ -1281,6 +1476,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 }
             }
 
+            // Reached before anything is remembered: a covered row sends the
+            // step to a second opinion, which is shown the history as it stood
+            // and may answer with a different act. What the run remembers
+            // doing is what it did, not what it first chose.
+            let (resolved, act) = self.reach(
+                act,
+                &taken_at(
+                    goal,
+                    index,
+                    &snapshot,
+                    &catalog,
+                    &answers,
+                    previous.as_deref(),
+                    &recent,
+                ),
+                ineffective == 0,
+            )?;
             let did = recount(&act, &snapshot);
             repeating = if last_did.as_deref() == Some(did.as_str()) {
                 repeating.saturating_add(1)
@@ -1294,18 +1506,6 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             }
             let doing = did.clone();
             previous = Some(did);
-            let resolved = self.reach(
-                &act,
-                &taken_at(
-                    goal,
-                    index,
-                    &snapshot,
-                    &catalog,
-                    &answers,
-                    previous.as_deref(),
-                    &recent,
-                ),
-            )?;
             match resolved {
                 Reached::Command(command) => {
                     let acting = std::time::Instant::now();
@@ -1342,13 +1542,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                              doing it again",
                             previous.as_deref().unwrap_or("Acted")
                         ));
-                        self.report(index, &snapshot, &answers, Some(&act), Went { repeating: repeated, acted: false }, Spent {
-                            read_ms,
-                            step_ms: elapsed_ms(began),
-                            waited_ms: waited.get(),
-                            judged_ms,
-                            settled_ms,
-                        });
+                        self.report(
+                            index,
+                            &snapshot,
+                            &answers,
+                            Some(&act),
+                            Went {
+                                repeating: repeated,
+                                acted: false,
+                            },
+                            Spent {
+                                read_ms,
+                                step_ms: elapsed_ms(began),
+                                waited_ms: waited.get(),
+                                judged_ms,
+                                settled_ms,
+                            },
+                        );
                         continue;
                     }
                     // Closing a keyboard that has already closed is going
@@ -1367,16 +1577,40 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             .keyboard_open()
                     {
                         previous = Some("The keyboard was already away".to_owned());
-                        self.report(index, &snapshot, &answers, Some(&act), Went { repeating: repeated, acted: false }, Spent {
-                            read_ms,
-                            step_ms: elapsed_ms(began),
-                            waited_ms: waited.get(),
-                            judged_ms,
-                            settled_ms,
-                        });
+                        self.report(
+                            index,
+                            &snapshot,
+                            &answers,
+                            Some(&act),
+                            Went {
+                                repeating: repeated,
+                                acted: false,
+                            },
+                            Spent {
+                                read_ms,
+                                step_ms: elapsed_ms(began),
+                                waited_ms: waited.get(),
+                                judged_ms,
+                                settled_ms,
+                            },
+                        );
                         continue;
                     }
                     self.device.perform(&command).map_err(RunError::Device)?;
+                    self.acted = self.acted.saturating_add(1);
+                    if let Act::Tap(row) = &act
+                        && let Ok(pressed) = snapshot.resolve(*row)
+                    {
+                        if self
+                            .keys
+                            .get(entered)
+                            .is_some_and(|key| pressed.label.trim() == &**key)
+                        {
+                            entered += 1;
+                        } else if deletes(&pressed.label) {
+                            entered = entered.saturating_sub(1);
+                        }
+                    }
                     // An action and its effect are not the same instant. Read
                     // straight after acting and the screen is still the one
                     // acted on, so the next judgement is made about the past —
@@ -1396,8 +1630,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     // summary appeared afterwards. Costs nothing when
                     // actions work, because then this is always the first
                     // attempt.
-                    let moved = self
-                        .settled_on_a_new_screen(snapshot.fingerprint(), ineffective + 1)?;
+                    let moved =
+                        self.settled_on_a_new_screen(snapshot.fingerprint(), ineffective + 1)?;
                     settled_ms = elapsed_ms(acting);
                     if moved {
                         ineffective = 0;
@@ -1411,13 +1645,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             previous.as_deref().unwrap_or("Acted")
                         ));
                         if ineffective >= Self::INEFFECTIVE_LIMIT {
-                            self.report(index, &snapshot, &answers, Some(&act), Went { repeating: repeated, acted: true }, Spent {
-                                read_ms,
-                                step_ms: elapsed_ms(began),
-                                waited_ms: waited.get(),
-                                judged_ms,
-                                settled_ms,
-                            });
+                            self.report(
+                                index,
+                                &snapshot,
+                                &answers,
+                                Some(&act),
+                                Went {
+                                    repeating: repeated,
+                                    acted: true,
+                                },
+                                Spent {
+                                    read_ms,
+                                    step_ms: elapsed_ms(began),
+                                    waited_ms: waited.get(),
+                                    judged_ms,
+                                    settled_ms,
+                                },
+                            );
                             return Ok(Ending::Uncertain {
                                 because: Indecision::NoProgress {
                                     repeated: ineffective,
@@ -1428,13 +1672,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 }
                 Reached::Nothing => {}
                 Reached::Unreachable => {
-                    self.report(index, &snapshot, &answers, None, Went { repeating: repeated, acted: false }, Spent {
-                    read_ms,
-                    step_ms: elapsed_ms(began),
-                    waited_ms: waited.get(),
-                    judged_ms,
-                    settled_ms,
-                });
+                    self.report(
+                        index,
+                        &snapshot,
+                        &answers,
+                        None,
+                        Went {
+                            repeating: repeated,
+                            acted: false,
+                        },
+                        Spent {
+                            read_ms,
+                            step_ms: elapsed_ms(began),
+                            waited_ms: waited.get(),
+                            judged_ms,
+                            settled_ms,
+                        },
+                    );
                     return Ok(Ending::Uncertain {
                         because: Indecision::Covered,
                     });
@@ -1445,13 +1699,23 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // settled, so the step's own cost includes both. A step resolved
             // by an escalation is logged with what was actually sent to the
             // device rather than with the refusal that preceded it.
-            self.report(index, &snapshot, &answers, Some(&act), Went { repeating: repeated, acted: true }, Spent {
-                read_ms,
-                step_ms: elapsed_ms(began),
-                waited_ms: waited.get(),
-                judged_ms,
-                settled_ms,
-            });
+            self.report(
+                index,
+                &snapshot,
+                &answers,
+                Some(&act),
+                Went {
+                    repeating: repeated,
+                    acted: true,
+                },
+                Spent {
+                    read_ms,
+                    step_ms: elapsed_ms(began),
+                    waited_ms: waited.get(),
+                    judged_ms,
+                    settled_ms,
+                },
+            );
         }
         Ok(Ending::OutOfSteps { limit: self.limit })
     }
@@ -1486,6 +1750,8 @@ struct Standing<'s> {
     repeating: Option<u32>,
     /// What the run has done lately, oldest first.
     lately: &'s [&'s str],
+    /// The keys still to press, when this screen is the keypad for them.
+    sequence: Option<&'s serde_json::Value>,
 }
 
 fn describe(
@@ -1503,6 +1769,7 @@ fn describe(
         seen_before,
         repeating,
         lately,
+        sequence,
     } = where_it_stands;
     // Rows are keyed the way the Choice offers them, so its options can be
     // bare keys and the text travels once rather than twice.
@@ -1564,7 +1831,34 @@ fn describe(
     if !fields.is_empty() {
         state["fields"] = serde_json::Value::Object(fields);
     }
+    if let Some(sequence) = sequence {
+        state["sequence"] = sequence.clone();
+    }
     state
+}
+
+/// The keys still to press, when every one of them is a row on this screen.
+///
+/// Named by the key's label, the way the pad shows it, and only where they can
+/// be pressed: a screen without the keys has nothing to press them on.
+fn sequence_on(keys: &[Box<str>], entered: usize, catalog: &Catalog) -> Option<serde_json::Value> {
+    let next = keys.get(entered)?;
+    let on_screen = |key: &str| catalog.rows().any(|(_, text)| text.trim() == key);
+    keys.iter().all(|key| on_screen(key)).then(|| {
+        serde_json::json!({
+            "keys_to_enter": keys,
+            "entered_so_far": entered,
+            "next_key": next,
+        })
+    })
+}
+
+/// Whether a row is a keypad's delete key.
+fn deletes(label: &str) -> bool {
+    matches!(
+        label.trim().to_lowercase().as_str(),
+        "del" | "delete" | "backspace" | "⌫" | "clear"
+    )
 }
 
 /// How a step turned out, apart from what it chose.
@@ -1597,6 +1891,47 @@ fn elapsed_ms(since: std::time::Instant) -> u64 {
 }
 
 /// Describe an action the way the next step should hear about it.
+/// The row an act is aimed at, for an act aimed at one.
+const fn target_of(act: &Act) -> Option<ElementRef> {
+    match act {
+        Act::Tap(row)
+        | Act::DoubleTap(row)
+        | Act::LongPress(row)
+        | Act::Peek(row)
+        | Act::SwipeElement { target: row, .. }
+        | Act::TypeText { into: row, .. } => Some(*row),
+        _ => None,
+    }
+}
+
+/// Which way to scroll to bring a covered row into reach, if scrolling can.
+///
+/// Only when the row lies wholly past every row that can be reached, leaving
+/// out whatever shares its band. A row among reachable ones, under something drawn on
+/// top of them, is under a dialog or a sheet, and no scroll uncovers it.
+fn past_the_fold(snapshot: &Snapshot, row: ElementRef) -> Option<Direction> {
+    let target = snapshot.resolve(row).ok()?.bounds;
+    let reachable: Vec<_> = snapshot
+        .refs()
+        // Whatever shares the row's band is either beside it or on top of it,
+        // and says nothing about which way the rest of the page lies.
+        .filter(|(_, element)| {
+            element.bounds.bottom <= target.top || element.bounds.top >= target.bottom
+        })
+        .filter(|(other, _)| snapshot.tap_point(*other).is_ok())
+        .map(|(_, element)| element.bounds)
+        .collect();
+    let lowest = reachable.iter().map(|bounds| bounds.bottom).max()?;
+    let highest = reachable.iter().map(|bounds| bounds.top).min()?;
+    if target.top >= lowest {
+        Some(Direction::Down)
+    } else if target.bottom <= highest {
+        Some(Direction::Up)
+    } else {
+        None
+    }
+}
+
 fn recount(act: &Act, snapshot: &Snapshot) -> String {
     let named = |handle| {
         snapshot

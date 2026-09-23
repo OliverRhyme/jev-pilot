@@ -92,3 +92,50 @@ fn a_probability_that_is_not_one_is_refused_at_the_boundary() {
         "a real probability"
     );
 }
+
+/// A goal written as one long sentence asks Jev to work out, on every screen,
+/// which part of it this screen is for. Given as ordered steps and asked for
+/// the next unfinished one, the same screens were read far better. Measured on
+/// a transfer form: tapping the account lookup's Confirm went from 0.16 to
+/// 0.91, and choosing the source account from 0.41 to 0.97.
+#[test]
+fn a_planned_step_asks_for_the_next_unfinished_step() {
+    let snapshot = Android.parse_hierarchy(SETTINGS).expect("fixture parses");
+    let catalog = Catalog::for_screen(&snapshot, &Android);
+    let plan: Vec<Box<str>> = vec!["Open Network and Internet".into(), "Turn on Wi-Fi".into()];
+
+    let wire = serde_json::to_value(StepQuestions::planned(
+        "Turn on Wi-Fi",
+        &plan,
+        &catalog,
+        &[],
+    ))
+    .expect("serializes");
+
+    for head in ["operation", "tap_target"] {
+        let instructions = &wire[head]["instructions"];
+        assert_eq!(
+            instructions["goal"],
+            serde_json::json!(["Open Network and Internet", "Turn on Wi-Fi"]),
+            "{head}"
+        );
+        assert!(
+            instructions["question"]
+                .to_string()
+                .contains("next unfinished step"),
+            "{head}: {instructions}"
+        );
+    }
+}
+
+/// Without a plan nothing changes: the goal is the sentence it was given.
+#[test]
+fn an_unplanned_step_asks_about_the_goal_as_written() {
+    let snapshot = Android.parse_hierarchy(SETTINGS).expect("fixture parses");
+    let catalog = Catalog::for_screen(&snapshot, &Android);
+
+    let wire =
+        serde_json::to_value(StepQuestions::new("Turn on Wi-Fi", &catalog)).expect("serializes");
+
+    assert_eq!(wire["operation"]["instructions"]["goal"], "Turn on Wi-Fi");
+}

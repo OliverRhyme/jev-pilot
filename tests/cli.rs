@@ -193,11 +193,9 @@ fn a_raised_floor_raises_the_costly_actions_too() {
 /// the thing being looked for.
 #[test]
 fn the_app_a_goal_is_about_can_be_named_on_the_command_line() {
-    let Invocation::Run { app, .. } = parsed(&[
-        "--app",
-        "com.example.wallet",
-        "Transfer fifty pesos",
-    ]) else {
+    let Invocation::Run { app, .. } =
+        parsed(&["--app", "com.example.wallet", "Transfer fifty pesos"])
+    else {
         panic!("a goal is a run");
     };
 
@@ -253,4 +251,24 @@ fn only_the_first_equals_separates_a_field_from_its_text() {
 #[test]
 fn text_without_a_field_is_rejected() {
     assert!(parse(["--text".to_owned(), "hunter2".to_owned(), "go".to_owned()]).is_err());
+}
+
+/// The goal's steps, in order, each its own flag, and the keys to press on a
+/// keypad as one string.
+#[test]
+fn steps_and_keys_can_be_given_on_the_command_line() {
+    let Invocation::Run { plan, keys, .. } = parsed(&[
+        "--then",
+        "Log in",
+        "--then",
+        "Open Transfer",
+        "--keys",
+        "246810",
+        "Transfer fifty pesos",
+    ]) else {
+        panic!("a goal is a run");
+    };
+
+    assert_eq!(plan, ["Log in", "Open Transfer"]);
+    assert_eq!(keys.as_deref(), Some("246810"));
 }

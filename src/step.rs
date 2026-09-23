@@ -9,7 +9,7 @@
 //! endpoint evaluates a whole question map in parallel against one state, so a
 //! step asking three narrow things costs the round trip of one.
 
-use crate::act::{Catalog, Deciding, Operation};
+use crate::act::{Aim, Catalog, Deciding, Operation};
 use crate::judgment::{
     Chosen, Confidence, Criterion, Graded, Likelihood, Poles, Progress, Question,
 };
@@ -97,6 +97,27 @@ impl<'a> StepQuestions<'a> {
     /// Build the questions, with acceptance criteria to confirm alongside.
     #[must_use]
     pub fn checked(goal: &'a str, catalog: &Catalog, criteria: &'a [Criterion]) -> Self {
+        Self::planned(goal, &[], catalog, criteria)
+    }
+
+    /// The questions for one step of a run that was given its steps in order.
+    ///
+    /// The choices are asked about the next unfinished step rather than the
+    /// goal as a whole. Whether the goal has been met is still asked about the
+    /// goal: finishing the steps is how it is reached, not what it is. An
+    /// empty plan asks about the goal as written.
+    #[must_use]
+    pub fn planned(
+        goal: &'a str,
+        plan: &'a [Box<str>],
+        catalog: &Catalog,
+        criteria: &'a [Criterion],
+    ) -> Self {
+        let aim = if plan.is_empty() {
+            Aim::Goal(goal)
+        } else {
+            Aim::Plan(plan)
+        };
         let checks = criteria
             .iter()
             .enumerate()
@@ -114,22 +135,23 @@ impl<'a> StepQuestions<'a> {
                 )
             })
             .collect();
-        Self::assembled(goal, catalog, criteria, checks)
+        Self::assembled(goal, aim, catalog, criteria, checks)
     }
 
     fn assembled(
         goal: &'a str,
+        aim: Aim<'a>,
         catalog: &Catalog,
         criteria: &'a [Criterion],
         checks: BTreeMap<Box<str>, Question<Confirming<'a>>>,
     ) -> Self {
         Self {
-            operation: catalog.operation_question(goal),
-            tap_target: catalog.tap_target_question(goal),
+            operation: catalog.operation_question(aim),
+            tap_target: catalog.tap_target_question(aim),
             type_field: catalog
                 .operations()
                 .contains(&Operation::TypeText)
-                .then(|| catalog.type_field_question(goal))
+                .then(|| catalog.type_field_question(aim))
                 .flatten(),
             goal_met: Question::Score {
                 instructions: Checking {
@@ -150,6 +172,29 @@ impl<'a> StepQuestions<'a> {
                 },
             },
         }
+    }
+}
+
+impl StepQuestions<'_> {
+    /// What the choices are told when the state names the next key to press.
+    pub const NEXT_KEY: &'static str = "Tap `sequence.next_key` on the keypad.";
+
+    /// Point the operation and the row at the key the state names.
+    ///
+    /// Carried in the state alone, the next key raised the right row but left
+    /// the operation at 0.62 once the goal was a list of steps; said in the
+    /// questions as well, both were at 0.99.
+    #[must_use]
+    pub fn pointing_at_next_key(mut self) -> Self {
+        for head in [Some(&mut self.operation), self.tap_target.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            if let Question::Choice { instructions, .. } = head {
+                instructions.note = Some(Self::NEXT_KEY);
+            }
+        }
+        self
     }
 }
 

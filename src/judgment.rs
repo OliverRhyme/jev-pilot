@@ -86,19 +86,21 @@ impl Options {
         Ok(id)
     }
 
-    /// Offer one more option that needs no description of its own.
+    /// Offer one more option under a generated key, described by what it
+    /// refers to.
     ///
-    /// The Choice carries `null` for it, and whatever the option refers to is
-    /// read from the state instead. For a list of screen rows that halves the
-    /// text sent, because the rows are already in the state for the other
-    /// questions to read.
+    /// The key is only for reading the answer back. The description is what
+    /// the model chooses by: a bare key it has to look up elsewhere is a hop,
+    /// and on a keypad whose key `A2` is labelled "1" the hop is where the
+    /// choice goes wrong.
     ///
     /// # Errors
     /// Returns [`Full`] once [`MAX_OPTIONS`] have been offered.
-    pub fn push_bare(&mut self) -> Result<OptionId, Full> {
+    pub fn push_described(&mut self, description: impl Into<Box<str>>) -> Result<OptionId, Full> {
         let index = u8::try_from(self.0.len()).map_err(|_| Full)?;
         let id = OptionId::nth(index).ok_or(Full)?;
-        self.0.push((id.to_string().into_boxed_str(), None));
+        self.0
+            .push((id.to_string().into_boxed_str(), Some(description.into())));
         Ok(id)
     }
 

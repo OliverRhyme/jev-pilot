@@ -21,8 +21,6 @@ use crate::act::Operation;
 use crate::judgment::Confidence;
 use crate::pilot::{Impasse, Resolution, Writing};
 
-
-
 /// Where a question goes, and where an answer may come from.
 ///
 /// Both channels are live for every question. The terminal is read on its own
@@ -39,6 +37,11 @@ pub struct Desk {
     /// means to type — they are in the goal it was given — and stopping to ask
     /// for each one is what keeps such a run from finishing unattended.
     texts: Vec<(Box<str>, Box<str>)>,
+    /// Words that came with the last answer, for the field it chose.
+    ///
+    /// An answer that says to type, and what, has said everything; asking for
+    /// the words again is a second round trip for nothing.
+    given: std::cell::RefCell<Option<Box<str>>>,
 }
 
 impl Desk {
@@ -80,6 +83,7 @@ impl Desk {
             typed,
             look_again_after,
             texts,
+            given: std::cell::RefCell::new(None),
         })
     }
 
@@ -176,6 +180,7 @@ impl Desk {
                 "recent_actions": impasse.lately,
                 "operations": impasse.operations.iter().map(|o| o.key()).collect::<Vec<_>>(),
                 "rows": impasse.rows,
+                "covered": impasse.covered,
                 "screen_says": impasse.says,
                 "unavailable": impasse.unavailable,
                 "keyboard_open": impasse.keyboard_open,
@@ -185,7 +190,18 @@ impl Desk {
         )?;
         let understood = match reply {
             Answer::Typed(line) => parse_typed(&line),
-            Answer::File(value) => resolve_json(&value),
+            Answer::File(value) => {
+                // Only for a typing answer: words sent with any other would
+                // otherwise wait here and land in the next field typed into.
+                let typing = value.get("operation").and_then(serde_json::Value::as_str)
+                    == Some(crate::act::Operation::TypeText.key());
+                *self.given.borrow_mut() = value
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|_| typing)
+                    .map(Box::from);
+                resolve_json(&value)
+            }
         };
         // Saying so, rather than stopping. The alternative discards a run
         // over a misspelling, and says nothing about why.
@@ -209,6 +225,10 @@ impl Desk {
     /// # Errors
     /// Returns the error from [`Desk::ask`] when nobody answered.
     pub fn compose(&self, request: &Writing<'_>) -> Result<Box<str>, std::io::Error> {
+        // Taken, not read: it answered the one question it came with.
+        if let Some(text) = self.given.borrow_mut().take() {
+            return Ok(text);
+        }
         if let Some(text) = self.supplied(&request.field.describe()) {
             println!(
                 "\n  \u{2500}\u{2500} step {}: typing the text given for {}",
@@ -325,7 +345,12 @@ pub fn describe(impasse: &Impasse<'_>) -> String {
         }
     }
     for (index, row) in impasse.rows.iter().enumerate() {
-        let _ = writeln!(out, "     [{index}] {row}");
+        let reach = if impasse.covered.contains(&index) {
+            "  (covered)"
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "     [{index}] {row}{reach}");
     }
     // Numbered separately from the rows, because typing is: on a form of
     // three editable rows among five, answering `type` with a row's number

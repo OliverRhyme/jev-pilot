@@ -65,8 +65,8 @@ fn the_field_head_offers_only_rows_that_accept_text() {
         "only the search box accepts text: {fields:?}"
     );
     assert!(
-        fields.values().all(serde_json::Value::is_null),
-        "the text lives in the state, not in the options: {fields:?}"
+        fields.values().all(serde_json::Value::is_string),
+        "each option carries the field's words: {fields:?}"
     );
 
     // The state-side text is what the key refers to, and the keys agree.

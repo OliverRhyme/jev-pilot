@@ -54,7 +54,10 @@ fn a_run_is_started_with_the_flags_the_command_line_already_has() {
 
     let joined = args.join(" ");
     assert!(joined.contains("--app com.example.wallet"), "{joined}");
-    assert!(joined.contains("--accept A receipt is on screen"), "{joined}");
+    assert!(
+        joined.contains("--accept A receipt is on screen"),
+        "{joined}"
+    );
     assert!(joined.contains("--text amount=50"), "{joined}");
     assert!(joined.contains("--steps 40"), "{joined}");
     assert!(joined.contains("--floor 0.35"), "{joined}");
@@ -75,9 +78,8 @@ fn a_run_without_a_goal_is_refused() {
 /// MCP write the same thing.
 #[test]
 fn an_answer_becomes_what_the_desk_already_reads() {
-    let wrote = |arguments: serde_json::Value| {
-        jev_pilot::mcp::answer_from(&arguments).expect("an answer")
-    };
+    let wrote =
+        |arguments: serde_json::Value| jev_pilot::mcp::answer_from(&arguments).expect("an answer");
 
     assert_eq!(
         wrote(serde_json::json!({"operation": "tap", "target": 3})),
@@ -111,11 +113,17 @@ fn a_run_is_named_by_the_device_it_drives() {
 
     // One run in flight, and nothing to say about which: there is only one.
     assert_eq!(which_run(None, &["abc123"]), Ok("abc123".to_owned()));
-    assert_eq!(which_run(Some("abc123"), &["abc123"]), Ok("abc123".to_owned()));
+    assert_eq!(
+        which_run(Some("abc123"), &["abc123"]),
+        Ok("abc123".to_owned())
+    );
 
     // Two devices, two runs. Now it matters which.
     let torn = which_run(None, &["abc123", "def456"]).expect_err("ambiguous");
-    assert!(torn.contains("abc123") && torn.contains("def456"), "got {torn}");
+    assert!(
+        torn.contains("abc123") && torn.contains("def456"),
+        "got {torn}"
+    );
 
     // Nothing running at all.
     assert!(which_run(None, &[]).is_err());
@@ -191,7 +199,8 @@ async fn a_call_waits_until_the_run_wants_something() {
 
     // The run asks, and the question is the answer to the call.
     std::fs::write(desk.join("ask.json"), r#"{"kind":"which_action"}"#).expect("asked");
-    let Waited::Asking(question) = until_it_wants_something(&desk, std::time::Duration::from_secs(2), None).await
+    let Waited::Asking(question) =
+        until_it_wants_something(&desk, std::time::Duration::from_secs(2), None).await
     else {
         panic!("it should come back with the question");
     };
@@ -213,7 +222,8 @@ async fn a_call_stops_waiting_once_the_run_is_over() {
     )
     .expect("a log");
 
-    let Waited::Ended(how) = until_it_wants_something(&desk, std::time::Duration::from_secs(2), None).await
+    let Waited::Ended(how) =
+        until_it_wants_something(&desk, std::time::Duration::from_secs(2), None).await
     else {
         panic!("it should come back saying it is over");
     };
@@ -237,7 +247,10 @@ fn a_status_says_how_a_finished_run_went() {
 
     let said = jev_pilot::mcp::status_of(&desk);
     assert!(said.contains("OutOfSteps"), "got {said}");
-    assert!(said.contains("{\"step\":1}"), "the steps are still there: {said}");
+    assert!(
+        said.contains("{\"step\":1}"),
+        "the steps are still there: {said}"
+    );
 }
 
 /// Answering must not come straight back with the question that was just
@@ -292,10 +305,37 @@ fn answering_wakes_the_run_rather_than_leaving_it_to_look() {
         child,
     );
 
-    assert!(sessions.nudge("a-device"), "it should have an input to write to");
+    assert!(
+        sessions.nudge("a-device"),
+        "it should have an input to write to"
+    );
     let mut heard = String::new();
-    BufReader::new(said).read_line(&mut heard).expect("it woke up");
+    BufReader::new(said)
+        .read_line(&mut heard)
+        .expect("it woke up");
     assert_eq!(heard, "\n", "a nudge is an empty line, never an answer");
 
     assert!(!sessions.nudge("no-such-device"));
+}
+
+/// A plan and keypad keys reach the command line as its own flags, in order.
+#[test]
+fn a_run_can_be_given_its_steps_and_keys() {
+    let args = jev_pilot::mcp::invocation(
+        "start_run",
+        &serde_json::json!({
+            "goal": "send fifty pesos",
+            "plan": ["Log in", "Open Transfer"],
+            "keys": "246810",
+        }),
+    )
+    .expect("a run is startable");
+
+    let joined = args.join(" ");
+    assert!(
+        joined.contains("--then Log in --then Open Transfer"),
+        "{joined}"
+    );
+    assert!(joined.contains("--keys 246810"), "{joined}");
+    assert_eq!(args.last().map(String::as_str), Some("send fifty pesos"));
 }

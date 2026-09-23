@@ -365,9 +365,45 @@ pub enum Act {
 #[derive(Debug, Clone, Serialize)]
 pub struct Deciding<'a> {
     /// What the worker is trying to achieve.
-    pub goal: &'a str,
+    pub goal: Aim<'a>,
     /// The judgment being asked.
     pub question: &'static str,
+    /// Where in the state the answer is to be found, when code already knows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'static str>,
+}
+
+/// What a step is working towards: the goal as written, or the steps it was
+/// broken into.
+///
+/// Sent as the sentence or as the list, under the same name. A sentence of
+/// several steps asks the model to work out on every screen which of them the
+/// screen is for; a list asked about "the next unfinished step" leaves it only
+/// to find its place. Measured on a transfer form, the second read the account
+/// lookup's Confirm at 0.91 where the first read it at 0.16.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(untagged)]
+pub enum Aim<'a> {
+    /// One sentence saying what to achieve.
+    Goal(&'a str),
+    /// The steps to take, in the order the app asks for them.
+    Plan(&'a [Box<str>]),
+}
+
+impl<'a> From<&'a str> for Aim<'a> {
+    fn from(goal: &'a str) -> Self {
+        Self::Goal(goal)
+    }
+}
+
+impl Aim<'_> {
+    /// Pick the wording of a question for this kind of aim.
+    const fn asking(self, for_goal: &'static str, for_plan: &'static str) -> &'static str {
+        match self {
+            Self::Goal(_) => for_goal,
+            Self::Plan(_) => for_plan,
+        }
+    }
 }
 
 /// What it costs to get an action wrong.
@@ -527,6 +563,10 @@ pub struct Catalog {
     operations: Options,
     targets: Vec<(OptionId, ElementRef, Box<str>)>,
     target_options: Options,
+    /// Every row on screen, in screen order, which is how an escalation
+    /// numbers them. Not the same list as `targets`, which leaves out rows
+    /// the screen names too often to tell apart.
+    on_screen: Vec<ElementRef>,
     fields: Vec<(OptionId, ElementRef, Box<str>)>,
     field_options: Options,
 }
@@ -566,14 +606,30 @@ impl Catalog {
         let mut targets = Vec::new();
         let mut field_options = Options::default();
         let mut fields = Vec::new();
+        let mut named = std::collections::HashMap::<String, usize>::new();
+        for (_, element) in snapshot.refs() {
+            *named
+                .entry(element.describe().trim().to_lowercase())
+                .or_default() += 1;
+        }
+        let on_screen = snapshot.refs().map(|(handle, _)| handle).collect();
         for (handle, element) in snapshot.refs() {
-            if let Ok(id) = target_options.push_bare() {
-                targets.push((id, handle, element.describe().into_boxed_str()));
+            let text = element.describe();
+            // Rows named alike this often cannot be told apart by what they
+            // say, and each takes a share of the choice from the rows that
+            // can. Measured on a Google results page: twenty "About this
+            // result" rows among 125, and the wanted result chosen at 0.2 to
+            // 0.39 every time.
+            let indistinct = named
+                .get(&text.trim().to_lowercase())
+                .is_some_and(|&count| count > Self::REPEATS_TOLERATED);
+            if !indistinct && let Ok(id) = target_options.push_described(text.as_str()) {
+                targets.push((id, handle, text.clone().into_boxed_str()));
             }
             if element.editable
-                && let Ok(id) = field_options.push_bare()
+                && let Ok(id) = field_options.push_described(text.as_str())
             {
-                fields.push((id, handle, element.describe().into_boxed_str()));
+                fields.push((id, handle, text.clone().into_boxed_str()));
             }
         }
 
@@ -584,10 +640,18 @@ impl Catalog {
             operations,
             targets,
             target_options,
+            on_screen,
             fields,
             field_options,
         }
     }
+
+    /// How many rows may share a name and still be offered to choose from.
+    ///
+    /// A pair, or a handful, is a dialog saying `Close` twice or a short list
+    /// of alike buttons, and [`Self::resolve`] already counts their shares
+    /// together. Past this it is page furniture repeated under every item.
+    pub const REPEATS_TOLERATED: usize = 3;
 
     /// Also offer typing, when this screen has somewhere to type.
     ///
@@ -636,16 +700,24 @@ impl Catalog {
 
     /// The Choice asking which field to type into.
     #[must_use]
-    pub fn type_field_question<'a>(&self, goal: &'a str) -> Option<Question<Deciding<'a>>> {
+    pub fn type_field_question<'a>(
+        &self,
+        goal: impl Into<Aim<'a>>,
+    ) -> Option<Question<Deciding<'a>>> {
         if self.fields.is_empty() {
             return None;
         }
+        let goal = goal.into();
         Some(Question::Choice {
             instructions: Deciding {
                 goal,
-                question: "Which field in `fields` should be typed into to advance \
-                           `goal`, assuming the chosen operation is typing? \
-                           Answer with the field's key.",
+                question: goal.asking(
+                    "Which field on the current screen should be typed into to advance \
+                     `goal`, assuming the chosen operation is typing?",
+                    "Which field on the current screen should be typed into to advance the \
+                     next unfinished step of `goal`, assuming the chosen operation is typing?",
+                ),
+                note: None,
             },
             criteria: self.field_options.clone(),
         })
@@ -705,11 +777,17 @@ impl Catalog {
 
     /// The Choice asking which operation advances `goal`.
     #[must_use]
-    pub fn operation_question<'a>(&self, goal: &'a str) -> Question<Deciding<'a>> {
+    pub fn operation_question<'a>(&self, goal: impl Into<Aim<'a>>) -> Question<Deciding<'a>> {
+        let goal = goal.into();
         Question::Choice {
             instructions: Deciding {
                 goal,
-                question: "Which single operation best advances `goal` from the current screen?",
+                question: goal.asking(
+                    "Which single operation best advances `goal` from the current screen?",
+                    "Which single operation best advances the next unfinished step of `goal` \
+                     from the current screen?",
+                ),
+                note: None,
             },
             criteria: self.operations.clone(),
         }
@@ -723,16 +801,24 @@ impl Catalog {
     /// every plausible row rather than concentrating on the one that advances
     /// the task.
     #[must_use]
-    pub fn tap_target_question<'a>(&self, goal: &'a str) -> Option<Question<Deciding<'a>>> {
+    pub fn tap_target_question<'a>(
+        &self,
+        goal: impl Into<Aim<'a>>,
+    ) -> Option<Question<Deciding<'a>>> {
         if self.targets.is_empty() {
             return None;
         }
+        let goal = goal.into();
         Some(Question::Choice {
             instructions: Deciding {
                 goal,
-                question: "Which single row in `rows` should be acted on to advance \
-                           `goal`, assuming the chosen operation needs a row? \
-                           Answer with the row's key.",
+                question: goal.asking(
+                    "Which single row on the current screen should be acted on to advance \
+                     `goal`, assuming the chosen operation needs a row?",
+                    "Which single row on the current screen should be acted on to advance the \
+                     next unfinished step of `goal`, assuming the chosen operation needs a row?",
+                ),
+                note: None,
             },
             criteria: self.target_options.clone(),
         })
@@ -823,6 +909,10 @@ impl Catalog {
     /// it cannot name an operation this platform lacks, nor a row that is not
     /// on screen, nor a coordinate at all.
     ///
+    /// Rows are numbered as the screen lists them, every one of them, which
+    /// includes the repeated rows left out of Jev's own choice: the second
+    /// opinion is shown them all and may have a reason to name one.
+    ///
     /// # Errors
     /// Returns [`Indecision`] when the operation is not offered here, or when
     /// it needs a row and the one named does not exist.
@@ -855,13 +945,13 @@ impl Catalog {
             return Self::untargeted(operation).map(Decision::Ready);
         }
         let position = target.ok_or(Indecision::NoTarget)?;
-        let handle = self
-            .targets
-            .get(position)
-            .map(|(_, handle, _)| *handle)
-            .ok_or_else(|| Indecision::NotOffered {
-                what: format!("row {position}").into_boxed_str(),
-            })?;
+        let handle =
+            self.on_screen
+                .get(position)
+                .copied()
+                .ok_or_else(|| Indecision::NotOffered {
+                    what: format!("row {position}").into_boxed_str(),
+                })?;
         Self::targeted(operation, handle).map(Decision::Ready)
     }
 

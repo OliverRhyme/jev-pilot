@@ -37,9 +37,7 @@ use std::sync::{Arc, Mutex};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{
-    CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig,
-};
+use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -64,9 +62,8 @@ pub struct HelperArgs {
 #[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
 pub struct StartArgs {
     /// What to achieve, in plain words. Say what to achieve rather than how to
-    /// find the app — pass `app` for that. Name the steps in the order the app
-    /// asks for them, and for a keypad name the keys in order ("tap the digit
-    /// keys 2, 4, 6, 8, 1, 0 in that order") rather than the number.
+    /// find the app — pass `app` for that. Put the steps in `plan` rather than
+    /// in this sentence, and a PIN in `keys`.
     pub goal: String,
     /// Which device, when more than one is attached.
     pub device: Option<String>,
@@ -84,6 +81,16 @@ pub struct StartArgs {
     /// "Password" and "account number" finds "RBGI Account Number". A field
     /// with nothing supplied stops the run to ask for the words.
     pub text: Option<std::collections::BTreeMap<String, String>>,
+    /// The goal broken into its steps, in the order the app asks for them.
+    /// Each screen is then judged against the next unfinished step instead of
+    /// the whole goal, which is far easier to get right: on a transfer form it
+    /// raised the right tap from 0.16 to 0.91. Name the screens' own words —
+    /// "Tap Confirm to look up the account", "Select the source account".
+    pub plan: Option<Vec<String>>,
+    /// Keys to press in order on a keypad, such as a PIN ("246810"). The run
+    /// keeps count of what it has pressed and names the next key, rather than
+    /// leaving the model to count.
+    pub keys: Option<String>,
     /// How many steps before giving up.
     pub steps: Option<u32>,
     /// Below this confidence the run asks rather than acts. Lowering it
@@ -139,7 +146,10 @@ impl Pilot {
     fn resolve(&self, device: Option<&str>) -> Result<String, String> {
         let mut sessions = self.sessions.lock().map_err(|_| poisoned())?;
         let running = sessions.still_running();
-        which_run(device, &running.iter().map(String::as_str).collect::<Vec<_>>())
+        which_run(
+            device,
+            &running.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
     }
 }
 
@@ -227,7 +237,10 @@ impl Pilot {
             Ok(run) => run,
             Err(said) => return Ok(said),
         };
-        Ok(waited(&name, until_it_wants_something(&desk, patience(), None).await))
+        Ok(waited(
+            &name,
+            until_it_wants_something(&desk, patience(), None).await,
+        ))
     }
 
     /// Start a run and remember it, or say why not.
@@ -235,7 +248,11 @@ impl Pilot {
     /// Apart from the tool it serves so that the lock on the sessions is taken
     /// and given back here, with no waiting in between: a guard held across a
     /// wait would keep every other call out for as long as this one waits.
-    fn launch(&self, mut line: Vec<String>, device: Option<&str>) -> Result<(String, std::path::PathBuf), CallToolResult> {
+    fn launch(
+        &self,
+        mut line: Vec<String>,
+        device: Option<&str>,
+    ) -> Result<(String, std::path::PathBuf), CallToolResult> {
         let Ok(mut sessions) = self.sessions.lock() else {
             return Err(refused(&poisoned()));
         };
@@ -256,7 +273,9 @@ impl Pilot {
             name.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
         ));
         if let Err(error) = std::fs::create_dir_all(&desk) {
-            return Err(refused(&format!("could not make a desk for {name}: {error}")));
+            return Err(refused(&format!(
+                "could not make a desk for {name}: {error}"
+            )));
         }
         // The goal is the one positional and must stay last.
         let goal = line.pop().unwrap_or_default();
@@ -296,7 +315,10 @@ impl Pilot {
                        Changes nothing. Name a device only when more than one is being driven.",
         annotations(title = "How a run is getting on", read_only_hint = true)
     )]
-    pub async fn run_status(&self, Parameters(which): Parameters<Which>) -> Result<CallToolResult, ErrorData> {
+    pub async fn run_status(
+        &self,
+        Parameters(which): Parameters<Which>,
+    ) -> Result<CallToolResult, ErrorData> {
         let run = match self.resolve(which.device.as_deref()) {
             Ok(run) => run,
             Err(said) => return Ok(refused(&said)),
@@ -305,7 +327,9 @@ impl Pilot {
             return Ok(refused(&poisoned()));
         };
         match sessions.desk_of(&run) {
-            Some(desk) => Ok(CallToolResult::success(vec![ContentBlock::text(status_of(desk))])),
+            Some(desk) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                status_of(desk),
+            )])),
             None => Ok(refused(&format!("no run on {run}"))),
         }
     }
@@ -323,7 +347,10 @@ impl Pilot {
             open_world_hint = true
         )
     )]
-    pub async fn answer_run(&self, Parameters(args): Parameters<AnswerArgs>) -> Result<CallToolResult, ErrorData> {
+    pub async fn answer_run(
+        &self,
+        Parameters(args): Parameters<AnswerArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let run = match self.resolve(args.device.as_deref()) {
             Ok(run) => run,
             Err(said) => return Ok(refused(&said)),
@@ -381,7 +408,10 @@ impl Pilot {
                        Nothing further is done to the device.",
         annotations(title = "Stop a run", read_only_hint = false)
     )]
-    pub async fn stop_run(&self, Parameters(which): Parameters<Which>) -> Result<CallToolResult, ErrorData> {
+    pub async fn stop_run(
+        &self,
+        Parameters(which): Parameters<Which>,
+    ) -> Result<CallToolResult, ErrorData> {
         let run = match self.resolve(which.device.as_deref()) {
             Ok(run) => run,
             Err(said) => return Ok(refused(&said)),
@@ -432,10 +462,13 @@ start with a goal written for a screen nobody looked at.
 
 WRITING A GOAL. Say what to achieve, not how to find the app: pass `app` with \
 the package instead, which brings it to the front and lets the run notice when \
-it has wandered off. Name the steps in the order the app asks for them, and \
-name what to enter where. For a keypad, name the keys in order — 'tap the \
-digit keys 2, 4, 6, 8, 1, 0 in that order' works, 'enter PIN 246810' leaves \
-it counting.
+it has wandered off. Then give `plan`: the steps in the order the app asks \
+for them, one per entry, in the screens' own words — every screen is judged \
+against the next unfinished step, which is far easier than finding its place \
+in one long sentence. Look at each screen the first time through: a lookup \
+button or a source-account picker the goal never mentions is where a run \
+stops. Put what to type in `text`, and a PIN in `keys` ('246810'): the run \
+counts the keys itself and names the next one.
 
 WRITING `accept`. These are what must hold before success is believed, and \
 they are checked against the screen as read. Write them about text that is \
@@ -634,7 +667,11 @@ pub fn invocation(tool: &str, arguments: &serde_json::Value) -> Option<Vec<Strin
         "devices" => args.push("devices".to_owned()),
         "helper" => {
             args.push("helper".to_owned());
-            if arguments.get("install").and_then(serde_json::Value::as_bool) == Some(true) {
+            if arguments
+                .get("install")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
                 args.push("install".to_owned());
             }
         }
@@ -661,6 +698,20 @@ pub fn invocation(tool: &str, arguments: &serde_json::Value) -> Option<Vec<Strin
                         args.push(format!("{field}={said}"));
                     }
                 }
+            }
+            for step in arguments
+                .get("plan")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+            {
+                args.push("--then".to_owned());
+                args.push(step.to_owned());
+            }
+            if let Some(keys) = text("keys") {
+                args.push("--keys".to_owned());
+                args.push(keys);
             }
             if let Some(steps) = arguments.get("steps").and_then(serde_json::Value::as_u64) {
                 args.push("--steps".to_owned());
@@ -690,7 +741,10 @@ pub fn invocation(tool: &str, arguments: &serde_json::Value) -> Option<Vec<Strin
 #[must_use]
 pub fn answer_from(arguments: &serde_json::Value) -> Option<serde_json::Value> {
     let mut answer = serde_json::Map::new();
-    if let Some(operation) = arguments.get("operation").and_then(serde_json::Value::as_str) {
+    if let Some(operation) = arguments
+        .get("operation")
+        .and_then(serde_json::Value::as_str)
+    {
         answer.insert("operation".to_owned(), operation.into());
     }
     if let Some(target) = arguments.get("target").and_then(serde_json::Value::as_u64) {

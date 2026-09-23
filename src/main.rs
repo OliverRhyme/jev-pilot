@@ -64,6 +64,8 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
             floors,
             app,
             texts,
+            plan,
+            keys,
             desk,
         } => pursue(
             device.as_deref(),
@@ -74,6 +76,8 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
                 floors,
                 app,
                 texts,
+                then: plan,
+                keys,
                 desk_dir: desk,
             },
         ),
@@ -228,6 +232,8 @@ struct Plan {
     floors: jev_pilot::act::Floors,
     app: Option<Box<str>>,
     texts: Vec<(Box<str>, Box<str>)>,
+    then: Vec<String>,
+    keys: Option<String>,
     desk_dir: Option<PathBuf>,
 }
 
@@ -239,6 +245,8 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
         floors,
         app,
         texts,
+        then: steps_in_order,
+        keys,
         desk_dir,
     } = plan;
     let goal = &*goal;
@@ -271,6 +279,8 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
         .with_floors(floors)
         .about(app)
         .confirming(accept)
+        .following(steps_in_order.iter().map(String::as_str))
+        .entering_keys(keys.as_deref().unwrap_or_default())
         .limited_to(steps)
         .escalating_to(move |impasse: &Impasse<'_>| choosing.choose(impasse))
         .writing_with(move |request: &Writing<'_>| writing.compose(request))
@@ -281,6 +291,18 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
 
     let ending = pilot.pursue(goal)?;
     println!("\nending : {ending:?}");
+    // Printed with the ending, which is all a caller of the MCP server is
+    // shown of it: a goal met before anything was done is often a stale
+    // screen left by an earlier run rather than work this one did.
+    if matches!(
+        ending,
+        jev_pilot::pilot::Ending::Finished(jev_pilot::act::Outcome::Achieved)
+    ) && pilot.actions_taken() == 0
+    {
+        println!(
+            "note   : nothing was done; the goal already held on the screen the run started on"
+        );
+    }
     // Said at the end as well as the start: a run can lose the helper part way
     // through, and the reason is the only account of why it went slow.
     let reader = pilot.device().reader();
@@ -297,7 +319,6 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
     Ok(())
 }
 
-
 /// One line per step, and one more for what it chose.
 /// Append one step to the run's transcript.
 ///
@@ -306,7 +327,6 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
 /// One line per step, as JSON, so the answer is on disk when the question is
 /// asked afterwards rather than needing the run done again.
 fn transcribe(to: &std::path::Path, step: &jev_pilot::pilot::StepReport<'_>) {
-    
     let line = serde_json::json!({
         "step": step.index,
         "app": step.app,

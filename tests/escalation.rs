@@ -351,13 +351,14 @@ impl Device for PinPad {
 fn an_impasse_lists_the_fields_it_invites_a_number_for() {
     let said = RefCell::new(Vec::new());
     let mut pilot = Pilot::new(Typing, Scripted(RefCell::new(vec![unsure(); 30])), &Android)
-        .writing_with(|_: &jev_pilot::pilot::Writing<'_>| -> Result<Box<str>, Infallible> {
-            Ok("unused".into())
-        })
+        .writing_with(
+            |_: &jev_pilot::pilot::Writing<'_>| -> Result<Box<str>, Infallible> {
+                Ok("unused".into())
+            },
+        )
         .requiring(floor())
         .escalating_to(|impasse: &Impasse<'_>| -> Result<Resolution, Infallible> {
-            said.borrow_mut()
-                .extend(impasse.fields.iter().cloned());
+            said.borrow_mut().extend(impasse.fields.iter().cloned());
             Ok(Resolution::Stop)
         });
 
@@ -394,20 +395,24 @@ impl Device for Typing {
 #[test]
 fn an_answer_that_cannot_be_carried_out_is_asked_again() {
     let asked = std::cell::Cell::new(0_u32);
-    let mut pilot = Pilot::new(Fake::default(), Scripted(RefCell::new(vec![unsure(); 30])), &Android)
-        .requiring(floor())
-        .escalating_to(|_: &Impasse<'_>| -> Result<Resolution, Infallible> {
-            asked.set(asked.get() + 1);
-            Ok(if asked.get() == 1 {
-                // A row this screen does not have.
-                Resolution::Choose {
-                    operation: Operation::Tap,
-                    target: Some(9_999),
-                }
-            } else {
-                Resolution::Stop
-            })
-        });
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        Scripted(RefCell::new(vec![unsure(); 30])),
+        &Android,
+    )
+    .requiring(floor())
+    .escalating_to(|_: &Impasse<'_>| -> Result<Resolution, Infallible> {
+        asked.set(asked.get() + 1);
+        Ok(if asked.get() == 1 {
+            // A row this screen does not have.
+            Resolution::Choose {
+                operation: Operation::Tap,
+                target: Some(9_999),
+            }
+        } else {
+            Resolution::Stop
+        })
+    });
 
     let _ = pilot.pursue("Silence notifications");
 
@@ -415,5 +420,229 @@ fn an_answer_that_cannot_be_carried_out_is_asked_again() {
         asked.get(),
         2,
         "the first answer could not be carried out, so it asked once more",
+    );
+}
+
+/// A results page read whole: both rows are in the hierarchy from the start,
+/// but the second lies under the toolbar until the page is scrolled. Scrolling
+/// moves the rows and changes none of their words.
+#[derive(Default)]
+struct BelowTheFold {
+    scrolled: bool,
+    performed: Vec<Command>,
+}
+
+impl Device for BelowTheFold {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        use jev_pilot::snapshot::{Bounds, Element};
+
+        let row = |label: &str, top: i32| Element {
+            label: label.into(),
+            detail: None,
+            editable: false,
+            bounds: Bounds {
+                left: 0,
+                top,
+                right: 100,
+                bottom: top + 50,
+            },
+        };
+        let shift = if self.scrolled { 200 } else { 0 };
+        Ok(Snapshot::new(vec![
+            row("Result A", 100 - shift),
+            row("Result B", 250 - shift),
+            // Drawn last, so it covers whatever lies beneath it.
+            Element {
+                label: "Toolbar".into(),
+                detail: None,
+                editable: false,
+                bounds: Bounds {
+                    left: 0,
+                    top: 200,
+                    right: 100,
+                    bottom: 400,
+                },
+            },
+        ])
+        .expect("a screen"))
+    }
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        if matches!(command, Command::Scroll(_)) {
+            self.scrolled = true;
+        }
+        self.performed.push(command.clone());
+        Ok(())
+    }
+}
+
+/// A judge that records the state it was shown.
+struct Recording {
+    seen: std::rc::Rc<RefCell<Vec<serde_json::Value>>>,
+    turns: RefCell<Vec<serde_json::Value>>,
+}
+
+impl Judge for Recording {
+    type Error = Infallible;
+    fn evaluate(
+        &self,
+        state: serde_json::Value,
+        _questions: &StepQuestions<'_>,
+    ) -> Result<StepAnswers, Infallible> {
+        self.seen.borrow_mut().push(state);
+        Ok(serde_json::from_value(self.turns.borrow_mut().remove(0))
+            .expect("scripted answer parses"))
+    }
+}
+
+fn sure_tap(row: &str) -> serde_json::Value {
+    serde_json::json!({
+        "operation": { "type": "choice", "choice": "tap", "confidence": 0.99 },
+        "tap_target": { "type": "choice", "choice": row, "confidence": 0.99 },
+        "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+        "is_error_screen": { "type": "noul", "noul": 0.01 },
+    })
+}
+
+/// When the row Jev chose is covered and the second opinion answers with
+/// something else, the something else is what happened. Measured on a Google
+/// results page: the history said "Tapped mrjev.com" after a scroll, and the
+/// run then treated its first real tap on that row as a repeat, waited instead
+/// of tapping twice, and gave up.
+#[test]
+fn an_answer_to_a_covered_row_is_what_the_run_remembers_doing() {
+    let seen = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let reports = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let reported = std::rc::Rc::clone(&reports);
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: RefCell::new(vec![sure_tap("A2"), sure_tap("A2"), sure_tap("A2")]),
+    };
+    let mut pilot = Pilot::new(BelowTheFold::default(), judge, &Android)
+        .limited_to(2)
+        .escalating_to(|_: &Impasse<'_>| -> Result<Resolution, Infallible> {
+            Ok(Resolution::Choose {
+                operation: Operation::ScrollDown,
+                target: None,
+            })
+        })
+        .watching(move |step| reported.borrow_mut().push(step.chosen.cloned()));
+
+    let _ = pilot.pursue("Open result B");
+
+    let first = reports.borrow()[0].clone();
+    assert!(
+        matches!(first, Some(Act::Scroll(_))),
+        "the step is reported with the scroll it performed, got {first:?}"
+    );
+    let told = seen.borrow()[1]["previous_action"].to_string();
+    assert!(
+        told.contains("Scroll"),
+        "the next step is told of the scroll, got {told}"
+    );
+    assert!(
+        !told.contains("Result B"),
+        "nothing tapped Result B yet, got {told}"
+    );
+    assert!(
+        matches!(
+            pilot.device().performed.as_slice(),
+            [Command::Scroll(_), Command::Tap(_)]
+        ),
+        "the first real tap on B is carried out, not waited out as a repeat: {:?}",
+        pilot.device().performed
+    );
+}
+
+/// A row below the fold is a scroll away, not a question. Measured on a
+/// Google results page: Jev chose the right result on its own, the tap was
+/// refused because the result lay under the toolbar, and the run stopped to ask
+/// a person for what could only be "scroll down".
+#[test]
+fn a_covered_row_is_scrolled_towards_rather_than_asked_about() {
+    let mut pilot = Pilot::new(
+        BelowTheFold::default(),
+        Scripted(RefCell::new(vec![sure_tap("A2"), sure_tap("A2")])),
+        &Android,
+    )
+    .limited_to(2)
+    .escalating_to(|_: &Impasse<'_>| -> Result<Resolution, Infallible> {
+        panic!("nothing needed asking")
+    });
+
+    let _ = pilot.pursue("Open result B");
+
+    assert!(
+        matches!(
+            pilot.device().performed.as_slice(),
+            [
+                Command::Scroll(jev_pilot::act::Direction::Down),
+                Command::Tap(_)
+            ]
+        ),
+        "{:?}",
+        pilot.device().performed
+    );
+}
+
+/// A row under a dialog does not come out from under it by scrolling. One
+/// scroll that changes nothing is enough to know, and then it is a question.
+#[test]
+fn a_covered_row_a_scroll_does_not_move_is_asked_about() {
+    struct Pinned;
+    impl Device for Pinned {
+        type Error = Infallible;
+        fn observe(&mut self) -> Result<Snapshot, Infallible> {
+            BelowTheFold::default().observe()
+        }
+        fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+            Ok(())
+        }
+    }
+    let asked = std::cell::Cell::new(false);
+    let mut pilot = Pilot::new(
+        Pinned,
+        Scripted(RefCell::new(vec![sure_tap("A2"); 3])),
+        &Android,
+    )
+    .limited_to(3)
+    .escalating_to(|_: &Impasse<'_>| -> Result<Resolution, Infallible> {
+        asked.set(true);
+        Ok(Resolution::Stop)
+    });
+
+    let _ = pilot.pursue("Open result B");
+
+    assert!(
+        asked.get(),
+        "after a scroll that moved nothing, the run asks"
+    );
+}
+
+/// Whoever answers an impasse picks a row by number, and a covered row is
+/// refused however right it is. Measured: asked which result to open on a
+/// Google results page, the answer named the right one, which lay under the
+/// toolbar, and was refused — the question had not said which rows it could
+/// reach.
+#[test]
+fn an_impasse_says_which_rows_are_covered() {
+    let covered = RefCell::new(Vec::new());
+    let mut pilot = Pilot::new(
+        BelowTheFold::default(),
+        Scripted(RefCell::new(vec![unsure()])),
+        &Android,
+    )
+    .requiring(floor())
+    .escalating_to(|impasse: &Impasse<'_>| -> Result<Resolution, Infallible> {
+        covered.borrow_mut().extend_from_slice(impasse.covered);
+        Ok(Resolution::Stop)
+    });
+
+    let _ = pilot.pursue("Open result B");
+
+    assert_eq!(
+        covered.borrow().as_slice(),
+        &[1],
+        "Result B, and only it, is under the toolbar"
     );
 }
