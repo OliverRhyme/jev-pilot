@@ -764,9 +764,19 @@ pub fn answer_from(arguments: &serde_json::Value) -> Option<serde_json::Value> {
 fn binary() -> std::path::PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|me| me.parent().map(|beside| beside.join("jev-pilot")))
+        .map(|me| command_line_beside(&me, std::env::consts::EXE_SUFFIX))
         .filter(|beside| beside.exists())
         .unwrap_or_else(|| "jev-pilot".into())
+}
+
+/// Where the command line sits beside a server installed at `me`.
+///
+/// By its platform file name: on Windows that ends in `.exe`, and a lookup
+/// without the suffix finds nothing and falls back to the path, which may hold
+/// some other copy or none.
+#[must_use]
+pub fn command_line_beside(me: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    me.with_file_name(format!("jev-pilot{suffix}"))
 }
 
 /// Run the command line and hand back everything it said.
