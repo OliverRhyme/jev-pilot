@@ -42,3 +42,22 @@ fn a_catalog_never_offers_an_act_the_platform_lacks() {
     // Act is still the vocabulary the device speaks.
     let _: fn(jev_pilot::snapshot::ElementRef) -> Act = Act::Tap;
 }
+
+/// A field named by its hint holds nothing, and says so. A password field
+/// reads "Password" empty or filled with a password that is never shown, so a
+/// run that had typed once and seen the form reset took it for filled, and
+/// retyping it read 0.00.
+#[test]
+fn a_field_showing_only_its_hint_reads_as_empty() {
+    let empty = r#"<hierarchy><node class="android.widget.EditText" editable="true" clickable="true" text="" hint="Password" bounds="[0,0][400,80]"/></hierarchy>"#;
+    let filled = r#"<hierarchy><node class="android.widget.EditText" editable="true" clickable="true" text="1234567890" hint="Account number" bounds="[0,0][400,80]"/></hierarchy>"#;
+
+    let row = |xml: &str| {
+        let snapshot = Android.parse_hierarchy(xml).expect("parses");
+        let (_, element) = snapshot.refs().next().expect("one field");
+        element.describe()
+    };
+
+    assert!(row(empty).contains("empty"), "{}", row(empty));
+    assert!(!row(filled).contains("empty"), "{}", row(filled));
+}

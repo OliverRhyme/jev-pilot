@@ -63,14 +63,21 @@ impl Platform for Android {
                 // failing that for what it is, rather than thrown away for
                 // having nothing to say. A node that is neither nameable nor
                 // typeable is noise and still goes.
-                let label = match texts.next() {
-                    Some(label) => label,
-                    None if editable => hint_of(&node).unwrap_or_else(|| Box::from("text field")),
+                let (label, detail) = match texts.next() {
+                    Some(label) => (label, texts.next()),
+                    // Named by its hint, so holding nothing, and said so: a
+                    // password field reads "Password" empty or full, and a run
+                    // that had typed once took a form that had reset for one
+                    // already filled in.
+                    None if editable => match hint_of(&node) {
+                        Some(hint) => (hint, Some(Box::from("empty"))),
+                        None => (Box::from("text field"), None),
+                    },
                     None => return None,
                 };
                 Some(Element {
                     label,
-                    detail: texts.next(),
+                    detail,
                     editable,
                     bounds: parse_bounds(node.attribute("bounds")?)?,
                 })

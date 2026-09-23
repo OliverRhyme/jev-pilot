@@ -251,6 +251,7 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
     } = plan;
     let goal = &*goal;
     let dir = desk_dir.unwrap_or_else(|| std::env::temp_dir().join("jev-pilot-desk"));
+    let supplied: Vec<Box<str>> = texts.iter().map(|(field, _)| field.clone()).collect();
     let desk = Rc::new(Desk::new(dir.clone(), texts)?);
     let transcript = dir.join("steps.jsonl");
     let _ = std::fs::remove_file(&transcript);
@@ -286,6 +287,7 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
         .confirming(accept)
         .following(steps_in_order.iter().map(String::as_str))
         .entering_keys(keys.as_deref().unwrap_or_default())
+        .supplying(&supplied)
         .limited_to(steps)
         .escalating_to(move |impasse: &Impasse<'_>| choosing.choose(impasse))
         .writing_with(move |request: &Writing<'_>| writing.compose(request))
@@ -389,6 +391,13 @@ fn report(step: &jev_pilot::pilot::StepReport<'_>) {
     match step.chosen {
         Some(act) => println!(
             "   -> {act:?}   op {:.2} / target {target}",
+            step.operation_confidence.get()
+        ),
+        // A step that chose nothing because the goal was met did not refuse
+        // anything; saying so kept a run that ended achieved from reading as
+        // one that ended on a refusal.
+        None if step.goal_met == jev_pilot::judgment::Progress::Achieved => println!(
+            "   -> finished: the goal is met   op {:.2} / target {target}",
             step.operation_confidence.get()
         ),
         None => println!(

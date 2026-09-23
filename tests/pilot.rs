@@ -1604,3 +1604,150 @@ fn a_recorded_judge_keeps_each_request_as_it_was_sent() {
     assert_eq!(first["model"], jev_pilot::client::DEFAULT_MODEL);
     assert!(dir.join("step-002.json").exists());
 }
+
+/// Told only that a keyboard is up, Jev put 0.42 on putting it away with the
+/// form's Continue hidden behind it; told what a keyboard covers, 0.92.
+#[test]
+fn the_state_says_what_an_open_keyboard_covers() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    let mut pilot = Pilot::new(Fake::default(), judge, &Android);
+
+    pilot.pursue("fill the form in").expect("the run completes");
+
+    let seen = seen.borrow();
+    assert!(seen[0].get("keyboard_covers").is_none(), "{}", seen[0]);
+    assert!(seen[1]["keyboard_covers"].is_string(), "{}", seen[1]);
+}
+
+/// A screen moving from one thing to the next is read as it passes: Confirm
+/// Transfer gone from the summary and the PIN pad not yet drawn. Asked what to
+/// do there, Jev was unsure and nothing it could be told raised waiting above
+/// 0.14. Having just seen the screen move, the run looks again once before
+/// asking anyone.
+#[test]
+fn an_uncertain_step_right_after_the_screen_moved_looks_again_before_asking() {
+    let asked = std::cell::Cell::new(0_u32);
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        Scripted::new(vec![
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("tap", Some("A3"), 0.10, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+        &Android,
+    )
+    .requiring(Confidence::new(0.6).expect("valid"))
+    .escalating_to(|_: &jev_pilot::pilot::Impasse<'_>| {
+        asked.set(asked.get() + 1);
+        Ok::<_, Infallible>(jev_pilot::pilot::Resolution::Stop)
+    });
+
+    pilot.pursue("go on").expect("the run completes");
+
+    assert_eq!(asked.get(), 0, "it looked again rather than asking");
+    assert!(
+        pilot.device().performed.contains(&Command::Settle),
+        "{:?}",
+        pilot.device().performed
+    );
+}
+
+/// A login form that has reset itself: one field, empty, and its button off.
+#[derive(Default)]
+struct ResetLogin {
+    typed: Vec<String>,
+}
+
+impl Device for ResetLogin {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        use jev_pilot::snapshot::{Bounds, Element};
+        let filled = !self.typed.is_empty();
+        Ok(Snapshot::new(vec![
+            Element {
+                label: "Password".into(),
+                detail: (!filled).then(|| "empty".into()),
+                editable: true,
+                bounds: Bounds::from_origin_size(0, 0, 400, 80),
+            },
+            Element {
+                label: "Forgot your password?".into(),
+                detail: None,
+                editable: false,
+                bounds: Bounds::from_origin_size(0, 200, 400, 80),
+            },
+        ])
+        .expect("a screen"))
+    }
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        if let Command::TypeText { text, .. } = command {
+            self.typed.push(text.to_string());
+        }
+        Ok(())
+    }
+}
+
+/// The state names the fields that are empty and those the run has words for.
+/// On a reset login form, with the history saying the password had been typed
+/// and submitted, retyping it read 0.00; told both, 0.47 to 0.54.
+#[test]
+fn the_state_names_empty_fields_and_those_there_are_words_for() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![answer("done", None, 0.99, 0.97)]),
+    };
+    let mut pilot = Pilot::new(ResetLogin::default(), judge, &Android).supplying(["password"]);
+
+    pilot.pursue("log in").expect("the run completes");
+
+    let seen = seen.borrow();
+    assert_eq!(
+        seen[0]["empty_fields"],
+        serde_json::json!(["Password"]),
+        "{}",
+        seen[0]
+    );
+    assert_eq!(
+        seen[0]["words_ready_for"],
+        serde_json::json!(["Password"]),
+        "{}",
+        seen[0]
+    );
+}
+
+/// Unsure, on a screen with exactly one empty field it has the words for, the
+/// run fills it in rather than asking: that is harmless, and it is what the
+/// words were given for.
+#[test]
+fn an_unsure_step_fills_the_one_empty_field_it_has_words_for() {
+    use jev_pilot::pilot::{Resolution, Writing};
+    let asked = std::cell::Cell::new(false);
+    let mut pilot = Pilot::new(
+        ResetLogin::default(),
+        Scripted::new(vec![
+            answer("tap", Some("A2"), 0.20, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+        &Android,
+    )
+    .requiring(Confidence::new(0.6).expect("valid"))
+    .supplying(["password"])
+    .escalating_to(|_: &jev_pilot::pilot::Impasse<'_>| {
+        asked.set(true);
+        Ok::<_, Infallible>(Resolution::Stop)
+    })
+    .writing_with(|_: &Writing<'_>| Ok::<_, Infallible>(Box::<str>::from("Password123!")));
+
+    pilot.pursue("log in").expect("the run completes");
+
+    assert!(!asked.get(), "nobody was asked");
+    assert_eq!(pilot.device().typed, ["Password123!"]);
+}

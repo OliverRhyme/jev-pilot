@@ -508,6 +508,8 @@ pub struct Pilot<'p, D, J, X = Halt, C = Mute> {
     plan: Vec<Box<str>>,
     /// Keys to press in order on a keypad, one per label.
     keys: Vec<Box<str>>,
+    /// Names of the fields the caller supplied words for, lowercased.
+    supplied: Vec<Box<str>>,
 }
 
 impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
@@ -536,6 +538,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             acted: self.acted,
             plan: self.plan,
             keys: self.keys,
+            supplied: self.supplied,
         }
     }
 
@@ -562,6 +565,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             acted: self.acted,
             plan: self.plan,
             keys: self.keys,
+            supplied: self.supplied,
         }
     }
 }
@@ -585,6 +589,7 @@ impl<'p, D: Device, J: Judge> Pilot<'p, D, J, Halt, Mute> {
             acted: 0,
             plan: Vec::new(),
             keys: Vec::new(),
+            supplied: Vec::new(),
         }
     }
 }
@@ -724,6 +729,21 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         self.keys = keys
             .chars()
             .map(|key| key.to_string().into_boxed_str())
+            .collect();
+        self
+    }
+
+    /// The fields there are words for, named as the caller named them.
+    ///
+    /// Matched against what a screen calls a field by containment and
+    /// ignoring case, as the words themselves are. Knowing which fields have
+    /// words lets a step say so, and lets a step that cannot decide fill in
+    /// the one empty field it has words for instead of asking.
+    #[must_use]
+    pub fn supplying<S: AsRef<str>>(mut self, fields: impl IntoIterator<Item = S>) -> Self {
+        self.supplied = fields
+            .into_iter()
+            .map(|field| field.as_ref().to_lowercase().into_boxed_str())
             .collect();
         self
     }
@@ -1153,6 +1173,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         let mut ineffective: u32 = 0;
         // How many of `self.keys` have been pressed on the keypad now showing.
         let mut entered: usize = 0;
+        // Whether the last action was seen to move the screen, so this step
+        // may be reading it on its way somewhere.
+        let mut just_moved = false;
         // The app the goal is about: whichever one was in front when the run
         // was given it. A run can only tell it has wandered off by comparing
         // against somewhere, and nothing else in a run names an app.
@@ -1273,6 +1296,33 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 entered = 0;
             }
             let sequence = sequence_on(&self.keys, entered, &catalog);
+            let fields: Vec<(ElementRef, &Element)> = snapshot
+                .refs()
+                .filter(|(_, element)| element.editable)
+                .collect();
+            let is_empty = |element: &Element| element.detail.as_deref() == Some("empty");
+            let has_words = |element: &Element| {
+                let called = element.describe().to_lowercase();
+                self.supplied.iter().any(|field| called.contains(&**field))
+            };
+            let empty_fields: Vec<&str> = fields
+                .iter()
+                .filter(|(_, element)| is_empty(element))
+                .map(|(_, element)| &*element.label)
+                .collect();
+            let words_ready_for: Vec<&str> = fields
+                .iter()
+                .filter(|(_, element)| has_words(element))
+                .map(|(_, element)| &*element.label)
+                .collect();
+            // The one empty field there are words for, when there is exactly
+            // one: what an unsure step fills in rather than asking about.
+            let fillable: Vec<ElementRef> = fields
+                .iter()
+                .filter(|(_, element)| is_empty(element) && has_words(element))
+                .map(|(handle, _)| *handle)
+                .collect();
+            let fill_in = (self.types && fillable.len() == 1).then(|| fillable[0]);
             let mut questions = StepQuestions::planned(goal, &self.plan, &catalog, &self.criteria);
             if sequence.is_some() {
                 questions = questions.pointing_at_next_key();
@@ -1296,6 +1346,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             repeating: repeated,
                             lately: &recent,
                             sequence: sequence.as_ref(),
+                            empty_fields: &empty_fields,
+                            words_ready_for: &words_ready_for,
                         },
                     ),
                     &questions,
@@ -1453,8 +1505,46 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 return Ok(Ending::Finished(Outcome::Achieved));
             }
 
+            let moved_before = core::mem::take(&mut just_moved);
             let decision = match decided {
                 Ok(decision) => decision,
+                // A screen on its way from one thing to the next is read as it
+                // passes — Confirm Transfer gone from the summary and the PIN
+                // pad not yet drawn — and nothing about it can be judged. Having
+                // just seen the screen move, look again once before asking.
+                Err(Indecision::TooUncertain { .. }) if moved_before => {
+                    self.device
+                        .perform(&Command::Settle)
+                        .map_err(RunError::Device)?;
+                    previous = Some(
+                        "Waited: the screen had only just changed, and was looked at again"
+                            .to_owned(),
+                    );
+                    self.report(
+                        index,
+                        &snapshot,
+                        &answers,
+                        Some(&Act::Wait),
+                        Went {
+                            repeating: repeated,
+                            acted: false,
+                        },
+                        Spent {
+                            read_ms,
+                            step_ms: elapsed_ms(began),
+                            waited_ms: waited.get(),
+                            judged_ms,
+                            settled_ms,
+                        },
+                    );
+                    continue;
+                }
+                // Unsure, with exactly one empty field it has the words for:
+                // filling it in is harmless and is what the words were given
+                // for, where asking costs a person's time.
+                Err(Indecision::TooUncertain { .. }) if let Some(into) = fill_in => {
+                    Decision::NeedsText { into }
+                }
                 Err(because) => {
                     let taken = Taken {
                         goal,
@@ -1715,6 +1805,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     settled_ms = elapsed_ms(acting);
                     if moved {
                         ineffective = 0;
+                        just_moved = true;
                     } else {
                         // It never moved. That is worth saying: a run that
                         // does not know its action achieved nothing will
@@ -1832,6 +1923,10 @@ struct Standing<'s> {
     lately: &'s [&'s str],
     /// The keys still to press, when this screen is the keypad for them.
     sequence: Option<&'s serde_json::Value>,
+    /// Fields that hold nothing, by name.
+    empty_fields: &'s [&'s str],
+    /// Fields the caller supplied words for, by name.
+    words_ready_for: &'s [&'s str],
 }
 
 fn describe(
@@ -1850,6 +1945,8 @@ fn describe(
         repeating,
         lately,
         sequence,
+        empty_fields,
+        words_ready_for,
     } = where_it_stands;
     // Rows are keyed the way the Choice offers them, so its options can be
     // bare keys and the text travels once rather than twice.
@@ -1868,6 +1965,13 @@ fn describe(
         "keyboard_open": keyboard_open,
         "rows": keyed(&mut catalog.rows()),
     });
+    if keyboard_open {
+        // Said, not left to be inferred: told only that a keyboard was up,
+        // Jev put 0.42 on putting it away with the form's Continue behind it,
+        // and 0.92 once told what a keyboard covers.
+        state["keyboard_covers"] =
+            "the bottom half of the screen, where a form's Continue button usually is".into();
+    }
     if let Some(app) = app {
         state["app"] = app.into();
         // Said only when it differs. On the app the goal is about, repeating
@@ -1913,6 +2017,16 @@ fn describe(
     }
     if let Some(sequence) = sequence {
         state["sequence"] = sequence.clone();
+    }
+    // Named apart from the rows: a password field reads the same empty or
+    // full, and a history saying it was typed is believed over a screen that
+    // does not say otherwise. On a login form that had reset itself, retyping
+    // read 0.00; told these two, 0.47 to 0.54.
+    if !empty_fields.is_empty() {
+        state["empty_fields"] = empty_fields.into();
+    }
+    if !words_ready_for.is_empty() {
+        state["words_ready_for"] = words_ready_for.into();
     }
     state
 }
