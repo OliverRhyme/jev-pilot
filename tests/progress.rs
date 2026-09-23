@@ -126,11 +126,15 @@ fn the_progress_question_is_a_score_with_ordered_levels() {
 fn a_step_is_reported_with_what_the_screen_said_and_which_app_it_was() {
     let seen = std::cell::RefCell::new(Vec::new());
     {
-        let mut pilot = Pilot::new(PinPad, Scripted(RefCell::new(vec![turn("done", 1.9)])), &Android)
-            .watching(|report: &StepReport<'_>| {
-                seen.borrow_mut()
-                    .push((report.app.map(str::to_owned), report.says.clone()));
-            });
+        let mut pilot = Pilot::new(
+            PinPad,
+            Scripted(RefCell::new(vec![turn("done", 1.9)])),
+            &Android,
+        )
+        .watching(|report: &StepReport<'_>| {
+            seen.borrow_mut()
+                .push((report.app.map(str::to_owned), report.says.clone()));
+        });
         pilot.pursue("enter the PIN").expect("the run completes");
     }
 
@@ -264,7 +268,8 @@ fn time_spent_settling_after_an_act_is_reported_as_the_settle() {
             &Android,
         )
         .watching(|report: &StepReport<'_>| {
-            seen.borrow_mut().push((report.judged_ms, report.settled_ms));
+            seen.borrow_mut()
+                .push((report.judged_ms, report.settled_ms));
         });
         let _ = pilot.pursue("scroll about");
     }

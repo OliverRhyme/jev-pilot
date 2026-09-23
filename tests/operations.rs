@@ -201,7 +201,8 @@ const LAUNCHER: &str = include_str!("fixtures/helper-home.xml");
 #[test]
 fn leaving_the_app_offers_a_way_back_into_it() {
     let launcher = Android.parse_hierarchy(LAUNCHER).expect("fixture parses");
-    let catalog = Catalog::for_screen(&launcher, &Android).returning_to(Some("com.android.settings"));
+    let catalog =
+        Catalog::for_screen(&launcher, &Android).returning_to(Some("com.android.settings"));
 
     assert!(catalog.operations().contains(&Operation::Return));
 
