@@ -358,8 +358,9 @@ impl Snapshot {
 
     /// Which screen this is, as against what state it is in.
     ///
-    /// The rows it offers, the words it says, the controls it refuses and
-    /// whether a keyboard is up — and deliberately not where any of it sits.
+    /// The rows it offers, which of them can be reached, the words it says, the
+    /// controls it refuses and whether a keyboard is up — and deliberately not
+    /// where any of it sits.
     /// A form re-entered after a detour is the same place with its rows at
     /// slightly different offsets, and a spinner moving a pixel is the same
     /// place too.
@@ -377,10 +378,15 @@ impl Snapshot {
         self.keyboard_open.hash(&mut hasher);
         self.notices.hash(&mut hasher);
         self.unavailable.hash(&mut hasher);
-        for element in &self.elements {
+        for (handle, element) in self.refs() {
             element.label.hash(&mut hasher);
             element.detail.hash(&mut hasher);
             element.editable.hash(&mut hasher);
+            // Not where a row is, but whether it can be reached. A web page
+            // is read whole, so a scroll moves every row and changes none of
+            // their words; which rows it leaves within reach is the only
+            // sign that it went anywhere.
+            self.tap_point(handle).is_ok().hash(&mut hasher);
         }
         hasher.finish()
     }

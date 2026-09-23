@@ -507,10 +507,7 @@ fn the_screen_says_which_app_it_belongs_to() {
     const SETTINGS: &str = include_str!("fixtures/settings.xml");
 
     assert_eq!(
-        Android
-            .parse_hierarchy(SETTINGS)
-            .expect("a screen")
-            .app(),
+        Android.parse_hierarchy(SETTINGS).expect("a screen").app(),
         Some("com.android.settings"),
     );
 }
@@ -522,10 +519,7 @@ fn system_chrome_does_not_get_to_name_the_screen() {
     const HOME: &str = include_str!("fixtures/helper-home.xml");
 
     assert_ne!(
-        Android
-            .parse_hierarchy(HOME)
-            .expect("a screen")
-            .app(),
+        Android.parse_hierarchy(HOME).expect("a screen").app(),
         Some("com.android.systemui"),
     );
 }
@@ -619,7 +613,10 @@ fn a_control_becoming_available_makes_it_a_different_screen() {
 fn the_screen_says_how_long_it_has_been_quiet() {
     const SETTLED: &str = include_str!("fixtures/settings.xml");
 
-    let quiet = SETTLED.replace("<hierarchy rotation=\"0\"", "<hierarchy rotation=\"0\" quiet-ms=\"431\"");
+    let quiet = SETTLED.replace(
+        "<hierarchy rotation=\"0\"",
+        "<hierarchy rotation=\"0\" quiet-ms=\"431\"",
+    );
     assert_eq!(
         Android
             .parse_hierarchy(&quiet)
@@ -705,4 +702,38 @@ fn a_screen_that_gains_a_row_is_a_different_place() {
     let after = Snapshot::new(vec![row("Account Number"), row("Continue")]).expect("a screen");
 
     assert_ne!(before.place(), after.place());
+}
+
+/// A web page is read whole: every row on it is in the hierarchy whether or not
+/// it is on screen, so scrolling changes no row and no word. What it changes is
+/// which rows can be reached. Measured on a Google results page: a scroll that
+/// brought the wanted result into reach counted as a fourth visit to the same
+/// place, and the run ended for going in circles.
+#[test]
+fn a_page_scrolled_to_other_rows_is_a_different_place() {
+    use jev_pilot::snapshot::{Bounds, Element, Snapshot};
+
+    let page = |shift| {
+        let row = |label: &str, top: i32| Element {
+            label: label.into(),
+            detail: None,
+            editable: false,
+            bounds: Bounds::from_origin_size(0, top - shift, 400, 80),
+        };
+        vec![
+            row("Result A", 100),
+            row("Result B", 600),
+            // The toolbar is drawn last and covers everything beneath it.
+            Element {
+                label: "Toolbar".into(),
+                detail: None,
+                editable: false,
+                bounds: Bounds::from_origin_size(0, 500, 400, 1000),
+            },
+        ]
+    };
+    let top = Snapshot::new(page(0)).expect("a screen");
+    let scrolled = Snapshot::new(page(400)).expect("a screen");
+
+    assert_ne!(top.place(), scrolled.place());
 }
