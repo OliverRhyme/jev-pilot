@@ -32,6 +32,129 @@ A flat list of every operation crossed with every row would grow as their
 product and could express pairings that make no sense: a scroll aimed at a
 button, a tap aimed at nothing.
 
+## Install
+
+One package, two programs:
+
+| Binary | What it is | Built |
+| --- | --- | --- |
+| `jev-pilot` | The command line. It observes, asks Jev, and drives the device. | always |
+| `jev-pilot-mcp` | An MCP server over stdio. Every tool runs the `jev-pilot` installed beside it, so the two cannot drift apart. | with the `mcp` feature |
+
+Because the server runs the command line rather than containing the loop, **install
+them together and update them together**. A server left running an old copy keeps
+answering with the old tools.
+
+### What you need
+
+- Rust 1.98 or newer (`rustup update stable`).
+- `adb` on your `PATH` — Android's [platform tools].
+- An Android device with USB or wireless debugging on and this computer
+  authorised. `adb devices` should list it as `device`, not `unauthorized`.
+- A TypeSafe API key.
+
+[platform tools]: https://developer.android.com/tools/releases/platform-tools
+
+### Build and install
+
+From a clone, both binaries into `~/.cargo/bin`:
+
+```console
+$ cargo install --path . --features mcp --locked
+```
+
+Leave off `--features mcp` for the command line alone; the server brings an async
+runtime the command line does not need. Straight from the repository, without a
+clone:
+
+```console
+$ cargo install --git https://github.com/OliverRhyme/jev-pilot --features mcp --locked
+```
+
+The crate is not published to crates.io, so there is no `cargo install jev-pilot`.
+
+### The API key
+
+Read at run time, never compiled in. Either works; the file wins when both are set:
+
+```sh
+export TYPESAFE_API_KEY=ts-live-...
+export TYPESAFE_API_KEY_FILE=/path/to/typesafe-api-key   # preferred
+```
+
+Running from this directory, `cp .env.example .env` and fill it in, then load it
+into the shell (`set -a; . ./.env; set +a`). The program itself does not read
+`.env`.
+
+### Check the device
+
+```console
+$ jev-pilot devices           # the serials adb can see
+$ jev-pilot helper            # whether the on-device helper is installed and on
+$ jev-pilot helper install    # install it and switch its accessibility service on
+$ jev-pilot observe           # what the next step would be offered, changing nothing
+```
+
+The helper is optional and strongly recommended: it reads a screen in about 60ms
+where `uiautomator dump` takes about 2.5s, and it reports only what is actually on
+screen. It is an accessibility service, so it can read every screen on that
+device; it answers only on loopback, to a caller holding a per-run token, and is
+built from the source in `helper/`. Nothing installs it except `helper install`.
+
+### Run a goal
+
+```console
+$ jev-pilot --app com.google.android.youtube \
+    --then "Tap Search" --then "Type opus 5.5 into the search box and submit" \
+    --then "Tap a video about Opus 5.5" --text "search=opus 5.5" \
+    --accept "A video is open in the player" --floor 0.4 \
+    "Find a video about Opus 5.5 and play it"
+```
+
+`jev-pilot --help` lists every flag. A run that cannot decide asks at the terminal.
+
+### Register the MCP server
+
+The server needs the key in its own environment: the client starts it, and it
+starts the command line, which inherits it. With Claude Code:
+
+```console
+$ claude mcp add jev-pilot -e TYPESAFE_API_KEY_FILE=/path/to/typesafe-api-key -- jev-pilot-mcp
+```
+
+That registers it for the current project; add `-s user` to have it in every one.
+
+Any other client, wherever it keeps its servers:
+
+```jsonc
+{
+  "mcpServers": {
+    "jev-pilot": {
+      "command": "jev-pilot-mcp",
+      "env": { "TYPESAFE_API_KEY_FILE": "/path/to/typesafe-api-key" }
+    }
+  }
+}
+```
+
+Use the absolute path (`~/.cargo/bin/jev-pilot-mcp`) if the client does not
+start servers with your shell's `PATH`.
+
+### Updating
+
+Re-run the same `cargo install`; it replaces both binaries. A server already
+running keeps its old tool list until it is restarted, so reconnect it in the
+client afterwards — in Claude Code, `/mcp` and then reconnect `jev-pilot`.
+
+A reconnect does not always replace the process. If the tools still lack a new
+argument, check when the running server started, and end it if it predates the
+install; the next reconnect starts the new one:
+
+```console
+$ ps -o lstart=,command= -p "$(pgrep -d, jev-pilot-mcp)"
+$ pkill jev-pilot-mcp
+```
+
 ## Why it is fast
 
 Two properties, both structural:
@@ -109,14 +232,7 @@ model holding a conversation can drive a device — and, more to the point, can
 *be* the second opinion above. A run that cannot decide stops and asks; the
 caller answers it and the run carries on.
 
-```console
-$ cargo install --path . --features mcp   # off by default; it brings a runtime
-```
-
-```jsonc
-// Wherever your client keeps its MCP servers
-{ "mcpServers": { "jev-pilot": { "command": "jev-pilot-mcp" } } }
-```
+Installing and registering it is under [Install](#install).
 
 Built on [`rmcp`], the official SDK, so the protocol surface tracks the spec
 rather than this repo. The server is async because `rmcp` is; the loop it drives
@@ -281,7 +397,8 @@ it through a derived `Debug` in a panic message or error report.
 ## Dependencies
 
 `serde`, `serde_json`, `roxmltree`, and — only with the default `http` feature —
-`ureq`. No Appium, no WebDriverAgent client, no `mobile-use`, no MCP server. The
+`ureq`. The `mcp` feature adds `rmcp`, `tokio` and `schemars` for the server, and
+nothing else uses them. No Appium, no WebDriverAgent client, no `mobile-use`. The
 Android adapter shells out to `adb` directly.
 
 Turn `http` off and the crate builds requests for you to send with whatever
