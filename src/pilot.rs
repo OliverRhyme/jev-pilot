@@ -2006,6 +2006,18 @@ fn describe(
         // a run starts trying to leave.
         state["unavailable"] = unavailable.into();
     }
+    // An ellipsis is how an app says it is still at work — "Logging in...",
+    // "Processing…" — and left among the other words it is read past: with
+    // "Logging in..." only among the unavailable controls, Jev submitted the
+    // login again at 0.72. Said as the app still working, it waited at 0.85.
+    if let Some(busy) = says
+        .iter()
+        .chain(unavailable)
+        .find(|text| text.trim_end().ends_with("...") || text.trim_end().ends_with('…'))
+    {
+        state["in_progress"] =
+            format!("The app is still working on the previous action: {busy}").into();
+    }
     if !says.is_empty() {
         // Apart from the rows, and unkeyed: none of it can be chosen, and a
         // key is an invitation to try. It is here to be read, not picked.

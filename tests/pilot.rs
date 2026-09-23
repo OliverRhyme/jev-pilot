@@ -1751,3 +1751,44 @@ fn an_unsure_step_fills_the_one_empty_field_it_has_words_for() {
     assert!(!asked.get(), "nobody was asked");
     assert_eq!(pilot.device().typed, ["Password123!"]);
 }
+
+/// A login button reading "Logging in..." is the app still at work.
+struct LoggingIn;
+
+impl Device for LoggingIn {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        Ok(screen_of(&["Forgot your password?"])
+            .offering_but_refusing(vec!["Logging in...".into()]))
+    }
+    fn perform(&mut self, _command: &Command) -> Result<(), Infallible> {
+        Ok(())
+    }
+}
+
+/// A control or a message ending in an ellipsis is the app saying it is still
+/// working, and the state says so in as many words. Measured: with "Logging
+/// in..." only among the unavailable controls, Jev pressed submit again at
+/// 0.72, the second login reset the form, and the password had to be typed
+/// again; told the app was still working, it waited at 0.85 to 0.90.
+#[test]
+fn the_state_says_when_the_app_is_still_working() {
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![answer("done", None, 0.99, 0.97)]),
+    };
+    let mut pilot = Pilot::new(LoggingIn, judge, &Android);
+    pilot.pursue("log in").expect("the run completes");
+    let said = seen.borrow()[0]["in_progress"].to_string();
+    assert!(said.contains("Logging in..."), "{said}");
+
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![answer("done", None, 0.99, 0.97)]),
+    };
+    let mut pilot = Pilot::new(Fake::default(), judge, &Android);
+    pilot.pursue("open settings").expect("the run completes");
+    assert!(seen.borrow()[0].get("in_progress").is_none());
+}
