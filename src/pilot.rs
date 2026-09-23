@@ -31,6 +31,63 @@ pub trait Judge {
     ) -> Result<StepAnswers, Self::Error>;
 }
 
+/// A judge that keeps every request it is asked, then passes it on.
+///
+/// Written as `step-001.json`, `step-002.json`, … in one directory, each the
+/// whole request as the API would receive it. A step that went wrong can then
+/// be replayed with its wording changed, rather than guessed at from a
+/// reconstruction — measured, a reconstructed login step read 0.75 where the
+/// request actually sent had read 0.36.
+///
+/// A request that cannot be written is not a reason to stop a run: the
+/// recording is an account of the work, not the work.
+#[derive(Debug)]
+pub struct Recorded<J> {
+    inner: J,
+    dir: Option<std::path::PathBuf>,
+    count: std::cell::Cell<u32>,
+}
+
+impl<J> Recorded<J> {
+    /// Keep `inner`'s requests in `dir`, which is made if it is missing.
+    pub fn new(inner: J, dir: std::path::PathBuf) -> Self {
+        Self::optionally(inner, Some(dir))
+    }
+
+    /// Keep `inner`'s requests in `dir` when there is one, and otherwise
+    /// only pass them on.
+    pub fn optionally(inner: J, dir: Option<std::path::PathBuf>) -> Self {
+        if let Some(dir) = &dir {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        Self {
+            inner,
+            dir,
+            count: std::cell::Cell::new(0),
+        }
+    }
+}
+
+impl<J: Judge> Judge for Recorded<J> {
+    type Error = J::Error;
+
+    fn evaluate(
+        &self,
+        state: serde_json::Value,
+        questions: &StepQuestions<'_>,
+    ) -> Result<StepAnswers, Self::Error> {
+        if let Some(dir) = &self.dir {
+            let count = self.count.get() + 1;
+            self.count.set(count);
+            let request = crate::client::Request::new(&state, questions);
+            if let Ok(body) = serde_json::to_string_pretty(&request) {
+                let _ = std::fs::write(dir.join(format!("step-{count:03}.json")), body);
+            }
+        }
+        self.inner.evaluate(state, questions)
+    }
+}
+
 #[cfg(feature = "http")]
 impl Judge for crate::client::http::SystemOne {
     type Error = crate::client::http::ApiError;

@@ -271,7 +271,12 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
     }
     println!();
 
-    let judge = SystemOne::new(ApiKey::from_env()?);
+    // Every request kept as sent, when asked for, so a step that went wrong
+    // can be replayed against the model with its wording changed.
+    let judge = jev_pilot::pilot::Recorded::optionally(
+        SystemOne::new(ApiKey::from_env()?),
+        std::env::var_os("JEV_PILOT_REQUESTS").map(PathBuf::from),
+    );
     let choosing = Rc::clone(&desk);
     let writing = Rc::clone(&desk);
 

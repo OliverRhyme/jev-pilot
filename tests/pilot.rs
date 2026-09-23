@@ -1576,3 +1576,31 @@ fn a_button_is_not_pressed_again_because_a_field_reformatted_itself() {
 
     assert_eq!(pilot.device().taps, 1, "the second tap was waited out");
 }
+
+/// Each request can be kept as it was sent, so a step that went wrong can be
+/// replayed against the model with its wording changed, rather than guessed at
+/// from a reconstruction that asks something slightly different.
+#[test]
+fn a_recorded_judge_keeps_each_request_as_it_was_sent() {
+    let dir = std::env::temp_dir().join("jev-pilot-test-recorded-requests");
+    let _ = std::fs::remove_dir_all(&dir);
+    let judge = jev_pilot::pilot::Recorded::new(
+        Scripted::new(vec![
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+        dir.clone(),
+    );
+    let mut pilot = Pilot::new(Fake::default(), judge, &Android);
+
+    pilot.pursue("Turn on Wi-Fi").expect("the run completes");
+
+    let first: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("step-001.json")).expect("the first request was kept"),
+    )
+    .expect("it is JSON");
+    assert!(first["state"]["rows"].is_object(), "{first}");
+    assert_eq!(first["questions"]["operation"]["type"], "choice");
+    assert_eq!(first["model"], jev_pilot::client::DEFAULT_MODEL);
+    assert!(dir.join("step-002.json").exists());
+}

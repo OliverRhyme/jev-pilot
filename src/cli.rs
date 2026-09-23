@@ -289,6 +289,8 @@ OPTIONS
 ENVIRONMENT
   TYPESAFE_API_KEY        the key Jev is called with
   TYPESAFE_API_KEY_FILE   a file holding it instead
+  JEV_PILOT_REQUESTS      a directory to keep every request in, as sent,
+                          for replaying a step with its wording changed
 
 The helper is strongly recommended: without it each screen read takes about
 2.5s instead of about 60ms. `jev-pilot helper` says what a device needs.
