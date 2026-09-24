@@ -737,3 +737,42 @@ fn a_page_scrolled_to_other_rows_is_a_different_place() {
 
     assert_ne!(top.place(), scrolled.place());
 }
+
+/// A small button nested in a larger field is tapped at its own centre, not
+/// the field's. From a date-of-birth field on a Pixel 8 Pro: the calendar
+/// button is `[835,1086][957,1208]` inside a full-width field, and a tap at
+/// (896, 1147) — the button's centre — opened the picker.
+#[test]
+fn a_small_button_inside_a_field_is_tapped_at_its_own_centre() {
+    let snapshot = Snapshot::new(vec![
+        Element {
+            label: "Date of birth".into(),
+            detail: Some("empty".into()),
+            editable: true,
+            bounds: Bounds {
+                left: 48,
+                top: 1060,
+                right: 984,
+                bottom: 1234,
+            },
+        },
+        // Drawn after the field it sits in, as a nested child is.
+        Element {
+            label: "Pick a date".into(),
+            detail: None,
+            editable: false,
+            bounds: Bounds {
+                left: 835,
+                top: 1086,
+                right: 957,
+                bottom: 1208,
+            },
+        },
+    ])
+    .expect("a screen");
+
+    let (button, _) = snapshot.refs().nth(1).expect("the calendar button");
+    let point = snapshot.tap_point(button).expect("nothing covers it");
+
+    assert_eq!((point.x, point.y), (896, 1147));
+}
