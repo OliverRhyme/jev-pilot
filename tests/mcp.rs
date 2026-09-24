@@ -339,3 +339,13 @@ fn a_run_can_be_given_its_steps_and_keys() {
     assert!(joined.contains("--keys 246810"), "{joined}");
     assert_eq!(args.last().map(String::as_str), Some("send fifty pesos"));
 }
+
+/// The goal goes after `--`, so a one-word goal is still a goal and a goal
+/// that starts with a dash is not read as a flag.
+#[test]
+fn a_run_s_goal_is_passed_after_the_end_of_options() {
+    let args = jev_pilot::mcp::invocation("start_run", &serde_json::json!({ "goal": "logout" }))
+        .expect("a run is startable");
+
+    assert_eq!(&args[args.len() - 2..], ["--", "logout"]);
+}

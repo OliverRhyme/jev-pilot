@@ -62,6 +62,10 @@ pub enum Invocation {
     },
     /// Explain the usage.
     Help,
+    /// Say which version this is.
+    Version,
+    /// Bring this copy up to date with the latest release.
+    Update,
 }
 
 /// How many steps a run takes before giving up, unless told otherwise.
@@ -94,6 +98,13 @@ pub enum CliError {
     NoGoal,
     /// More than one goal was given.
     TooManyGoals,
+    /// A single word that is not a command.
+    ///
+    /// Refused rather than taken as the goal, as an unknown flag is: a
+    /// mistyped `version` would otherwise be pursued on whatever phone
+    /// happened to be attached. A goal is a sentence; a one-word goal meant
+    /// as one goes after `--`.
+    NotACommand(String),
 }
 
 impl core::fmt::Display for CliError {
@@ -103,6 +114,12 @@ impl core::fmt::Display for CliError {
             Self::MissingValue(flag) => write!(f, "{flag} needs a value"),
             Self::BadValue { flag, got } => write!(f, "{flag} cannot be {got:?}"),
             Self::NoGoal => f.write_str("no goal given: say what you want done, in quotes"),
+            Self::NotACommand(word) => write!(
+                f,
+                "{word:?} is not a command. A goal is a sentence in quotes, like \
+                 jev-pilot \"open settings\"; a one-word goal goes after --, like \
+                 jev-pilot -- {word}. See jev-pilot --help for the commands"
+            ),
             Self::TooManyGoals => {
                 f.write_str("more than one goal given: put the whole goal in quotes")
             }
@@ -119,40 +136,13 @@ impl core::error::Error for CliError {}
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliError> {
     let mut args = args.into_iter().peekable();
 
-    match args.peek().map(String::as_str) {
-        Some("--help" | "-h" | "help") => return Ok(Invocation::Help),
-        Some("devices") => {
-            let _ = args.next();
-            return Ok(Invocation::Devices);
-        }
-        Some("mcp") => {
-            let _ = args.next();
-            // Configured once in a client and then forgotten, so a stray
-            // argument is refused rather than ignored.
-            if let Some(other) = args.next() {
-                return Err(CliError::UnknownFlag(other));
-            }
-            return Ok(Invocation::Mcp);
-        }
-        Some("observe") => {
-            let _ = args.next();
-            let mut device = None;
-            while let Some(word) = args.next() {
-                match word.as_str() {
-                    "--device" | "-d" => device = Some(value(&mut args, "--device")?),
-                    other => return Err(CliError::UnknownFlag(other.to_owned())),
-                }
-            }
-            return Ok(Invocation::Observe { device });
-        }
-        Some("helper") => {
-            let _ = args.next();
-            return helper(args);
-        }
-        _ => {}
+    if let Some(command) = subcommand(&mut args) {
+        return command;
     }
 
     let mut goal: Option<String> = None;
+    // Whether the goal came after `--`, where a single word is meant as one.
+    let mut goal_after_dashes = false;
     let mut device = None;
     let mut accept = Vec::new();
     let mut steps = DEFAULT_STEPS;
@@ -167,6 +157,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
 
     while let Some(word) = args.next() {
         if options_ended || !word.starts_with('-') {
+            goal_after_dashes = options_ended;
             if goal.replace(word).is_some() {
                 return Err(CliError::TooManyGoals);
             }
@@ -205,6 +196,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
     }
 
     let goal = goal.ok_or(CliError::NoGoal)?;
+    if !goal_after_dashes && !goal.trim().contains(char::is_whitespace) {
+        return Err(CliError::NotACommand(goal));
+    }
     Ok(Invocation::Run {
         floors: floors_from(floor),
         app,
@@ -217,6 +211,56 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
         steps,
         desk,
     })
+}
+
+/// A command other than pursuing a goal, when the first word names one.
+fn subcommand(
+    args: &mut core::iter::Peekable<impl Iterator<Item = String>>,
+) -> Option<Result<Invocation, CliError>> {
+    // A command configured once and then forgotten, as `mcp` is in a client,
+    // refuses a stray argument rather than ignoring it.
+    fn alone(
+        args: &mut impl Iterator<Item = String>,
+        command: Invocation,
+    ) -> Result<Invocation, CliError> {
+        let _ = args.next();
+        match args.next() {
+            Some(other) => Err(CliError::UnknownFlag(other)),
+            None => Ok(command),
+        }
+    }
+
+    Some(match args.peek().map(String::as_str)? {
+        "--help" | "-h" | "help" => Ok(Invocation::Help),
+        "--version" | "-V" | "version" => Ok(Invocation::Version),
+        "devices" => {
+            let _ = args.next();
+            Ok(Invocation::Devices)
+        }
+        "update" => alone(args, Invocation::Update),
+        "mcp" => alone(args, Invocation::Mcp),
+        "observe" => {
+            let _ = args.next();
+            observe(args)
+        }
+        "helper" => {
+            let _ = args.next();
+            helper(args)
+        }
+        _ => return None,
+    })
+}
+
+/// The rest of `observe`: which device.
+fn observe(mut args: impl Iterator<Item = String>) -> Result<Invocation, CliError> {
+    let mut device = None;
+    while let Some(word) = args.next() {
+        match word.as_str() {
+            "--device" | "-d" => device = Some(value(&mut args, "--device")?),
+            other => return Err(CliError::UnknownFlag(other.to_owned())),
+        }
+    }
+    Ok(Invocation::Observe { device })
 }
 
 /// The rest of `helper`: whether to install, and on which device.
@@ -282,6 +326,8 @@ USAGE
   jev-pilot observe                   print what the next step would be offered
   jev-pilot helper [install]          report on, or install, the on-device helper
   jev-pilot mcp                       serve MCP over stdio, for an agent to drive runs
+  jev-pilot update                    update to the latest release
+  jev-pilot --version                 say which version this is
 
 OPTIONS
   -d, --device <serial>   which device, when more than one is attached

@@ -164,12 +164,22 @@ A client that does not start servers with your `PATH` needs the full path:
 
 ### Updating
 
-Run the installer again; it replaces the program. A server already running
-keeps its old tool list until it is restarted, so reconnect it in the client
-afterwards — in Claude Code, `/mcp` and then reconnect `jev-pilot`.
+```console
+$ jev-pilot --version        # which version this is
+$ jev-pilot update           # update to the latest release, if there is a newer one
+```
 
-A reconnect does not always replace the process. If the tools still lack a new
-argument, end the old server and reconnect:
+`update` asks GitHub for the latest release and does nothing when you already
+have it. Otherwise it runs the same installer you installed with, which replaces
+the program in place — on every platform, including Windows, where a running
+program cannot simply be overwritten. A copy built from source is not replaced by
+a download; `update` says to rebuild it instead. Running the installer again by
+hand does the same thing.
+
+A server already running keeps its old tool list until it is restarted, so
+reconnect it in the client afterwards — in Claude Code, `/mcp` and then reconnect
+`jev-pilot`. A reconnect does not always replace the process; if the tools still
+lack a new argument, end the old server and reconnect:
 
 ```sh
 pkill -f "jev-pilot mcp"                 # macOS, Linux

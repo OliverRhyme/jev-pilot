@@ -43,6 +43,7 @@ pub mod pilot;
 pub mod platform;
 pub mod snapshot;
 pub mod step;
+pub mod update;
 
 // The handful of names almost every call site touches. The modules remain the
 // canonical path; these save an import list per example without hiding where

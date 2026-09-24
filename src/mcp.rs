@@ -721,8 +721,9 @@ pub fn invocation(tool: &str, arguments: &serde_json::Value) -> Option<Vec<Strin
                 args.push("--floor".to_owned());
                 args.push(floor.to_string());
             }
-            // Last, and after a separator is unnecessary because it is the
-            // only positional the command line takes.
+            // Last, after `--`: a one-word goal is still a goal there, and one
+            // that starts with a dash is not read as a flag.
+            args.push("--".to_owned());
             args.push(goal);
         }
         _ => return None,

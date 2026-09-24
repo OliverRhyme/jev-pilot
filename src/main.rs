@@ -38,6 +38,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 fn main() -> std::process::ExitCode {
+    // A copy moved aside by an update is removed once it is no longer running.
+    // Best effort: on Windows it may still be held for a moment, and the next
+    // start tries again.
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(jev_pilot::update::set_aside(&exe));
+    }
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -45,6 +51,82 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// Bring this copy up to date with the latest release.
+///
+/// Asks GitHub which release is latest first, and does nothing when this is
+/// it. The running program is moved aside before the installer runs, because
+/// a running program cannot be overwritten on Windows and may not be on Linux,
+/// and is put back if the installer fails.
+fn update() -> Result<(), Box<dyn core::error::Error>> {
+    use jev_pilot::update::{Plan, is_newer, plan, set_aside};
+
+    let current = env!("CARGO_PKG_VERSION");
+    match latest_release() {
+        Some(tag) if !is_newer(current, &tag) => {
+            println!("jev-pilot {current} is the latest release");
+            return Ok(());
+        }
+        Some(tag) => println!("updating jev-pilot {current} to {tag}"),
+        None => println!("could not tell which release is latest; running the installer anyway"),
+    }
+
+    let exe = std::env::current_exe()?;
+    let windows = cfg!(windows);
+    let home = std::env::var_os(if windows { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .ok_or("cannot tell where your home directory is")?;
+    match plan(&exe, &home, windows) {
+        Plan::FromSource { hint } => {
+            println!("{hint}");
+            Ok(())
+        }
+        Plan::Installer { program, args } => {
+            let aside = set_aside(&exe);
+            std::fs::rename(&exe, &aside)?;
+            let installed = std::process::Command::new(&program).args(&args).status();
+            match installed {
+                Ok(status) if status.success() => {
+                    let _ = std::fs::remove_file(&aside);
+                    Ok(())
+                }
+                failed => {
+                    // Nothing was put in its place, so the old copy goes back.
+                    if !exe.exists() {
+                        std::fs::rename(&aside, &exe)?;
+                    }
+                    match failed {
+                        Ok(status) => Err(format!("the installer failed ({status})").into()),
+                        Err(error) => Err(format!("could not run {program}: {error}").into()),
+                    }
+                }
+            }
+        }
+        _ => Err("this copy cannot be updated in place".into()),
+    }
+}
+
+/// The tag of the latest release, when GitHub can be asked.
+#[cfg(feature = "http")]
+fn latest_release() -> Option<String> {
+    let body: serde_json::Value = ureq::get(jev_pilot::update::LATEST_API)
+        .header(
+            "User-Agent",
+            concat!("jev-pilot/", env!("CARGO_PKG_VERSION")),
+        )
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .ok()?
+        .body_mut()
+        .read_json()
+        .ok()?;
+    body.get("tag_name")?.as_str().map(str::to_owned)
+}
+
+#[cfg(not(feature = "http"))]
+fn latest_release() -> Option<String> {
+    None
 }
 
 /// Serve MCP over stdin and stdout until the client goes away.
@@ -80,6 +162,11 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
         }
         Invocation::Devices => list_devices(),
         Invocation::Mcp => serve_mcp(),
+        Invocation::Version => {
+            println!("jev-pilot {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Invocation::Update => update(),
         Invocation::Observe { device } => observe(device.as_deref()),
         Invocation::Helper { device, install } => manage_helper(device.as_deref(), install),
         Invocation::Run {

@@ -240,7 +240,7 @@ fn text_for_a_field_can_be_supplied_on_the_command_line() {
 /// The value may hold an `=`, so only the first one separates.
 #[test]
 fn only_the_first_equals_separates_a_field_from_its_text() {
-    let Invocation::Run { texts, .. } = parsed(&["--text", "Formula=a=b", "go"]) else {
+    let Invocation::Run { texts, .. } = parsed(&["--text", "Formula=a=b", "fill it in"]) else {
         panic!("a goal is a run");
     };
 
@@ -279,4 +279,40 @@ fn steps_and_keys_can_be_given_on_the_command_line() {
 fn the_mcp_server_is_a_subcommand() {
     assert_eq!(parsed(&["mcp"]), Invocation::Mcp);
     assert!(parse(["mcp".to_owned(), "--device".to_owned(), "x".to_owned()]).is_err());
+}
+
+/// Which version is installed is the first thing asked before updating.
+#[test]
+fn the_version_can_be_asked_for() {
+    for words in [&["--version"][..], &["-V"], &["version"]] {
+        assert_eq!(parsed(words), Invocation::Version, "{words:?}");
+    }
+}
+
+/// Updating is a command of its own.
+#[test]
+fn updating_is_a_subcommand() {
+    assert_eq!(parsed(&["update"]), Invocation::Update);
+    assert!(parse(["update".to_owned(), "now".to_owned()]).is_err());
+}
+
+/// A goal is a sentence. A single word that is not a command is a typo for
+/// one, and taking it as a goal drives whatever phone is attached: `jev-pilot
+/// versoin` would start tapping. A one-word goal meant as one goes after `--`.
+#[test]
+fn a_single_word_that_is_not_a_command_is_refused_not_pursued() {
+    assert!(matches!(
+        parse(["versoin".to_owned()]),
+        Err(jev_pilot::cli::CliError::NotACommand(word)) if word == "versoin"
+    ));
+
+    let Invocation::Run { goal, .. } = parsed(&["--", "logout"]) else {
+        panic!("a goal after -- is a goal");
+    };
+    assert_eq!(&*goal, "logout");
+
+    let Invocation::Run { goal, .. } = parsed(&["open settings"]) else {
+        panic!("a sentence is a goal");
+    };
+    assert_eq!(&*goal, "open settings");
 }
