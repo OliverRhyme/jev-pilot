@@ -1,6 +1,6 @@
 [package]
 name = "jev-pilot"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.98"
 description = "Drive a mobile UI with TypeSafe Jev as the System One decision provider: code enumerates the valid actions, the model only selects one."
