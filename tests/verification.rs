@@ -99,7 +99,7 @@ fn acceptance_checks_are_asked_alongside_everything_else() {
 /// the verdict at face value reports success for the wrong outcome.
 #[test]
 fn a_verdict_is_refused_when_an_acceptance_check_fails() {
-    let judge = Scripted::new(vec![verdict(0.03), keep_going()]);
+    let judge = Scripted::new(vec![verdict(0.03), keep_going(), keep_going()]);
     let mut pilot = Pilot::new(Fake::default(), judge, &Android)
         .confirming(["The thing playing is a full video, not a Short"])
         .limited_to(2);
@@ -130,7 +130,7 @@ fn a_verdict_stands_when_the_checks_agree() {
 /// rather than choosing the same wrong thing again.
 #[test]
 fn the_failed_check_is_carried_into_the_next_step() {
-    let judge = Scripted::new(vec![verdict(0.03), keep_going()]);
+    let judge = Scripted::new(vec![verdict(0.03), keep_going(), keep_going()]);
     let mut pilot = Pilot::new(Fake::default(), judge, &Android)
         .confirming(["The thing playing is a full video, not a Short"])
         .limited_to(2);
@@ -176,7 +176,7 @@ fn a_verdict_on_an_empty_screen_is_not_accepted() {
 
     let mut pilot = Pilot::new(
         Blank,
-        Scripted::new(vec![confident(), confident()]),
+        Scripted::new(vec![confident(), confident(), confident()]),
         &Android,
     )
     .confirming(["The Storage screen is open"])

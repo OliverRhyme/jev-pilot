@@ -1227,7 +1227,11 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             self.waited_for_it_to_draw(app.as_ref())?;
         }
         let launcher = self.device.home_screen_app();
-        for index in 1..=self.limit {
+        // One more than the budget: the last pass only looks. A run whose
+        // final step did the job would otherwise report running out, which
+        // reads the same as getting nowhere.
+        for index in 1..=self.limit.saturating_add(1) {
+            let last_look = index > self.limit;
             let began = std::time::Instant::now();
             // Time this step spent on somebody else, accumulated as it is
             // asked for.
@@ -1503,6 +1507,39 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     },
                 );
                 return Ok(Ending::Finished(Outcome::Achieved));
+            }
+
+            // The budget is spent: judge the screen the last step left, and
+            // act on nothing. Declaring the goal met is held to the same floor
+            // and the same checks as on any other step.
+            if last_look {
+                let achieved =
+                    matches!(decided, Ok(Decision::Ready(Act::Finish(Outcome::Achieved))))
+                        && self
+                            .refuse_verdict(Outcome::Achieved, blind, &answers)
+                            .is_none();
+                self.report(
+                    index,
+                    &snapshot,
+                    &answers,
+                    None,
+                    Went {
+                        repeating: repeated,
+                        acted: false,
+                    },
+                    Spent {
+                        read_ms,
+                        step_ms: elapsed_ms(began),
+                        waited_ms: waited.get(),
+                        judged_ms,
+                        settled_ms,
+                    },
+                );
+                return Ok(if achieved {
+                    Ending::Finished(Outcome::Achieved)
+                } else {
+                    Ending::OutOfSteps { limit: self.limit }
+                });
             }
 
             let moved_before = core::mem::take(&mut just_moved);

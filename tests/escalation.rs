@@ -562,7 +562,11 @@ fn an_answer_to_a_covered_row_is_what_the_run_remembers_doing() {
 fn a_covered_row_is_scrolled_towards_rather_than_asked_about() {
     let mut pilot = Pilot::new(
         BelowTheFold::default(),
-        Scripted(RefCell::new(vec![sure_tap("A2"), sure_tap("A2")])),
+        Scripted(RefCell::new(vec![
+            sure_tap("A2"),
+            sure_tap("A2"),
+            sure_tap("A2"),
+        ])),
         &Android,
     )
     .limited_to(2)

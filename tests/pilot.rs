@@ -130,7 +130,8 @@ fn the_loop_stops_rather_than_acting_on_an_uncertain_answer() {
 /// catalog rather than the step limit.
 #[test]
 fn the_loop_gives_up_after_its_step_limit() {
-    let turns = vec![answer("scroll_down", None, 0.99, 0.02); 3];
+    // One more than the limit: the last pass looks, and finds the goal unmet.
+    let turns = vec![answer("scroll_down", None, 0.99, 0.02); 4];
     let mut pilot = Pilot::new(Fake::default(), Scripted::new(turns), &Android).limited_to(3);
 
     let ending = pilot
@@ -1791,4 +1792,49 @@ fn the_state_says_when_the_app_is_still_working() {
     let mut pilot = Pilot::new(Fake::default(), judge, &Android);
     pilot.pursue("open settings").expect("the run completes");
     assert!(seen.borrow()[0].get("in_progress").is_none());
+}
+
+/// A budget spent doing the job is not a budget run out. A one-step run told
+/// to tap Continue tapped it at 1.00 and reported `OutOfSteps { limit: 1 }`,
+/// indistinguishable from a run that got nowhere. With the budget spent, the
+/// screen it left is looked at once more — judged, not acted on.
+#[test]
+fn a_run_whose_last_step_reached_the_goal_ends_achieved() {
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        Scripted::new(vec![
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+        &Android,
+    )
+    .limited_to(1);
+
+    let ending = pilot.pursue("Tap Continue").expect("the run completes");
+
+    assert_eq!(ending, Ending::Finished(Outcome::Achieved));
+    assert_eq!(
+        pilot.device().performed.len(),
+        1,
+        "the last look acts on nothing"
+    );
+}
+
+/// And a budget that did not reach the goal still runs out.
+#[test]
+fn a_run_whose_last_step_did_not_reach_the_goal_runs_out() {
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        Scripted::new(vec![
+            answer("tap", Some("A3"), 0.99, 0.02),
+            answer("tap", Some("A3"), 0.99, 0.02),
+        ]),
+        &Android,
+    )
+    .limited_to(1);
+
+    let ending = pilot.pursue("Tap Continue").expect("the run completes");
+
+    assert_eq!(ending, Ending::OutOfSteps { limit: 1 });
+    assert_eq!(pilot.device().performed.len(), 1);
 }

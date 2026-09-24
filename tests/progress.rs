@@ -87,7 +87,7 @@ fn reaching_the_top_level_finishes_the_run() {
 /// Being on the way is not being there, and must not end the run.
 #[test]
 fn being_under_way_is_not_being_finished() {
-    let turns = vec![turn("back", 1.0), turn("back", 1.0)];
+    let turns = vec![turn("back", 1.0), turn("back", 1.0), turn("back", 1.0)];
     let mut pilot =
         Pilot::new(Fake::default(), Scripted(RefCell::new(turns)), &Android).limited_to(2);
 
