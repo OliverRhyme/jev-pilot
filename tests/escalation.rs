@@ -751,3 +751,34 @@ fn a_tap_on_a_screen_that_commits_is_held_to_the_higher_floor() {
         Some(Command::Tap(_))
     ));
 }
+
+/// A run that is getting nowhere asks before it gives up. Measured: a run
+/// tapped a line of Google's AI Overview that is not a link, chose it again at
+/// 0.93 on the unchanged screen, and ended for going in circles, when a second
+/// opinion could have picked a real result.
+#[test]
+fn a_run_getting_nowhere_asks_before_it_ends() {
+    let asked = RefCell::new(Vec::new());
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        Scripted(RefCell::new(vec![sure_tap("A3"); 12])),
+        &Android,
+    )
+    .limited_to(10)
+    .escalating_to(|impasse: &Impasse<'_>| -> Result<Resolution, Infallible> {
+        asked.borrow_mut().push(impasse.because.to_string());
+        Ok(Resolution::Stop)
+    });
+
+    let ending = pilot.pursue("Open the result").expect("the run completes");
+
+    assert!(
+        asked
+            .borrow()
+            .iter()
+            .any(|why| why.contains("screen exactly as it was")),
+        "asked: {:?}",
+        asked.borrow()
+    );
+    assert!(matches!(ending, Ending::Uncertain { .. }), "{ending:?}");
+}

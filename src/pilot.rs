@@ -1176,6 +1176,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         // Whether the last action was seen to move the screen, so this step
         // may be reading it on its way somewhere.
         let mut just_moved = false;
+        // Set when actions keep changing nothing: the next step is then an
+        // impasse, put to a second opinion before the run gives up.
+        let mut stalled: Option<u32> = None;
         // The app the goal is about: whichever one was in front when the run
         // was given it. A run can only tell it has wandered off by comparing
         // against somewhere, and nothing else in a run names an app.
@@ -1369,30 +1372,15 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // of any longer round trip through a flow. Measured on a transfer
             // form whose summary appeared and withdrew, and on a form
             // re-entered from its own menu three times over.
-            if going_in_circles {
-                self.report(
-                    index,
-                    &snapshot,
-                    &answers,
-                    None,
-                    Went {
-                        repeating: repeated,
-                        acted: false,
-                    },
-                    Spent {
-                        read_ms,
-                        step_ms: elapsed_ms(began),
-                        waited_ms: waited.get(),
-                        judged_ms,
-                        settled_ms,
-                    },
-                );
-                return Ok(Ending::Uncertain {
-                    because: Indecision::NoProgress {
-                        repeated: Self::VISITS_ALLOWED,
-                    },
-                });
-            }
+            //
+            // Getting nowhere is an impasse like any other: asked about when
+            // there is someone to ask, and the end of the run when there is
+            // not. Measured: a run chose a line of Google's AI Overview that
+            // is not a link at 0.93, again and again, and ended for going in
+            // circles when a second opinion could have picked a real result.
+            let stuck = stalled
+                .take()
+                .or_else(|| going_in_circles.then_some(Self::VISITS_ALLOWED));
 
             // What acting here would cost is judged of the screen, not of the
             // gesture: tapping Confirm Transfer is an ordinary tap that sends
@@ -1409,6 +1397,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             let mut decided = catalog.resolve(&answers, &floors);
             if screened(answers.warns) && decided.as_ref().is_ok_and(goes_on) {
                 decided = Err(Indecision::Warned);
+            }
+            // A confident verdict still stands; anything else from a run that
+            // is getting nowhere goes to the second opinion.
+            if let Some(repeated) = stuck
+                && !matches!(decided, Ok(Decision::Ready(Act::Finish(_))))
+            {
+                decided = Err(Indecision::NoProgress { repeated });
             }
 
             if answers.is_error_screen.noul > self.certainty {
@@ -1853,28 +1848,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             previous.as_deref().unwrap_or("Acted")
                         ));
                         if ineffective >= Self::INEFFECTIVE_LIMIT {
-                            self.report(
-                                index,
-                                &snapshot,
-                                &answers,
-                                Some(&act),
-                                Went {
-                                    repeating: repeated,
-                                    acted: true,
-                                },
-                                Spent {
-                                    read_ms,
-                                    step_ms: elapsed_ms(began),
-                                    waited_ms: waited.get(),
-                                    judged_ms,
-                                    settled_ms,
-                                },
-                            );
-                            return Ok(Ending::Uncertain {
-                                because: Indecision::NoProgress {
-                                    repeated: ineffective,
-                                },
-                            });
+                            stalled = Some(ineffective);
                         }
                     }
                 }
