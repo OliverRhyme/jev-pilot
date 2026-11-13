@@ -5,9 +5,9 @@
 //! does not compile. Every variant that touches an element carries an
 //! [`ElementRef`], binding it to the snapshot it was chosen from.
 
-use crate::judgment::{Confidence, OptionId, Options, Question};
+use crate::judgment::{Chosen, Confidence, OptionId, Options, Question};
 use crate::platform::Platform;
-use crate::snapshot::{ElementRef, Snapshot, TabRef};
+use crate::snapshot::{Dialog, DialogKind, ElementRef, Snapshot, TabRef};
 use core::fmt;
 use serde::Serialize;
 
@@ -255,6 +255,24 @@ impl Operation {
     #[must_use]
     pub const fn needs_field(self) -> bool {
         matches!(self, Self::TypeText)
+    }
+
+    /// Whether this operation needs one of the run's other tabs chosen.
+    #[must_use]
+    pub const fn needs_tab(self) -> bool {
+        matches!(self, Self::SwitchTab)
+    }
+
+    /// Whether this operation needs one of the supplied addresses chosen.
+    #[must_use]
+    pub const fn needs_destination(self) -> bool {
+        matches!(self, Self::Navigate)
+    }
+
+    /// Whether this operation answers an open dialog.
+    #[must_use]
+    pub const fn answers_dialog(self) -> bool {
+        matches!(self, Self::AcceptDialog | Self::DismissDialog)
     }
 
     /// Whether this operation needs a row to act on.
@@ -560,6 +578,11 @@ pub enum Decision {
         /// The field to type into.
         into: ElementRef,
     },
+    /// An open prompt is to be accepted, but the words have not been written.
+    ///
+    /// Kept apart from [`Self::NeedsText`] for the same reason: an accepted
+    /// prompt with words nobody supplied is not a state the type can hold.
+    NeedsPromptText,
 }
 
 /// Why a choice did not become an action.
@@ -628,6 +651,19 @@ impl fmt::Display for Indecision {
 
 impl core::error::Error for Indecision {}
 
+/// Whether the dialog open over a screen is a prompt, which wants words.
+fn prompt_open(snapshot: &Snapshot) -> bool {
+    snapshot
+        .dialog()
+        .is_some_and(|open| open.kind == DialogKind::Prompt)
+}
+
+/// An address without the slash a browser adds to a bare host, so that the
+/// address supplied and the address shown compare as the same place.
+fn without_trailing_slash(url: &str) -> &str {
+    url.strip_suffix('/').unwrap_or(url)
+}
+
 /// The actions available on one screen, as two independent heads.
 ///
 /// `operation` says what to do; `tap_target` says which row to do it to. They
@@ -649,6 +685,17 @@ pub struct Catalog {
     on_screen: Vec<ElementRef>,
     fields: Vec<(OptionId, ElementRef, Box<str>)>,
     field_options: Options,
+    /// What the platform lists, so that an operation added after the screen
+    /// was enumerated is still one the platform has.
+    platform: Vec<Operation>,
+    dialog: Option<Dialog>,
+    tabs: Vec<(OptionId, TabRef, Box<str>)>,
+    tab_options: Options,
+    destinations: Vec<(OptionId, Box<str>)>,
+    destination_options: Options,
+    current_url: Option<Box<str>>,
+    /// The rows that are fields and nothing else, which no tap may name.
+    field_only: Vec<ElementRef>,
 }
 
 impl Catalog {
@@ -657,7 +704,43 @@ impl Catalog {
     pub fn for_screen(snapshot: &Snapshot, platform: &dyn Platform) -> Self {
         let mut operations = Options::default();
         let mut supported = Vec::new();
+        let under_dialog = snapshot.dialog().is_some();
+        let mut tab_options = Options::default();
+        let mut tabs = Vec::new();
+        for (handle, tab) in snapshot.tabs() {
+            let text = format!("{} — {}", tab.title, tab.url);
+            if let Ok(id) = tab_options.push_described(text.as_str()) {
+                tabs.push((id, handle, text.into_boxed_str()));
+            }
+        }
         for operation in platform.operations() {
+            // Added by the builders that know what they need: an address
+            // supplied, somewhere to go back to, words to type.
+            if matches!(
+                operation,
+                Operation::Return | Operation::Navigate | Operation::TypeText
+            ) {
+                continue;
+            }
+            // Nothing to switch to, nothing to answer, or a prompt that
+            // cannot be accepted without words.
+            if (*operation == Operation::SwitchTab && tabs.is_empty())
+                || (operation.answers_dialog() && !under_dialog)
+                || (*operation == Operation::AcceptDialog && prompt_open(snapshot))
+            {
+                continue;
+            }
+            // The page cannot be touched under a dialog, so what answers it
+            // and what ends the run is all there is.
+            if under_dialog
+                && !(operation.answers_dialog()
+                    || matches!(
+                        operation,
+                        Operation::Wait | Operation::Done | Operation::Blocked
+                    ))
+            {
+                continue;
+            }
             // Nothing to put away, and offering it would be a way to stand
             // still on every screen that has no keyboard.
             if *operation == Operation::CloseKeyboard && !snapshot.keyboard_open() {
@@ -693,8 +776,15 @@ impl Catalog {
                 .or_default() += 1;
         }
         let on_screen = snapshot.refs().map(|(handle, _)| handle).collect();
+        let mut field_only = Vec::new();
         for (handle, element) in snapshot.refs() {
             let text = element.describe();
+            // A native drop-down is typed into and never tapped: tapping it
+            // opens a pop-up nothing can read.
+            let only_a_field = snapshot.is_field_only(handle).unwrap_or(false);
+            if only_a_field {
+                field_only.push(handle);
+            }
             // Rows named alike this often cannot be told apart by what they
             // say, and each takes a share of the choice from the rows that
             // can. Measured on a Google results page: twenty "About this
@@ -703,10 +793,13 @@ impl Catalog {
             let indistinct = named
                 .get(&text.trim().to_lowercase())
                 .is_some_and(|&count| count > Self::REPEATS_TOLERATED);
-            if !indistinct && let Ok(id) = target_options.push_described(text.as_str()) {
+            if !indistinct
+                && !only_a_field
+                && let Ok(id) = target_options.push_described(text.as_str())
+            {
                 targets.push((id, handle, text.clone().into_boxed_str()));
             }
-            if element.editable
+            if (element.editable || only_a_field)
                 && let Ok(id) = field_options.push_described(text.as_str())
             {
                 fields.push((id, handle, text.clone().into_boxed_str()));
@@ -723,6 +816,14 @@ impl Catalog {
             on_screen,
             fields,
             field_options,
+            platform: platform.operations().to_vec(),
+            dialog: snapshot.dialog().cloned(),
+            tabs,
+            tab_options,
+            destinations: Vec::new(),
+            destination_options: Options::default(),
+            current_url: snapshot.url().map(Box::from),
+            field_only,
         }
     }
 
@@ -739,13 +840,63 @@ impl Catalog {
     /// is an operation the model can choose and nothing can carry out.
     #[must_use]
     pub fn accepting_text(mut self) -> Self {
-        if !self.fields.is_empty()
+        if self.dialog.is_none()
+            && !self.fields.is_empty()
             && self
                 .operations
                 .push_named(Operation::TypeText.key(), Operation::TypeText.rubric())
                 .is_ok()
         {
             self.supported.push(Operation::TypeText);
+        }
+        // A prompt is answered with words, which come from the same place.
+        if self
+            .dialog
+            .as_ref()
+            .is_some_and(|open| open.kind == DialogKind::Prompt)
+        {
+            self.offer(Operation::AcceptDialog);
+        }
+        self
+    }
+
+    /// Offer an operation the platform lists, if it is not already offered.
+    fn offer(&mut self, operation: Operation) {
+        if self.platform.contains(&operation)
+            && !self.supported.contains(&operation)
+            && self
+                .operations
+                .push_named(operation.key(), operation.rubric())
+                .is_ok()
+        {
+            self.supported.push(operation);
+        }
+    }
+
+    /// Also offer going to these addresses, wherever the page is not already.
+    ///
+    /// The addresses are the caller's. The model chooses among them by
+    /// position, as it chooses a row, so it can never type one of its own. An
+    /// address the page is already at is no destination, and offering it would
+    /// give the model a way to stand still.
+    #[must_use]
+    pub fn navigating_to(mut self, urls: &[Box<str>]) -> Self {
+        if self.dialog.is_some() {
+            return self;
+        }
+        let here = self.current_url.as_deref().map(without_trailing_slash);
+        for url in urls {
+            if Some(without_trailing_slash(url)) == here
+                || self.destinations.iter().any(|(_, seen)| seen == url)
+            {
+                continue;
+            }
+            if let Ok(id) = self.destination_options.push_described(&**url) {
+                self.destinations.push((id, url.clone()));
+            }
+        }
+        if !self.destinations.is_empty() {
+            self.offer(Operation::Navigate);
         }
         self
     }
@@ -764,7 +915,12 @@ impl Catalog {
     #[must_use]
     pub fn returning_to(mut self, app: Option<&str>) -> Self {
         let Some(app) = app else { return self };
-        if self.app.as_deref() == Some(app) {
+        // Whether this platform has such a thing as another app to go back
+        // into: a browser does not, and leaves a site with Back or Navigate.
+        if self.app.as_deref() == Some(app)
+            || self.dialog.is_some()
+            || !self.platform.contains(&Operation::Return)
+        {
             return self;
         }
         if self
@@ -801,6 +957,75 @@ impl Catalog {
             },
             criteria: self.field_options.clone(),
         })
+    }
+
+    /// The Choice asking which of the run's other tabs to switch to.
+    ///
+    /// Asked only when switching is offered and there is more than one tab to
+    /// choose from: with one, that one is used without asking.
+    #[must_use]
+    pub fn tab_question<'a>(&self, goal: impl Into<Aim<'a>>) -> Option<Question<Deciding<'a>>> {
+        if self.tabs.len() < 2 || !self.supported.contains(&Operation::SwitchTab) {
+            return None;
+        }
+        let goal = goal.into();
+        Some(Question::Choice {
+            instructions: Deciding {
+                goal,
+                question: goal.asking(
+                    "Which of the other tabs should be switched to in order to advance `goal`, \
+                     assuming the chosen operation is switching tab?",
+                    "Which of the other tabs should be switched to in order to advance the next \
+                     unfinished step of `goal`, assuming the chosen operation is switching tab?",
+                ),
+                note: None,
+            },
+            criteria: self.tab_options.clone(),
+        })
+    }
+
+    /// The Choice asking which supplied address to go to.
+    ///
+    /// Asked only when navigating is offered and there is more than one
+    /// address to choose from.
+    #[must_use]
+    pub fn destination_question<'a>(
+        &self,
+        goal: impl Into<Aim<'a>>,
+    ) -> Option<Question<Deciding<'a>>> {
+        if self.destinations.len() < 2 || !self.supported.contains(&Operation::Navigate) {
+            return None;
+        }
+        let goal = goal.into();
+        Some(Question::Choice {
+            instructions: Deciding {
+                goal,
+                question: goal.asking(
+                    "Which address should be gone to in order to advance `goal`, assuming the \
+                     chosen operation is navigating?",
+                    "Which address should be gone to in order to advance the next unfinished \
+                     step of `goal`, assuming the chosen operation is navigating?",
+                ),
+                note: None,
+            },
+            criteria: self.destination_options.clone(),
+        })
+    }
+
+    /// The dialog that is open over this screen, if there is one.
+    #[must_use]
+    pub const fn dialog(&self) -> Option<&Dialog> {
+        self.dialog.as_ref()
+    }
+
+    /// The other tabs, keyed as the Choice offers them.
+    pub fn tabs_offered(&self) -> impl Iterator<Item = (OptionId, &str)> {
+        self.tabs.iter().map(|(id, _, text)| (*id, &**text))
+    }
+
+    /// The addresses that may be gone to, keyed as the Choice offers them.
+    pub fn destinations_offered(&self) -> impl Iterator<Item = (OptionId, &str)> {
+        self.destinations.iter().map(|(id, url)| (*id, &**url))
     }
 
     /// The fields on this screen that accept text.
@@ -885,7 +1110,7 @@ impl Catalog {
         &self,
         goal: impl Into<Aim<'a>>,
     ) -> Option<Question<Deciding<'a>>> {
-        if self.targets.is_empty() {
+        if self.targets.is_empty() || self.dialog.is_some() {
             return None;
         }
         let goal = goal.into();
@@ -957,6 +1182,42 @@ impl Catalog {
             let app = self.return_to.clone().ok_or(Indecision::NoTarget)?;
             return Ok(Decision::Ready(Act::Return(app)));
         }
+        if operation.answers_dialog() {
+            return self.answering_dialog(operation);
+        }
+        if operation.needs_tab() {
+            let position = match (self.tabs.as_slice(), answers.tab.as_ref()) {
+                // One candidate needs no choosing.
+                ([_], _) => 0,
+                (_, Some(chosen)) => {
+                    Self::clears(chosen, floors.for_target(operation))?;
+                    self.tabs
+                        .iter()
+                        .position(|(id, ..)| *id == chosen.choice)
+                        .ok_or_else(|| Indecision::NotOffered {
+                            what: chosen.choice.to_string().into_boxed_str(),
+                        })?
+                }
+                (_, None) => return Err(Indecision::NoTarget),
+            };
+            return self.switching_to(position);
+        }
+        if operation.needs_destination() {
+            let position = match (self.destinations.as_slice(), answers.destination.as_ref()) {
+                ([_], _) => 0,
+                (_, Some(chosen)) => {
+                    Self::clears(chosen, floors.for_target(operation))?;
+                    self.destinations
+                        .iter()
+                        .position(|(id, _)| *id == chosen.choice)
+                        .ok_or_else(|| Indecision::NotOffered {
+                            what: chosen.choice.to_string().into_boxed_str(),
+                        })?
+                }
+                (_, None) => return Err(Indecision::NoTarget),
+            };
+            return self.going_to(position);
+        }
         if !operation.needs_tap_target() {
             return Self::untargeted(operation).map(Decision::Ready);
         }
@@ -1021,6 +1282,24 @@ impl Catalog {
             let app = self.return_to.clone().ok_or(Indecision::NoTarget)?;
             return Ok(Decision::Ready(Act::Return(app)));
         }
+        if operation.answers_dialog() {
+            return self.answering_dialog(operation);
+        }
+        // Tabs and addresses are numbered on their own, as fields are: a
+        // second opinion answering `switch_tab 1` means the second tab, not
+        // the second row. With one to choose from, no number is needed.
+        if operation.needs_tab() {
+            let position = target
+                .or_else(|| (self.tabs.len() == 1).then_some(0))
+                .ok_or(Indecision::NoTarget)?;
+            return self.switching_to(position);
+        }
+        if operation.needs_destination() {
+            let position = target
+                .or_else(|| (self.destinations.len() == 1).then_some(0))
+                .ok_or(Indecision::NoTarget)?;
+            return self.going_to(position);
+        }
         if !operation.needs_tap_target() {
             return Self::untargeted(operation).map(Decision::Ready);
         }
@@ -1032,7 +1311,57 @@ impl Catalog {
                 .ok_or_else(|| Indecision::NotOffered {
                     what: format!("row {position}").into_boxed_str(),
                 })?;
+        // Every row is numbered, so that whoever answers is shown them all,
+        // and a row that is only a field is one of them. It is typed into.
+        if self.field_only.contains(&handle) {
+            return Err(Indecision::NotOffered {
+                what: format!("row {position}").into_boxed_str(),
+            });
+        }
         Self::targeted(operation, handle).map(Decision::Ready)
+    }
+
+    /// Whether a choice clears a floor.
+    fn clears(chosen: &Chosen, floor: Confidence) -> Result<(), Indecision> {
+        if chosen.confidence < floor {
+            return Err(Indecision::TooUncertain {
+                got: chosen.confidence,
+                floor,
+            });
+        }
+        Ok(())
+    }
+
+    /// The decision to answer the open dialog this way.
+    fn answering_dialog(&self, operation: Operation) -> Result<Decision, Indecision> {
+        let open = self.dialog.as_ref().ok_or(Indecision::NoTarget)?;
+        Ok(match operation {
+            Operation::AcceptDialog if open.kind == DialogKind::Prompt => Decision::NeedsPromptText,
+            Operation::AcceptDialog => {
+                Decision::Ready(Act::Dialog(DialogReply::Accept { words: None }))
+            }
+            _ => Decision::Ready(Act::Dialog(DialogReply::Dismiss)),
+        })
+    }
+
+    /// The decision to switch to the nth of the other tabs.
+    fn switching_to(&self, position: usize) -> Result<Decision, Indecision> {
+        self.tabs
+            .get(position)
+            .map(|(_, handle, _)| Decision::Ready(Act::SwitchTab(*handle)))
+            .ok_or_else(|| Indecision::NotOffered {
+                what: format!("tab {position}").into_boxed_str(),
+            })
+    }
+
+    /// The decision to go to the nth of the supplied addresses.
+    fn going_to(&self, position: usize) -> Result<Decision, Indecision> {
+        self.destinations
+            .get(position)
+            .map(|(_, url)| Decision::Ready(Act::Navigate(url.clone())))
+            .ok_or_else(|| Indecision::NotOffered {
+                what: format!("destination {position}").into_boxed_str(),
+            })
     }
 
     /// What the chosen row is worth once rows of the same name are counted

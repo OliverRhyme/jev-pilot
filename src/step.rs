@@ -64,6 +64,14 @@ pub struct StepQuestions<'a> {
     /// Which field to type into, when the screen has one and typing is offered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_field: Option<Question<Deciding<'a>>>,
+    /// Which of the run's other tabs to switch to, when switching is offered
+    /// and there is more than one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tab: Option<Question<Deciding<'a>>>,
+    /// Which supplied address to go to, when navigating is offered and there
+    /// is more than one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<Question<Deciding<'a>>>,
     /// How far along the goal is.
     pub goal_met: Question<Checking<'a>>,
     /// Whether the screen is an error state.
@@ -201,6 +209,8 @@ impl<'a> StepQuestions<'a> {
                 .contains(&Operation::TypeText)
                 .then(|| catalog.type_field_question(aim))
                 .flatten(),
+            tab: catalog.tab_question(aim),
+            destination: catalog.destination_question(aim),
             goal_met: Question::Score {
                 instructions: Checking {
                     goal,
@@ -271,6 +281,12 @@ pub struct StepAnswers {
     /// The field it would type into, if the operation is typing.
     #[serde(default)]
     pub type_field: Option<Chosen>,
+    /// The other tab it would switch to, if the operation is switching.
+    #[serde(default)]
+    pub tab: Option<Chosen>,
+    /// The address it would go to, if the operation is navigating.
+    #[serde(default)]
+    pub destination: Option<Chosen>,
     /// How far along the goal is.
     pub goal_met: Graded,
     /// How likely the screen is an error state.

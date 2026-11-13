@@ -1642,6 +1642,11 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     let text = text?;
                     Act::TypeText { into, text }
                 }
+                Decision::NeedsPromptText => {
+                    return Ok(Ending::Uncertain {
+                        because: Indecision::NoTarget,
+                    });
+                }
             };
 
             // A verdict ends the run. It resolves to no command, so without
