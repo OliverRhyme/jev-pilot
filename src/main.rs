@@ -1,4 +1,4 @@
-//! `jev-pilot`: drive an Android device toward a goal.
+//! `jev-pilot`: drive an Android device, or a web browser, toward a goal.
 //!
 //! ```sh
 //! jev-pilot "Turn Wi-Fi on"
@@ -32,7 +32,8 @@ use jev_pilot::{
     device::adb::{Adb, AdbDevice},
     device::helper::BUNDLED,
     pilot::{Impasse, Pilot, Writing},
-    platform::Android,
+    platform::{Android, Platform},
+    snapshot::Snapshot,
 };
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -160,14 +161,24 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
             print!("{}", cli::USAGE);
             Ok(())
         }
-        Invocation::Devices => list_devices(),
+        Invocation::Devices { browser: None } => list_devices(),
+        Invocation::Devices {
+            browser: Some(browser),
+        } => web::list_tabs(&browser),
         Invocation::Mcp => serve_mcp(),
         Invocation::Version => {
             println!("jev-pilot {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         Invocation::Update => update(),
-        Invocation::Observe { device } => observe(device.as_deref()),
+        Invocation::Observe {
+            device,
+            browser: None,
+        } => observe(device.as_deref()),
+        Invocation::Observe {
+            browser: Some(browser),
+            ..
+        } => web::observe(&browser),
         Invocation::Helper { device, install } => manage_helper(device.as_deref(), install),
         Invocation::Run {
             goal,
@@ -180,9 +191,9 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
             plan,
             keys,
             desk,
-        } => pursue(
-            device.as_deref(),
-            Plan {
+            browser,
+        } => {
+            let plan = Plan {
                 goal,
                 accept,
                 steps,
@@ -192,8 +203,12 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
                 then: plan,
                 keys,
                 desk_dir: desk,
-            },
-        ),
+            };
+            match browser {
+                Some(browser) => web::pursue(&browser, plan),
+                None => pursue(device.as_deref(), plan),
+            }
+        }
     }
 }
 
@@ -259,6 +274,12 @@ fn observe(named: Option<&str>) -> Result<(), Box<dyn core::error::Error>> {
         if screen.keyboard_open() { "up" } else { "down" }
     );
     println!("app     : {}", screen.app().unwrap_or("unknown"));
+    print_screen(&screen, &Android);
+    Ok(())
+}
+
+/// What a screen offers and refuses, and what it says, as `observe` prints it.
+fn print_screen(screen: &Snapshot, platform: &dyn Platform) {
     match screen.quiet_for_ms() {
         Some(quiet) => println!("quiet   : {quiet}ms since the screen last changed"),
         None => println!("quiet   : this reader cannot say"),
@@ -280,7 +301,18 @@ fn observe(named: Option<&str>) -> Result<(), Box<dyn core::error::Error>> {
         }
     }
 
-    let catalog = Catalog::for_screen(&screen, &Android);
+    let tabs: Vec<String> = screen
+        .tabs()
+        .map(|(_, tab)| format!("{} — {}", tab.title, tab.url))
+        .collect();
+    if !tabs.is_empty() {
+        println!("\nother tabs:");
+        for tab in tabs {
+            println!("  {tab}");
+        }
+    }
+
+    let catalog = Catalog::for_screen(screen, platform);
     println!("\noperations offered:");
     let offered: Vec<&str> = catalog.operations().iter().map(|o| o.key()).collect();
     println!("  {}", offered.join(" "));
@@ -297,7 +329,6 @@ fn observe(named: Option<&str>) -> Result<(), Box<dyn core::error::Error>> {
             if element.editable { "  [editable]" } else { "" },
         );
     }
-    Ok(())
 }
 
 fn manage_helper(named: Option<&str>, install: bool) -> Result<(), Box<dyn core::error::Error>> {
@@ -351,6 +382,47 @@ struct Plan {
 }
 
 fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Error>> {
+    // Read before the device is touched, so a missing key costs nothing.
+    let key = ApiKey::from_env()?;
+    let device = AdbDevice::new(choose_device(named)?).with_helper()?;
+    println!("device : {}", device.serial());
+    match device.reader().why() {
+        None => println!("screens: accessibility helper"),
+        Some(why) => println!("screens: uiautomator CLI ({why})"),
+    }
+    drive(device, &Android, key, plan, &[], |device| {
+        // Said at the end as well as the start: a run can lose the helper
+        // part way through, and the reason is the only account of why it
+        // went slow.
+        let reader = device.reader();
+        match (reader.uses_helper(), reader.borrowed(), reader.why()) {
+            (true, 0, _) => println!("screens: accessibility helper throughout"),
+            (true, borrowed, Some(why)) => println!(
+                "screens: accessibility helper, and {borrowed} screen(s) it could not see\n\
+                 reason : {why}"
+            ),
+            (_, _, Some(why)) => println!("screens: uiautomator CLI ({why})"),
+            (_, _, None) => {}
+        }
+    })
+}
+
+/// Pursue a goal on any device, printing each step and keeping a transcript.
+///
+/// `urls` are the addresses `navigate` may go to, for a browser; `after` says
+/// what only this kind of device can say once the run is over.
+fn drive<D>(
+    device: D,
+    platform: &dyn Platform,
+    key: ApiKey,
+    plan: Plan,
+    urls: &[Box<str>],
+    after: impl FnOnce(&D),
+) -> Result<(), Box<dyn core::error::Error>>
+where
+    D: jev_pilot::device::Device,
+    D::Error: 'static,
+{
     let Plan {
         goal,
         accept,
@@ -369,12 +441,6 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
     let transcript = dir.join("steps.jsonl");
     let _ = std::fs::remove_file(&transcript);
 
-    let device = AdbDevice::new(choose_device(named)?).with_helper()?;
-    println!("device : {}", device.serial());
-    match device.reader().why() {
-        None => println!("screens: accessibility helper"),
-        Some(why) => println!("screens: uiautomator CLI ({why})"),
-    }
     println!("goal   : {goal}");
     println!(
         "asking : this terminal, or {}",
@@ -383,24 +449,29 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
     if !accept.is_empty() {
         println!("accept : {}", accept.join(" / "));
     }
+    if !urls.is_empty() {
+        let shown: Vec<&str> = urls.iter().map(AsRef::as_ref).collect();
+        println!("urls   : {}", shown.join(" "));
+    }
     println!();
 
     // Every request kept as sent, when asked for, so a step that went wrong
     // can be replayed against the model with its wording changed.
     let judge = jev_pilot::pilot::Recorded::optionally(
-        SystemOne::new(ApiKey::from_env()?),
+        SystemOne::new(key),
         std::env::var_os("JEV_PILOT_REQUESTS").map(PathBuf::from),
     );
     let choosing = Rc::clone(&desk);
     let writing = Rc::clone(&desk);
 
-    let mut pilot = Pilot::new(device, judge, &Android)
+    let mut pilot = Pilot::new(device, judge, platform)
         .with_floors(floors)
         .about(app)
         .confirming(accept)
         .following(steps_in_order.iter().map(String::as_str))
         .entering_keys(keys.as_deref().unwrap_or_default())
         .supplying(&supplied)
+        .navigating_to(urls.iter().cloned())
         .limited_to(steps)
         .escalating_to(move |impasse: &Impasse<'_>| choosing.choose(impasse))
         .writing_with(move |request: &Writing<'_>| writing.compose(request))
@@ -423,18 +494,7 @@ fn pursue(named: Option<&str>, plan: Plan) -> Result<(), Box<dyn core::error::Er
             "note   : nothing was done; the goal already held on the screen the run started on"
         );
     }
-    // Said at the end as well as the start: a run can lose the helper part way
-    // through, and the reason is the only account of why it went slow.
-    let reader = pilot.device().reader();
-    match (reader.uses_helper(), reader.borrowed(), reader.why()) {
-        (true, 0, _) => println!("screens: accessibility helper throughout"),
-        (true, borrowed, Some(why)) => println!(
-            "screens: accessibility helper, and {borrowed} screen(s) it could not see\n\
-             reason : {why}"
-        ),
-        (_, _, Some(why)) => println!("screens: uiautomator CLI ({why})"),
-        (_, _, None) => {}
-    }
+    after(pilot.device());
     let _ = std::fs::remove_file(dir.join("ask.json"));
     Ok(())
 }
@@ -450,11 +510,13 @@ fn transcribe(to: &std::path::Path, step: &jev_pilot::pilot::StepReport<'_>) {
     let line = serde_json::json!({
         "step": step.index,
         "app": step.app,
+        "url": step.url,
         "rows": step.rows,
         "screen_says": step.says,
         "unavailable": step.unavailable,
         "repeating": step.repeating,
         "acted": step.acted,
+        "outcome": step.outcome,
         "read_ms": step.read_ms,
         "step_ms": step.step_ms,
         "waited_ms": step.waited_ms,
@@ -517,5 +579,285 @@ fn report(step: &jev_pilot::pilot::StepReport<'_>) {
             "   -> refused   op {:.2} / target {target}",
             step.operation_confidence.get()
         ),
+    }
+}
+
+/// Driving a web browser: finding or starting it, choosing the tab, and the
+/// device a run drives it through.
+#[cfg(feature = "browser")]
+mod web {
+    use super::{Plan, drive, print_screen};
+    use jev_pilot::browser::device::BrowserDevice;
+    use jev_pilot::browser::discover::{
+        AttachError, Channel, Os, choose_tab, is_chrome, read_active_port, user_data_dir,
+    };
+    use jev_pilot::browser::engine::{BrowserCommand, BrowserEngine as _, CdpEngine};
+    use jev_pilot::browser::launch::{Fresh, LaunchError, find_chrome};
+    use jev_pilot::browser::transport::{Connection, Socket};
+    use jev_pilot::cli::{BrowserMode, BrowserTarget};
+    use jev_pilot::credential::ApiKey;
+    use jev_pilot::device::{Command, Device};
+    use jev_pilot::platform::browser::Browser;
+    use jev_pilot::platform::page::PageTab;
+    use jev_pilot::snapshot::{Snapshot, TabKey};
+    use serde_json::{Value, json};
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    type Error = Box<dyn core::error::Error>;
+
+    /// How long a fresh browser is given to open its debugging port.
+    const FRESH_START: Duration = Duration::from_secs(20);
+
+    /// How long the calls made before the engine takes over may take.
+    const CALL: Duration = Duration::from_secs(10);
+
+    /// A browser session: the device a run drives, and the browser this run
+    /// started, if it started one.
+    ///
+    /// The fields drop in order, so the engine lets go of its tab before the
+    /// browser it is in is reaped and its profile removed.
+    pub struct Session {
+        device: BrowserDevice<CdpEngine<Socket>>,
+        fresh: Option<Fresh>,
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            if self.fresh.is_some() {
+                let _ = self.device.engine_mut().close_browser();
+            }
+        }
+    }
+
+    impl Device for Session {
+        type Error = <BrowserDevice<CdpEngine<Socket>> as Device>::Error;
+
+        fn observe(&mut self) -> Result<Snapshot, Self::Error> {
+            self.device.observe()
+        }
+
+        fn perform(&mut self, command: &Command) -> Result<(), Self::Error> {
+            self.device.perform(command)
+        }
+
+        fn outcome(&mut self) -> Option<Box<str>> {
+            self.device.outcome()
+        }
+    }
+
+    impl Session {
+        /// The driven tab's title and address, for the run's header.
+        fn describe_tab(&mut self) -> Option<String> {
+            let engine = self.device.engine_mut();
+            let current = engine.current_tab();
+            let tabs = engine.tabs().ok()?;
+            let tab = tabs.into_iter().find(|t| t.key == current)?;
+            Some(format!("{} — {}", tab.title, tab.url))
+        }
+    }
+
+    /// A connection to a browser that has proved to be Chrome, with its tabs.
+    struct Connected {
+        socket: Socket,
+        tabs: Vec<PageTab>,
+        fresh: Option<Fresh>,
+    }
+
+    /// Connect to the browser the target names, once.
+    ///
+    /// In attach mode the handshake raises Chrome's prompt, so it is made as
+    /// soon as the run starts and never retried; a retry would stack a second
+    /// prompt on the first.
+    fn connect(target: &BrowserTarget) -> Result<Connected, Error> {
+        let (socket, fresh) = match &target.mode {
+            BrowserMode::Attach {
+                channel,
+                endpoint,
+                allow_wait,
+            } => {
+                let endpoint = if let Some(endpoint) = endpoint {
+                    endpoint.to_string()
+                } else {
+                    let channel: Channel = channel.parse().unwrap_or_default();
+                    let home = home_dir().ok_or("cannot tell where your home directory is")?;
+                    let dir = user_data_dir(Os::current(), channel, &home, &|name| {
+                        std::env::var(name).ok()
+                    });
+                    read_active_port(&dir)?.endpoint()
+                };
+                eprintln!("Click Allow in Chrome (Enter chooses Cancel)");
+                let socket = Socket::connect(&endpoint, Duration::from_secs(*allow_wait))
+                    .map_err(AttachError::from)?;
+                (socket, None)
+            }
+            BrowserMode::Fresh { chrome, headless } => {
+                let binary = find_chrome(
+                    chrome.as_deref(),
+                    std::env::var_os("JEV_PILOT_CHROME"),
+                    Os::current(),
+                    &|path| path.exists(),
+                )
+                .ok_or(LaunchError::NoBrowser)?;
+                let (fresh, port) = Fresh::start(&binary, *headless, FRESH_START)?;
+                let socket = Socket::connect(&port.endpoint(), CALL).map_err(AttachError::from)?;
+                (socket, Some(fresh))
+            }
+        };
+        let mut connection = Connection::new(socket);
+        // Nothing is typed into a browser until it has said it is Chrome: a
+        // stale port file can name a port another program now holds.
+        let version = connection.call("Browser.getVersion", json!({}), None, CALL)?;
+        if !is_chrome(&version) {
+            let product = version
+                .get("product")
+                .and_then(Value::as_str)
+                .unwrap_or("something unnamed");
+            return Err(AttachError::NotChrome {
+                product: product.into(),
+            }
+            .into());
+        }
+        let targets = connection.call("Target.getTargets", json!({}), None, CALL)?;
+        Ok(Connected {
+            socket: connection.into_wire(),
+            tabs: page_tabs(&targets),
+            fresh,
+        })
+    }
+
+    fn page_tabs(targets: &Value) -> Vec<PageTab> {
+        targets
+            .get("targetInfos")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|t| t.get("type").and_then(Value::as_str) == Some("page"))
+            .map(|t| {
+                let s = |k: &str| t.get(k).and_then(Value::as_str).unwrap_or_default();
+                PageTab {
+                    key: TabKey::new(s("targetId")),
+                    title: s("title").into(),
+                    url: s("url").into(),
+                    opened_by_run: false,
+                }
+            })
+            .collect()
+    }
+
+    fn home_dir() -> Option<PathBuf> {
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+    }
+
+    /// Connect, and attach to the tab the target names.
+    ///
+    /// A fresh browser starts on one blank tab the run owns, and `--open`
+    /// loads its address there; in attach mode `--open` opens a new tab, so
+    /// none of the owner's is touched.
+    fn session(target: &BrowserTarget) -> Result<Session, Error> {
+        let Connected {
+            socket,
+            tabs,
+            fresh,
+        } = connect(target)?;
+        let engine = match (&target.open, fresh.is_some()) {
+            (Some(url), false) => CdpEngine::open(socket, url)?,
+            (open, true) if target.tab.is_none() => {
+                let tab = choose_tab(&tabs, None)?;
+                let mut engine = CdpEngine::attach(socket, &tab.key, true)?;
+                if let Some(url) = open {
+                    engine.perform(&BrowserCommand::Navigate(url.clone()))?;
+                }
+                engine
+            }
+            _ => {
+                let tab = choose_tab(&tabs, target.tab.as_deref())?;
+                CdpEngine::attach(socket, &tab.key, fresh.is_some())?
+            }
+        };
+        Ok(Session {
+            device: BrowserDevice::new(engine),
+            fresh,
+        })
+    }
+
+    /// `devices --browser …`: the browser's tabs, with their ids.
+    pub fn list_tabs(target: &BrowserTarget) -> Result<(), Error> {
+        let Connected {
+            socket,
+            tabs,
+            fresh,
+        } = connect(target)?;
+        if tabs.is_empty() {
+            println!("no tabs open");
+        }
+        for tab in &tabs {
+            println!("{}  {}  {}", tab.key.as_str(), tab.title, tab.url);
+        }
+        if fresh.is_some() {
+            let _ = Connection::new(socket).send("Browser.close", json!({}), None);
+        }
+        Ok(())
+    }
+
+    /// `observe --browser …`: what the next step would be offered on the tab.
+    pub fn observe(target: &BrowserTarget) -> Result<(), Error> {
+        let mut session = session(target)?;
+        let started = std::time::Instant::now();
+        let screen = session.observe()?;
+        println!("read by : DevTools Protocol");
+        println!("took    : {}ms", started.elapsed().as_millis());
+        println!("tab     : {}", screen.url().unwrap_or("unknown"));
+        print_screen(&screen, &Browser::default());
+        Ok(())
+    }
+
+    /// A run in a browser.
+    pub fn pursue(target: &BrowserTarget, plan: Plan) -> Result<(), Error> {
+        // Read before Chrome is asked, so a missing key costs the owner no
+        // click.
+        let key = ApiKey::from_env()?;
+        let mut session = session(target)?;
+        println!(
+            "browser: {}",
+            match &target.mode {
+                BrowserMode::Attach { channel, .. } => format!("attached to Chrome ({channel})"),
+                BrowserMode::Fresh { headless: true, .. } => "fresh, headless".to_owned(),
+                BrowserMode::Fresh { .. } => "fresh".to_owned(),
+            }
+        );
+        if let Some(tab) = session.describe_tab() {
+            println!("tab    : {tab}");
+        }
+        drive(
+            session,
+            &Browser::default(),
+            key,
+            plan,
+            &target.urls,
+            |_| {},
+        )
+    }
+}
+
+/// Without the `browser` feature, every browser command says how to get one.
+#[cfg(not(feature = "browser"))]
+mod web {
+    use super::Plan;
+    use jev_pilot::cli::BrowserTarget;
+
+    const REBUILD: &str =
+        "this build cannot drive a browser; rebuild with `cargo install --features browser`";
+
+    pub fn list_tabs(_: &BrowserTarget) -> Result<(), Box<dyn core::error::Error>> {
+        Err(REBUILD.into())
+    }
+
+    pub fn observe(_: &BrowserTarget) -> Result<(), Box<dyn core::error::Error>> {
+        Err(REBUILD.into())
+    }
+
+    pub fn pursue(_: &BrowserTarget, _: Plan) -> Result<(), Box<dyn core::error::Error>> {
+        Err(REBUILD.into())
     }
 }

@@ -1,7 +1,7 @@
 //! Reading a command line. Pure: nothing here touches a device.
 
 use jev_pilot::act::Operation;
-use jev_pilot::cli::{Invocation, parse};
+use jev_pilot::cli::{BrowserMode, BrowserTarget, CliError, Invocation, parse};
 
 fn parsed(words: &[&str]) -> Invocation {
     parse(words.iter().map(|w| (*w).to_owned())).expect("a valid command line")
@@ -105,7 +105,10 @@ fn the_helper_is_managed_by_its_own_subcommand() {
 
 #[test]
 fn devices_and_help_are_their_own_subcommands() {
-    assert!(matches!(parsed(&["devices"]), Invocation::Devices));
+    assert!(matches!(
+        parsed(&["devices"]),
+        Invocation::Devices { browser: None }
+    ));
     assert!(matches!(parsed(&["--help"]), Invocation::Help));
     assert!(matches!(parsed(&["-h"]), Invocation::Help));
 }
@@ -128,11 +131,17 @@ fn a_goal_can_follow_the_end_of_options() {
 fn the_catalog_can_be_looked_at_without_running_anything() {
     assert!(matches!(
         parsed(&["observe"]),
-        Invocation::Observe { device: None }
+        Invocation::Observe {
+            device: None,
+            browser: None
+        }
     ));
     assert!(matches!(
         parsed(&["observe", "--device", "abc123"]),
-        Invocation::Observe { device: Some(_) }
+        Invocation::Observe {
+            device: Some(_),
+            browser: None
+        }
     ));
 }
 
@@ -315,4 +324,243 @@ fn a_single_word_that_is_not_a_command_is_refused_not_pursued() {
         panic!("a sentence is a goal");
     };
     assert_eq!(&*goal, "open settings");
+}
+
+// --- the browser ---
+
+fn browser_of(invocation: Invocation) -> Option<BrowserTarget> {
+    match invocation {
+        Invocation::Run { browser, .. }
+        | Invocation::Observe { browser, .. }
+        | Invocation::Devices { browser } => browser,
+        other => panic!("no browser on {other:?}"),
+    }
+}
+
+fn refused(words: &[&str]) -> CliError {
+    parse(words.iter().map(|w| (*w).to_owned())).expect_err("refused")
+}
+
+#[test]
+fn a_run_without_browser_flags_drives_a_phone_as_before() {
+    assert_eq!(browser_of(parsed(&["Turn Wi-Fi on"])), None);
+}
+
+/// Attach mode defaults to the stable channel and a two-minute wait for the
+/// owner to click Allow.
+#[test]
+fn attach_mode_takes_its_channel_endpoint_and_wait() {
+    assert_eq!(
+        browser_of(parsed(&[
+            "--browser",
+            "attach",
+            "--tab",
+            "github.com",
+            "Star the repository"
+        ])),
+        Some(BrowserTarget {
+            mode: BrowserMode::Attach {
+                channel: "stable".into(),
+                endpoint: None,
+                allow_wait: 120,
+            },
+            tab: Some("github.com".into()),
+            open: None,
+            urls: Vec::new(),
+        })
+    );
+    assert_eq!(
+        browser_of(parsed(&[
+            "--browser",
+            "attach",
+            "--channel",
+            "canary",
+            "--endpoint",
+            "ws://127.0.0.1:9222/devtools/browser/x",
+            "--allow-wait",
+            "40",
+            "Star the repository",
+        ])),
+        Some(BrowserTarget {
+            mode: BrowserMode::Attach {
+                channel: "canary".into(),
+                endpoint: Some("ws://127.0.0.1:9222/devtools/browser/x".into()),
+                allow_wait: 40,
+            },
+            tab: None,
+            open: None,
+            urls: Vec::new(),
+        })
+    );
+}
+
+/// The `--open` address is always one `navigate` may go to.
+#[test]
+fn fresh_mode_takes_its_binary_headless_and_addresses() {
+    assert_eq!(
+        browser_of(parsed(&[
+            "--browser",
+            "fresh",
+            "--chrome",
+            "/opt/cft/chrome",
+            "--headless",
+            "--open",
+            "https://example.test/signup",
+            "--url",
+            "https://example.test/terms",
+            "Sign up for an account",
+        ])),
+        Some(BrowserTarget {
+            mode: BrowserMode::Fresh {
+                chrome: Some("/opt/cft/chrome".into()),
+                headless: true,
+            },
+            tab: None,
+            open: Some("https://example.test/signup".into()),
+            urls: vec![
+                "https://example.test/signup".into(),
+                "https://example.test/terms".into()
+            ],
+        })
+    );
+}
+
+#[test]
+fn observe_and_devices_take_the_browser_flags_too() {
+    let fresh = Some(BrowserTarget {
+        mode: BrowserMode::Fresh {
+            chrome: None,
+            headless: true,
+        },
+        tab: None,
+        open: Some("https://example.test/".into()),
+        urls: vec!["https://example.test/".into()],
+    });
+    assert_eq!(
+        browser_of(parsed(&[
+            "observe",
+            "--browser",
+            "fresh",
+            "--headless",
+            "--open",
+            "https://example.test/"
+        ])),
+        fresh
+    );
+    assert!(matches!(
+        browser_of(parsed(&["devices", "--browser", "attach"])),
+        Some(BrowserTarget {
+            mode: BrowserMode::Attach { .. },
+            ..
+        })
+    ));
+}
+
+#[test]
+fn conflicting_browser_flags_are_refused() {
+    for words in [
+        &["--browser", "fresh", "--device", "abc123", "Open the page"][..],
+        &[
+            "--browser",
+            "fresh",
+            "--app",
+            "com.example",
+            "Open the page",
+        ],
+        &[
+            "--browser",
+            "attach",
+            "--tab",
+            "x",
+            "--open",
+            "https://example.test/",
+            "Open the page",
+        ],
+        &["observe", "--browser", "fresh", "--device", "abc123"],
+        &["--browser", "fresh", "--channel", "beta", "Open the page"],
+        &[
+            "--browser",
+            "fresh",
+            "--endpoint",
+            "ws://127.0.0.1:1/devtools/browser/x",
+            "Open the page",
+        ],
+        &["--browser", "fresh", "--allow-wait", "40", "Open the page"],
+        &[
+            "--browser",
+            "attach",
+            "--chrome",
+            "/opt/chrome",
+            "Open the page",
+        ],
+        &["--browser", "attach", "--headless", "Open the page"],
+    ] {
+        let error = parse(words.iter().map(|w| (*w).to_owned()));
+        assert!(error.is_err(), "{words:?} is refused");
+    }
+    let message = refused(&[
+        "--browser",
+        "fresh",
+        "--app",
+        "com.example",
+        "Open the page",
+    ])
+    .to_string();
+    assert!(
+        message.contains("--url") || message.contains("--open"),
+        "says what to use instead: {message}"
+    );
+}
+
+/// A browser flag without `--browser` is a mistake, not a phone run.
+#[test]
+fn browser_flags_need_a_browser() {
+    for words in [
+        &["--tab", "x", "Open the page"][..],
+        &["--open", "https://example.test/", "Open the page"],
+        &["--url", "https://example.test/", "Open the page"],
+        &["--headless", "Open the page"],
+        &["observe", "--channel", "beta"],
+    ] {
+        assert!(
+            parse(words.iter().map(|w| (*w).to_owned())).is_err(),
+            "{words:?} is refused"
+        );
+    }
+}
+
+#[test]
+fn bad_browser_values_are_refused() {
+    for words in [
+        &["--browser", "chrome", "Open the page"][..],
+        &[
+            "--browser",
+            "attach",
+            "--channel",
+            "nightly",
+            "Open the page",
+        ],
+        &[
+            "--browser",
+            "attach",
+            "--allow-wait",
+            "soon",
+            "Open the page",
+        ],
+        &[
+            "--browser",
+            "attach",
+            "--endpoint",
+            "http://127.0.0.1:9222",
+            "Open the page",
+        ],
+    ] {
+        assert!(
+            matches!(
+                parse(words.iter().map(|w| (*w).to_owned())),
+                Err(CliError::BadValue { .. })
+            ),
+            "{words:?} is refused"
+        );
+    }
 }

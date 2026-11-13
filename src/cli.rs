@@ -39,6 +39,8 @@ pub enum Invocation {
         keys: Option<String>,
         /// Where questions are written for another decider to answer.
         desk: Option<std::path::PathBuf>,
+        /// The browser to drive instead of a device.
+        browser: Option<BrowserTarget>,
     },
     /// Serve the Model Context Protocol over stdin and stdout.
     ///
@@ -53,12 +55,17 @@ pub enum Invocation {
         /// Whether to install and enable it, rather than only report.
         install: bool,
     },
-    /// List the attached devices.
-    Devices,
+    /// List the attached devices, or a browser's tabs.
+    Devices {
+        /// The browser whose tabs to list instead.
+        browser: Option<BrowserTarget>,
+    },
     /// Print what the next step would be offered, without acting.
     Observe {
         /// Which device, when more than one is attached.
         device: Option<String>,
+        /// The browser to look at instead of a device.
+        browser: Option<BrowserTarget>,
     },
     /// Explain the usage.
     Help,
@@ -74,6 +81,47 @@ pub const DEFAULT_STEPS: u32 = 15;
 /// The confidence below which a run asks rather than acts, unless told
 /// otherwise.
 pub const DEFAULT_FLOOR: f64 = 0.6;
+
+/// How long attach mode waits for the owner to click Allow, unless told
+/// otherwise, in seconds.
+pub const DEFAULT_ALLOW_WAIT: u64 = 120;
+
+/// The release channels whose running Chrome can be attached to.
+pub const CHANNELS: &[&str] = &["stable", "beta", "dev", "canary"];
+
+/// Which browser, and how it is reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserMode {
+    /// The owner's running Chrome, through its remote-debugging prompt.
+    Attach {
+        /// Which channel's Chrome: one of [`CHANNELS`].
+        channel: Box<str>,
+        /// A browser websocket to use instead of finding one.
+        endpoint: Option<Box<str>>,
+        /// How long to wait for the owner to click Allow, in seconds.
+        allow_wait: u64,
+    },
+    /// A browser started for the run, on a throwaway profile.
+    Fresh {
+        /// The browser binary, when named.
+        chrome: Option<std::path::PathBuf>,
+        /// Whether it runs without a window.
+        headless: bool,
+    },
+}
+
+/// The browser a command drives, and which tab of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserTarget {
+    /// Which browser.
+    pub mode: BrowserMode,
+    /// An existing tab, by id or a piece of its address.
+    pub tab: Option<Box<str>>,
+    /// An address to open in a new tab and drive.
+    pub open: Option<Box<str>>,
+    /// The addresses `navigate` may go to; the `--open` one first.
+    pub urls: Vec<Box<str>>,
+}
 
 /// A command line that could not be understood.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +146,22 @@ pub enum CliError {
     NoGoal,
     /// More than one goal was given.
     TooManyGoals,
+    /// Two flags that cannot be used together.
+    Conflict {
+        /// The first.
+        flag: &'static str,
+        /// The one it conflicts with.
+        with: &'static str,
+        /// What to do instead.
+        instead: &'static str,
+    },
+    /// A browser flag without `--browser`, or with the other mode.
+    NeedsMode {
+        /// The flag.
+        flag: &'static str,
+        /// The mode it belongs to.
+        mode: &'static str,
+    },
     /// A single word that is not a command.
     ///
     /// Refused rather than taken as the goal, as an unknown flag is: a
@@ -114,6 +178,12 @@ impl core::fmt::Display for CliError {
             Self::MissingValue(flag) => write!(f, "{flag} needs a value"),
             Self::BadValue { flag, got } => write!(f, "{flag} cannot be {got:?}"),
             Self::NoGoal => f.write_str("no goal given: say what you want done, in quotes"),
+            Self::Conflict {
+                flag,
+                with,
+                instead,
+            } => write!(f, "{flag} cannot be used with {with}: {instead}"),
+            Self::NeedsMode { flag, mode } => write!(f, "{flag} needs --browser {mode}"),
             Self::NotACommand(word) => write!(
                 f,
                 "{word:?} is not a command. A goal is a sentence in quotes, like \
@@ -154,8 +224,12 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
     let mut plan = Vec::new();
     let mut keys = None;
     let mut options_ended = false;
+    let mut browser = BrowserFlags::default();
 
     while let Some(word) = args.next() {
+        if !options_ended && browser.take(&word, &mut args)? {
+            continue;
+        }
         if options_ended || !word.starts_with('-') {
             goal_after_dashes = options_ended;
             if goal.replace(word).is_some() {
@@ -195,6 +269,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
         }
     }
 
+    let browser = browser.finish(device.is_some(), app.is_some())?;
     let goal = goal.ok_or(CliError::NoGoal)?;
     if !goal_after_dashes && !goal.trim().contains(char::is_whitespace) {
         return Err(CliError::NotACommand(goal));
@@ -210,6 +285,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, CliEr
         accept,
         steps,
         desk,
+        browser,
     })
 }
 
@@ -235,7 +311,7 @@ fn subcommand(
         "--version" | "-V" | "version" => Ok(Invocation::Version),
         "devices" => {
             let _ = args.next();
-            Ok(Invocation::Devices)
+            devices(args)
         }
         "update" => alone(args, Invocation::Update),
         "mcp" => alone(args, Invocation::Mcp),
@@ -251,16 +327,195 @@ fn subcommand(
     })
 }
 
-/// The rest of `observe`: which device.
+/// The rest of `observe`: which device, or which browser.
 fn observe(mut args: impl Iterator<Item = String>) -> Result<Invocation, CliError> {
     let mut device = None;
+    let mut browser = BrowserFlags::default();
     while let Some(word) = args.next() {
+        if browser.take(&word, &mut args)? {
+            continue;
+        }
         match word.as_str() {
             "--device" | "-d" => device = Some(value(&mut args, "--device")?),
             other => return Err(CliError::UnknownFlag(other.to_owned())),
         }
     }
-    Ok(Invocation::Observe { device })
+    let browser = browser.finish(device.is_some(), false)?;
+    Ok(Invocation::Observe { device, browser })
+}
+
+/// The rest of `devices`: which browser's tabs, if any.
+fn devices(mut args: impl Iterator<Item = String>) -> Result<Invocation, CliError> {
+    let mut browser = BrowserFlags::default();
+    while let Some(word) = args.next() {
+        if !browser.take(&word, &mut args)? {
+            return Err(CliError::UnknownFlag(word));
+        }
+    }
+    Ok(Invocation::Devices {
+        browser: browser.finish(false, false)?,
+    })
+}
+
+/// The browser flags, as they are met, checked against each other at the end.
+#[derive(Default)]
+struct BrowserFlags {
+    mode: Option<String>,
+    channel: Option<String>,
+    endpoint: Option<String>,
+    allow_wait: Option<u64>,
+    chrome: Option<String>,
+    headless: bool,
+    tab: Option<String>,
+    open: Option<String>,
+    urls: Vec<String>,
+}
+
+impl BrowserFlags {
+    /// Take `word` and its value if it is a browser flag; `false` if it is not
+    /// one.
+    fn take(
+        &mut self,
+        word: &str,
+        args: &mut impl Iterator<Item = String>,
+    ) -> Result<bool, CliError> {
+        match word {
+            "--browser" => {
+                let got = value(args, "--browser")?;
+                if !matches!(got.as_str(), "attach" | "fresh") {
+                    return Err(CliError::BadValue {
+                        flag: "--browser",
+                        got,
+                    });
+                }
+                self.mode = Some(got);
+            }
+            "--channel" => {
+                let got = value(args, "--channel")?;
+                if !CHANNELS.contains(&got.as_str()) {
+                    return Err(CliError::BadValue {
+                        flag: "--channel",
+                        got,
+                    });
+                }
+                self.channel = Some(got);
+            }
+            "--endpoint" => {
+                let got = value(args, "--endpoint")?;
+                if !got.starts_with("ws://") {
+                    return Err(CliError::BadValue {
+                        flag: "--endpoint",
+                        got,
+                    });
+                }
+                self.endpoint = Some(got);
+            }
+            "--allow-wait" => {
+                let got = value(args, "--allow-wait")?;
+                self.allow_wait = Some(got.parse().ok().filter(|s| *s > 0).ok_or(
+                    CliError::BadValue {
+                        flag: "--allow-wait",
+                        got,
+                    },
+                )?);
+            }
+            "--chrome" => self.chrome = Some(value(args, "--chrome")?),
+            "--headless" => self.headless = true,
+            "--tab" => self.tab = Some(value(args, "--tab")?),
+            "--open" => self.open = Some(value(args, "--open")?),
+            "--url" => self.urls.push(value(args, "--url")?),
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// The browser target, checked against the rest of the command line.
+    fn finish(self, device: bool, app: bool) -> Result<Option<BrowserTarget>, CliError> {
+        let Some(mode) = self.mode else {
+            let stray = [
+                (self.channel.is_some(), "--channel", "attach"),
+                (self.endpoint.is_some(), "--endpoint", "attach"),
+                (self.allow_wait.is_some(), "--allow-wait", "attach"),
+                (self.chrome.is_some(), "--chrome", "fresh"),
+                (self.headless, "--headless", "fresh"),
+                (self.tab.is_some(), "--tab", "attach|fresh"),
+                (self.open.is_some(), "--open", "attach|fresh"),
+                (!self.urls.is_empty(), "--url", "attach|fresh"),
+            ];
+            return match stray.into_iter().find(|(set, ..)| *set) {
+                Some((_, flag, mode)) => Err(CliError::NeedsMode { flag, mode }),
+                None => Ok(None),
+            };
+        };
+        if device {
+            return Err(CliError::Conflict {
+                flag: "--device",
+                with: "--browser",
+                instead: "a browser run drives a tab; choose it with --tab or --open",
+            });
+        }
+        if app {
+            return Err(CliError::Conflict {
+                flag: "--app",
+                with: "--browser",
+                instead: "say where the run may go with --open and --url",
+            });
+        }
+        if self.tab.is_some() && self.open.is_some() {
+            return Err(CliError::Conflict {
+                flag: "--tab",
+                with: "--open",
+                instead: "drive an existing tab, or open a new one, not both",
+            });
+        }
+        let mode = if mode == "attach" {
+            for (set, flag) in [
+                (self.chrome.is_some(), "--chrome"),
+                (self.headless, "--headless"),
+            ] {
+                if set {
+                    return Err(CliError::NeedsMode {
+                        flag,
+                        mode: "fresh",
+                    });
+                }
+            }
+            BrowserMode::Attach {
+                channel: self.channel.unwrap_or_else(|| "stable".to_owned()).into(),
+                endpoint: self.endpoint.map(Into::into),
+                allow_wait: self.allow_wait.unwrap_or(DEFAULT_ALLOW_WAIT),
+            }
+        } else {
+            for (set, flag) in [
+                (self.channel.is_some(), "--channel"),
+                (self.endpoint.is_some(), "--endpoint"),
+                (self.allow_wait.is_some(), "--allow-wait"),
+            ] {
+                if set {
+                    return Err(CliError::NeedsMode {
+                        flag,
+                        mode: "attach",
+                    });
+                }
+            }
+            BrowserMode::Fresh {
+                chrome: self.chrome.map(std::path::PathBuf::from),
+                headless: self.headless,
+            }
+        };
+        let mut urls: Vec<Box<str>> = Vec::new();
+        for url in self.open.iter().chain(&self.urls) {
+            if !urls.iter().any(|u| **u == **url) {
+                urls.push(url.as_str().into());
+            }
+        }
+        Ok(Some(BrowserTarget {
+            mode,
+            tab: self.tab.map(Into::into),
+            open: self.open.map(Into::into),
+            urls,
+        }))
+    }
 }
 
 /// The rest of `helper`: whether to install, and on which device.
@@ -318,11 +573,12 @@ fn value(args: &mut impl Iterator<Item = String>, flag: &'static str) -> Result<
 
 /// What to print for `--help`.
 pub const USAGE: &str = "\
-jev-pilot — drive an Android device toward a goal
+jev-pilot — drive an Android device, or a web browser, toward a goal
 
 USAGE
   jev-pilot [options] \"<goal>\"       pursue a goal
-  jev-pilot devices                   list attached devices
+  jev-pilot devices                   list attached devices (or, with
+                                      --browser, a browser's tabs)
   jev-pilot observe                   print what the next step would be offered
   jev-pilot helper [install]          report on, or install, the on-device helper
   jev-pilot mcp                       serve MCP over stdio, for an agent to drive runs
@@ -352,6 +608,24 @@ OPTIONS
       --desk <dir>        where questions are written, so another decider can
                           answer them by writing <dir>/answer.json
   -h, --help              this text
+
+BROWSER (runs, observe and devices; needs a build with the `browser` feature)
+      --browser attach    drive your running Chrome. Turn on remote debugging
+                          at chrome://inspect/#remote-debugging, then click
+                          Allow when Chrome asks (Enter chooses Cancel)
+      --browser fresh     start a browser on a throwaway profile, removed at
+                          the end
+      --channel <name>    attach: stable (default), beta, dev or canary
+      --endpoint <ws-url> attach: this browser websocket, instead of finding it
+      --allow-wait <s>    attach: how long to wait for Allow (default 120)
+      --chrome <path>     fresh: the browser binary (else JEV_PILOT_CHROME,
+                          else Chrome for Testing, Chromium or Chrome)
+      --headless          fresh: run without a window
+      --tab <id|text>     drive the tab with this id, or the one tab whose
+                          address contains this text
+      --open <url>        open a new tab at this address and drive it
+      --url <url>         another address the run may navigate to; repeatable.
+                          The --open address is always one of them
 
 ENVIRONMENT
   TYPESAFE_API_KEY        the key Jev is called with

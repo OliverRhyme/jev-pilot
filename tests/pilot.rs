@@ -2129,6 +2129,64 @@ mod browser {
         );
     }
 
+    /// The transcript says which page each step was on, which an origin alone
+    /// cannot: two steps on one site are often two different forms.
+    #[test]
+    fn each_report_carries_the_address_of_its_page() {
+        /// Turns the page only on a tap, so the pilot's own settling and
+        /// re-reading see the page the step was judged on.
+        struct Pages {
+            taps: usize,
+            screens: Vec<Snapshot>,
+        }
+        impl Device for Pages {
+            type Error = Infallible;
+            fn observe(&mut self) -> Result<Snapshot, Infallible> {
+                let shown = &self.screens[self.taps.min(self.screens.len() - 1)];
+                Ok(
+                    Snapshot::new(shown.refs().map(|(_, e)| e.clone()).collect())
+                        .expect("fits")
+                        .at_url(shown.url().map(Box::from)),
+                )
+            }
+            fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+                if matches!(command, Command::Tap(_)) {
+                    self.taps += 1;
+                }
+                Ok(())
+            }
+        }
+        let screens = [
+            page("https://example.test/cart", &["Check out"], Vec::new()),
+            page("https://example.test/checkout?step=2", &["Pay"], Vec::new()),
+        ];
+        let judge = Recording {
+            seen: Rc::new(RefCell::new(Vec::new())),
+            turns: RefCell::new(vec![
+                answer("tap", Some("A1"), 0.99, 0.1),
+                answer("done", None, 0.99, 0.97),
+            ]),
+        };
+        let urls = Rc::new(RefCell::new(Vec::new()));
+        let log = Rc::clone(&urls);
+        let pages = Pages {
+            taps: 0,
+            screens: screens.into(),
+        };
+        let mut pilot = Pilot::new(pages, judge, &Web)
+            .watching(move |step| log.borrow_mut().push(step.url.map(str::to_owned)));
+
+        pilot.pursue("Check out").expect("the run completes");
+
+        assert_eq!(
+            *urls.borrow(),
+            [
+                Some("https://example.test/cart".to_owned()),
+                Some("https://example.test/checkout?step=2".to_owned()),
+            ]
+        );
+    }
+
     /// Keys on rows are how a browser presses them, and the run never sees one.
     #[test]
     fn a_tap_on_a_keyed_row_is_pressed_by_its_key() {
