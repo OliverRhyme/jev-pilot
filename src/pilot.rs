@@ -148,6 +148,16 @@ pub struct Impasse<'i> {
     /// answering with a row's number types into the wrong one, or into
     /// nothing.
     pub fields: &'i [String],
+    /// The other tabs the run could switch to, in the order they are numbered.
+    ///
+    /// Numbered on their own, as fields are: `switch_tab 1` means the second
+    /// tab, whatever number the rows reach. Empty on a phone.
+    pub tabs: &'i [String],
+    /// The addresses the run could go to, in the order they are numbered.
+    ///
+    /// Only the ones the caller supplied, and numbered on their own like the
+    /// tabs. Empty on a phone.
+    pub destinations: &'i [String],
     /// What the screen says, beyond what it offers to act on.
     ///
     /// A person deciding an impasse should not be shown less than the model
@@ -1116,6 +1126,14 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             .fields_offered()
             .map(|(_, at)| at.to_owned())
             .collect();
+        let tabs: Vec<String> = catalog
+            .tabs_offered()
+            .map(|(_, text)| text.to_owned())
+            .collect();
+        let destinations: Vec<String> = catalog
+            .destinations_offered()
+            .map(|(_, url)| url.to_owned())
+            .collect();
 
         // Sorted so the thing it was nearly beaten by comes first: that is the
         // decision actually being asked about.
@@ -1141,6 +1159,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 covered: &covered,
                 keyboard_open: snapshot.keyboard_open(),
                 fields: &fields,
+                tabs: &tabs,
+                destinations: &destinations,
                 says: &says,
                 unavailable: &unavailable,
                 operations: catalog.operations(),

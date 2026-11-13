@@ -185,6 +185,8 @@ impl Desk {
                 "unavailable": impasse.unavailable,
                 "keyboard_open": impasse.keyboard_open,
                 "fields": impasse.fields,
+                "tabs": impasse.tabs,
+                "destinations": impasse.destinations,
             }),
             &describe(impasse),
         )?;
@@ -358,9 +360,21 @@ pub fn describe(impasse: &Impasse<'_>) -> String {
     for (index, field) in impasse.fields.iter().enumerate() {
         let _ = writeln!(out, "     type {index} -> {field}");
     }
-    let _ = write!(
-        out,
-        "     tap <n> | type <n> | back | scroll_down | done | stop: "
-    );
+    // Numbered on their own for the same reason: `switch_tab 1` and
+    // `navigate 1` mean the second tab and the second address.
+    for (index, tab) in impasse.tabs.iter().enumerate() {
+        let _ = writeln!(out, "     switch_tab {index} -> {tab}");
+    }
+    for (index, url) in impasse.destinations.iter().enumerate() {
+        let _ = writeln!(out, "     navigate {index} -> {url}");
+    }
+    let _ = write!(out, "     tap <n> | type <n> | ");
+    if !impasse.tabs.is_empty() {
+        let _ = write!(out, "switch_tab <n> | ");
+    }
+    if !impasse.destinations.is_empty() {
+        let _ = write!(out, "navigate <n> | ");
+    }
+    let _ = write!(out, "back | scroll_down | done | stop: ");
     out
 }
