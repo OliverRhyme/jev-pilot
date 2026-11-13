@@ -2133,17 +2133,6 @@ mod browser {
     /// cannot: two steps on one site are often two different forms.
     #[test]
     fn each_report_carries_the_address_of_its_page() {
-        let screens = [
-            page("https://example.test/cart", &["Check out"], Vec::new()),
-            page("https://example.test/checkout?step=2", &["Pay"], Vec::new()),
-        ];
-        let judge = Recording {
-            seen: Rc::new(RefCell::new(Vec::new())),
-            turns: RefCell::new(vec![
-                answer("tap", Some("A1"), 0.99, 0.1),
-                answer("done", None, 0.99, 0.97),
-            ]),
-        };
         /// Turns the page only on a tap, so the pilot's own settling and
         /// re-reading see the page the step was judged on.
         struct Pages {
@@ -2167,6 +2156,17 @@ mod browser {
                 Ok(())
             }
         }
+        let screens = [
+            page("https://example.test/cart", &["Check out"], Vec::new()),
+            page("https://example.test/checkout?step=2", &["Pay"], Vec::new()),
+        ];
+        let judge = Recording {
+            seen: Rc::new(RefCell::new(Vec::new())),
+            turns: RefCell::new(vec![
+                answer("tap", Some("A1"), 0.99, 0.1),
+                answer("done", None, 0.99, 0.97),
+            ]),
+        };
         let urls = Rc::new(RefCell::new(Vec::new()));
         let log = Rc::clone(&urls);
         let pages = Pages {

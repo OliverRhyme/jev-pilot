@@ -528,7 +528,7 @@ fn button_page() -> PageRead {
             value: None,
             protected: false,
             description: None,
-            states: Default::default(),
+            states: jev_pilot::platform::page::NodeStates::default(),
             clickable: true,
             options: Vec::new(),
             context: None,

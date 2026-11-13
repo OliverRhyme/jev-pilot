@@ -676,16 +676,15 @@ mod web {
                 endpoint,
                 allow_wait,
             } => {
-                let endpoint = match endpoint {
-                    Some(endpoint) => endpoint.to_string(),
-                    None => {
-                        let channel: Channel = channel.parse().unwrap_or_default();
-                        let home = home_dir().ok_or("cannot tell where your home directory is")?;
-                        let dir = user_data_dir(Os::current(), channel, &home, &|name| {
-                            std::env::var(name).ok()
-                        });
-                        read_active_port(&dir)?.endpoint()
-                    }
+                let endpoint = if let Some(endpoint) = endpoint {
+                    endpoint.to_string()
+                } else {
+                    let channel: Channel = channel.parse().unwrap_or_default();
+                    let home = home_dir().ok_or("cannot tell where your home directory is")?;
+                    let dir = user_data_dir(Os::current(), channel, &home, &|name| {
+                        std::env::var(name).ok()
+                    });
+                    read_active_port(&dir)?.endpoint()
                 };
                 eprintln!("Click Allow in Chrome (Enter chooses Cancel)");
                 let socket = Socket::connect(&endpoint, Duration::from_secs(*allow_wait))
