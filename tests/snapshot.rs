@@ -1,7 +1,10 @@
 //! Observations of a screen, and the references they issue.
 
 use jev_pilot::platform::{Android, HierarchyError, Platform};
-use jev_pilot::snapshot::{Bounds, Element, MAX_ELEMENTS, Point, Snapshot};
+use jev_pilot::snapshot::{
+    Bounds, Dialog, DialogKind, Element, MAX_ELEMENTS, NodeKey, Point, Snapshot, Tab,
+    TabKey,
+};
 use std::fmt::Write as _;
 
 const SETTINGS: &str = include_str!("fixtures/settings.xml");
@@ -775,4 +778,181 @@ fn a_small_button_inside_a_field_is_tapped_at_its_own_centre() {
     let point = snapshot.tap_point(button).expect("nothing covers it");
 
     assert_eq!((point.x, point.y), (896, 1147));
+}
+
+fn row(label: &str) -> Element {
+    Element {
+        label: label.into(),
+        detail: None,
+        editable: false,
+        bounds: Bounds::from_origin_size(0, 0, 10, 10),
+    }
+}
+
+fn tab(key: &str, title: &str, url: &str) -> Tab {
+    Tab {
+        key: TabKey::new(key),
+        title: title.into(),
+        url: url.into(),
+    }
+}
+
+/// A tab is chosen from one read of the browser. Once the tab list has been
+/// read again the choice must not be actionable, the same as a row.
+#[test]
+fn a_tab_reference_from_an_earlier_snapshot_does_not_resolve_against_a_later_one() {
+    let first = Snapshot::new(vec![row("Go")])
+        .expect("fits")
+        .with_tabs(vec![tab("t1", "Results", "https://example.test/results")]);
+    let (stale, _) = first.tabs().next().expect("one tab");
+    let second = Snapshot::new(vec![row("Go")])
+        .expect("fits")
+        .with_tabs(vec![tab("t1", "Results", "https://example.test/results")]);
+
+    let current = first.resolve_tab(stale).expect("current ref resolves");
+    assert_eq!(current.key, TabKey::new("t1"));
+    assert_eq!(&*current.title, "Results");
+    assert_eq!(&*current.url, "https://example.test/results");
+    assert!(second.resolve_tab(stale).is_err());
+}
+
+/// The snapshot says where it was read, so a transcript can follow the run.
+#[test]
+fn a_snapshot_reports_the_url_it_was_read_from() {
+    let bare = Snapshot::new(vec![row("Go")]).expect("fits");
+    assert_eq!(bare.url(), None);
+
+    let read = bare.at_url(Some("https://example.test/".into()));
+    assert_eq!(read.url(), Some("https://example.test/"));
+}
+
+fn confirm(message: &str) -> Dialog {
+    Dialog {
+        kind: DialogKind::Confirm,
+        message: message.into(),
+        default_prompt: None,
+    }
+}
+
+/// An open dialog blocks the page, and its own buttons are what the run has to
+/// act on. A screen with nothing else on it is not one caught mid-transition.
+#[test]
+fn a_screen_holding_only_an_open_dialog_is_worth_acting_on() {
+    let empty = Snapshot::new(Vec::new()).expect("fits");
+    assert!(!empty.worth_acting_on());
+
+    let dialog = Snapshot::new(Vec::new())
+        .expect("fits")
+        .with_dialog(Some(confirm("Delete this draft?")));
+    assert!(dialog.worth_acting_on());
+
+    let open = dialog.dialog().expect("dialog is carried");
+    assert_eq!(open.kind, DialogKind::Confirm);
+    assert_eq!(&*open.message, "Delete this draft?");
+    assert_eq!(open.default_prompt, None);
+}
+
+/// A prompt dialog carries the text it would hold if accepted untouched.
+#[test]
+fn a_prompt_dialog_carries_its_default_text() {
+    let snapshot = Snapshot::new(Vec::new())
+        .expect("fits")
+        .with_dialog(Some(Dialog {
+            kind: DialogKind::Prompt,
+            message: "Name?".into(),
+            default_prompt: Some("Ada".into()),
+        }));
+
+    let open = snapshot.dialog().expect("dialog is carried");
+    assert_eq!(open.kind, DialogKind::Prompt);
+    assert_eq!(open.default_prompt.as_deref(), Some("Ada"));
+}
+
+/// Settling asks whether anything changed, so a dialog opening over identical
+/// rows, or a new tab appearing, is a change.
+#[test]
+fn the_dialog_and_the_tabs_change_the_fingerprint() {
+    let plain = || Snapshot::new(vec![row("Go")]).expect("fits");
+    let base = plain().fingerprint();
+
+    let with_dialog = plain().with_dialog(Some(confirm("Sure?")));
+    let with_tab = plain().with_tabs(vec![tab("t1", "Results", "https://example.test/r")]);
+    let other_tab = plain().with_tabs(vec![tab("t1", "Other", "https://example.test/o")]);
+    let other_dialog = plain().with_dialog(Some(confirm("Really?")));
+
+    assert_ne!(with_dialog.fingerprint(), base);
+    assert_ne!(with_tab.fingerprint(), base);
+    assert_ne!(with_tab.fingerprint(), other_tab.fingerprint());
+    assert_ne!(with_dialog.fingerprint(), other_dialog.fingerprint());
+    assert_eq!(plain().fingerprint(), base);
+}
+
+/// Revisiting asks whether this is somewhere already been, and a dialog or a
+/// tab the run could switch to makes it somewhere else.
+#[test]
+fn the_dialog_and_the_tabs_change_the_place() {
+    let plain = || Snapshot::new(vec![row("Go")]).expect("fits");
+    let base = plain().place();
+
+    let with_dialog = plain().with_dialog(Some(confirm("Sure?")));
+    let with_tab = plain().with_tabs(vec![tab("t1", "Results", "https://example.test/r")]);
+    let other_tab = plain().with_tabs(vec![tab("t1", "Other", "https://example.test/o")]);
+    let other_dialog = plain().with_dialog(Some(confirm("Really?")));
+
+    assert_ne!(with_dialog.place(), base);
+    assert_ne!(with_tab.place(), base);
+    assert_ne!(with_tab.place(), other_tab.place());
+    assert_ne!(with_dialog.place(), other_dialog.place());
+    assert_eq!(plain().place(), base);
+}
+
+/// A browser reader keeps its own handle for each row, and marks the rows
+/// that are fields and never targets. Neither is a field of `Element`, so
+/// every reader that builds one by hand is untouched.
+#[test]
+fn node_keys_and_field_only_marks_are_read_per_element() {
+    let snapshot = Snapshot::new(vec![row("Country"), row("Search"), row("Go")])
+        .expect("fits")
+        .with_node_keys(vec![Some(NodeKey::new("12:3")), None, Some(NodeKey::new("14:3"))])
+        .with_field_only(vec![true, false, false]);
+    let handles: Vec<_> = snapshot.refs().map(|(handle, _)| handle).collect();
+
+    assert_eq!(
+        snapshot.node_key(handles[0]).expect("live"),
+        Some(&NodeKey::new("12:3"))
+    );
+    assert_eq!(snapshot.node_key(handles[1]).expect("live"), None);
+    assert_eq!(
+        snapshot.node_key(handles[2]).expect("live").map(NodeKey::as_str),
+        Some("14:3")
+    );
+    assert!(snapshot.is_field_only(handles[0]).expect("live"));
+    assert!(!snapshot.is_field_only(handles[1]).expect("live"));
+}
+
+/// A snapshot read from a phone has neither, and says so.
+#[test]
+fn a_snapshot_without_node_keys_has_none_and_no_field_only_rows() {
+    let snapshot = Snapshot::new(vec![row("Go")]).expect("fits");
+    let handle = snapshot.refs().next().expect("one row").0;
+
+    assert_eq!(snapshot.node_key(handle).expect("live"), None);
+    assert!(!snapshot.is_field_only(handle).expect("live"));
+}
+
+/// Both answers belong to the screen that issued the reference.
+#[test]
+fn node_keys_and_field_only_marks_are_refused_for_a_stale_reference() {
+    let first = Snapshot::new(vec![row("Go")])
+        .expect("fits")
+        .with_node_keys(vec![Some(NodeKey::new("1:1"))])
+        .with_field_only(vec![true]);
+    let stale = first.refs().next().expect("one row").0;
+    let second = Snapshot::new(vec![row("Go")])
+        .expect("fits")
+        .with_node_keys(vec![Some(NodeKey::new("1:1"))])
+        .with_field_only(vec![true]);
+
+    assert!(second.node_key(stale).is_err());
+    assert!(second.is_field_only(stale).is_err());
 }
