@@ -26,6 +26,7 @@ fn sample() -> PageRead {
             opened_by_run: true,
         }],
         current: Some(TabKey::new("tab-2")),
+        unreadable_frames: 1,
         nodes: vec![
             PageNode {
                 frame: "main".into(),

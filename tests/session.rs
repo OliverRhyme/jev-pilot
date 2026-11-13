@@ -547,6 +547,7 @@ fn button_page() -> PageRead {
         accepted_alert: None,
         tabs: Vec::new(),
         current: None,
+        unreadable_frames: 0,
         nodes: vec![PageNode {
             frame: "main".into(),
             role: "button".into(),

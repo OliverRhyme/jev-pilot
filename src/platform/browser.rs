@@ -474,6 +474,12 @@ impl<'a> Page<'a> {
         if let Some(dialog) = &self.read.dialog {
             notices.push(describe_dialog(dialog).into());
         }
+        match self.read.unreadable_frames {
+            0 => {}
+            1 => notices.push("A frame from another site on this page cannot be read".into()),
+            n => notices
+                .push(format!("{n} frames from other sites on this page cannot be read").into()),
+        }
         if let Some(alert) = &self.read.accepted_alert {
             notices.push(format!("An alert was accepted: \"{alert}\"").into());
         }

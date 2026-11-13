@@ -145,7 +145,17 @@ pub struct PageRead {
     /// show the same address and title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<TabKey>,
+    /// How many of the page's frames could not be read, such as a frame from
+    /// another site, which runs in a process of its own. Its nodes are not in
+    /// `nodes`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unreadable_frames: u32,
     /// The page's nodes, in paint order: later ones are drawn over earlier ones.
     #[serde(default)]
     pub nodes: Vec<PageNode>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's `skip_serializing_if` passes a reference.
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }

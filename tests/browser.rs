@@ -93,6 +93,7 @@ fn read(nodes: Vec<PageNode>) -> PageRead {
         accepted_alert: None,
         tabs: Vec::new(),
         current: None,
+        unreadable_frames: 0,
         nodes,
     }
 }
@@ -686,6 +687,31 @@ fn the_driven_tab_is_known_by_its_key() {
 
     let others: Vec<&str> = snapshot.tabs().map(|(_, t)| t.key.as_str()).collect();
     assert_eq!(others, ["t1"]);
+}
+
+/// Rows inside a frame from another site are not offered, so the page says
+/// there is more to it than the rows show.
+#[test]
+fn a_frame_that_could_not_be_read_is_among_the_notices() {
+    let mut page = read(vec![node("button", "Pay", 100.0)]);
+    page.unreadable_frames = 1;
+    assert!(
+        notices(&Browser::default().snapshot_from(&page))
+            .contains(&"A frame from another site on this page cannot be read".to_owned())
+    );
+
+    page.unreadable_frames = 2;
+    assert!(
+        notices(&Browser::default().snapshot_from(&page))
+            .contains(&"2 frames from other sites on this page cannot be read".to_owned())
+    );
+
+    page.unreadable_frames = 0;
+    assert!(
+        !notices(&Browser::default().snapshot_from(&page))
+            .iter()
+            .any(|n| n.contains("frame")),
+    );
 }
 
 #[test]

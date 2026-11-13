@@ -719,6 +719,7 @@ pub fn translate(
         accepted_alert: None,
         tabs: tabs(&targets, owned),
         current: Some(TabKey::new(current)),
+        unreadable_frames: 0,
         nodes: placed.into_iter().map(|p| p.node).collect(),
     })
 }

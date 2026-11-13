@@ -1601,3 +1601,30 @@ fn attaching_to_a_tab_that_does_not_answer_says_a_dialog_may_be_open() {
         "{error}"
     );
 }
+
+/// A frame from another site runs in another process, and its tree cannot be
+/// read through this tab's session. The read says how many were left out, so
+/// the page is not taken for all there is.
+#[test]
+fn a_frame_that_cannot_be_read_is_counted() {
+    let script = Script::new();
+    script_attach(&script);
+    script
+        .on("Page.getFrameTree", signup::load("frame-tree"))
+        .on("Accessibility.getFullAXTree", signup::load("ax-0"));
+    script.answer(
+        "Accessibility.getFullAXTree",
+        Answer::Error("Frame with the given frameId is not found."),
+    );
+    script
+        .on("DOMSnapshot.captureSnapshot", signup::load("snapshot"))
+        .on("Page.getLayoutMetrics", signup::load("layout-metrics"))
+        .on("Target.getTargets", signup::load("targets"));
+    let mut engine =
+        CdpEngine::attach(script.clone(), &TabKey::new(signup::TARGET), false).expect("attaches");
+
+    let read = engine.read().expect("reads the rest");
+
+    assert_eq!(read.unreadable_frames, 1);
+    assert!(read.nodes.iter().all(|n| &*n.frame != signup::CHILD_FRAME));
+}

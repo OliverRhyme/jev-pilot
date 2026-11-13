@@ -525,6 +525,7 @@ impl<W: Wire> CdpEngine<W> {
             accepted_alert: self.accepted_alert.take(),
             tabs,
             current: Some(TabKey::new(&*self.target)),
+            unreadable_frames: 0,
             nodes: Vec::new(),
         })
     }
@@ -538,13 +539,14 @@ impl<W: Wire> CdpEngine<W> {
                 json!({"frameId": &*self.target}),
             )?,
         )];
+        let mut unreadable_frames = 0;
         for frame in read::child_frames(&frame_tree) {
             // A frame in another process has its own target; its tree is not
-            // reachable from this session, and it is left out.
+            // reachable from this session, and it is left out and counted.
             match self.call("Accessibility.getFullAXTree", json!({"frameId": frame})) {
                 Ok(tree) => ax_trees.push((frame.into(), tree)),
                 Err(Stop::Dialog) => return Err(Stop::Dialog),
-                Err(Stop::Failed(_)) => {}
+                Err(Stop::Failed(_)) => unreadable_frames += 1,
             }
         }
         let snapshot = self.read_call(
@@ -566,6 +568,7 @@ impl<W: Wire> CdpEngine<W> {
             self.quiet_for_ms = Some(quiet);
             self.mutations = Some(mutations);
         }
+        read.unreadable_frames = unreadable_frames;
         read.accepted_alert = self.accepted_alert.take();
         read.dialog.clone_from(&self.dialog);
         self.viewport = Some(read.viewport);
