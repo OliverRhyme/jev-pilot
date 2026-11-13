@@ -705,14 +705,7 @@ impl Catalog {
         let mut operations = Options::default();
         let mut supported = Vec::new();
         let under_dialog = snapshot.dialog().is_some();
-        let mut tab_options = Options::default();
-        let mut tabs = Vec::new();
-        for (handle, tab) in snapshot.tabs() {
-            let text = format!("{} — {}", tab.title, tab.url);
-            if let Ok(id) = tab_options.push_described(text.as_str()) {
-                tabs.push((id, handle, text.into_boxed_str()));
-            }
-        }
+        let (tabs, tab_options) = Self::tab_choices(snapshot);
         for operation in platform.operations() {
             // Added by the builders that know what they need: an address
             // supplied, somewhere to go back to, words to type.
@@ -825,6 +818,19 @@ impl Catalog {
             current_url: snapshot.url().map(Box::from),
             field_only,
         }
+    }
+
+    /// The other tabs, described by title and address, as a Choice offers them.
+    fn tab_choices(snapshot: &Snapshot) -> (Vec<(OptionId, TabRef, Box<str>)>, Options) {
+        let mut options = Options::default();
+        let mut tabs = Vec::new();
+        for (handle, tab) in snapshot.tabs() {
+            let text = format!("{} — {}", tab.title, tab.url);
+            if let Ok(id) = options.push_described(text.as_str()) {
+                tabs.push((id, handle, text.into_boxed_str()));
+            }
+        }
+        (tabs, options)
     }
 
     /// How many rows may share a name and still be offered to choose from.

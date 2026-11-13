@@ -223,7 +223,7 @@ fn the_browser_operations_are_named_and_priced() {
         assert_eq!(operation.key(), key);
         assert_eq!(Operation::from_key(key), Some(operation));
         assert!(Operation::all().contains(&operation));
-        assert!(!operation.rubric().is_empty());
+        assert_ne!(operation.rubric(), "");
         assert!(!operation.needs_tap_target());
         assert!(!operation.needs_field());
     }

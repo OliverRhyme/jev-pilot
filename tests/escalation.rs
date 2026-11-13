@@ -783,16 +783,13 @@ fn a_run_getting_nowhere_asks_before_it_ends() {
     assert!(matches!(ending, Ending::Uncertain { .. }), "{ending:?}");
 }
 
-/// A second opinion on a browser run is shown the tabs and addresses on their
-/// own lists, and `switch_tab 1` or `navigate 0` resolve through the same
-/// catalog: the second tab, the first address — and a number past the end is
-/// refused like any other thing the screen does not offer.
-#[test]
-fn a_second_opinion_switches_tab_and_navigates_by_their_own_numbers() {
+/// A browser-shaped page with two other tabs, for the tests below.
+mod web {
+    use super::{Command, Device, Infallible, Operation, Platform, Snapshot};
     use jev_pilot::platform::HierarchyError;
     use jev_pilot::snapshot::{Bounds, Element, Tab, TabKey};
 
-    struct Web;
+    pub struct Web;
     impl Platform for Web {
         fn name(&self) -> &'static str {
             "Web"
@@ -811,7 +808,7 @@ fn a_second_opinion_switches_tab_and_navigates_by_their_own_numbers() {
             unreachable!("these tests build snapshots by hand")
         }
     }
-    struct Browser(Vec<Command>);
+    pub struct Browser(pub Vec<Command>);
     impl Device for Browser {
         type Error = Infallible;
         fn observe(&mut self) -> Result<Snapshot, Infallible> {
@@ -849,6 +846,16 @@ fn a_second_opinion_switches_tab_and_navigates_by_their_own_numbers() {
             Ok(())
         }
     }
+}
+
+/// A second opinion on a browser run is shown the tabs and addresses on their
+/// own lists, and `switch_tab 1` or `navigate 0` resolve through the same
+/// catalog: the second tab, the first address — and a number past the end is
+/// refused like any other thing the screen does not offer.
+#[test]
+fn a_second_opinion_switches_tab_and_navigates_by_their_own_numbers() {
+    use jev_pilot::snapshot::TabKey;
+    use web::{Browser, Web};
 
     let shown = std::rc::Rc::new(RefCell::new(Vec::new()));
     let recorded = std::rc::Rc::clone(&shown);

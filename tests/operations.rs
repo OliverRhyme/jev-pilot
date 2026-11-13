@@ -439,7 +439,8 @@ mod browser {
         let nothing = Catalog::for_screen(&page(), &Web);
         assert!(!offered(&nothing).contains(&Operation::Navigate));
 
-        let only_here = Catalog::for_screen(&page(), &Web).navigating_to(&[here.clone()]);
+        let only_here =
+            Catalog::for_screen(&page(), &Web).navigating_to(std::slice::from_ref(&here));
         assert!(!offered(&only_here).contains(&Operation::Navigate));
 
         let elsewhere = Catalog::for_screen(&page(), &Web).navigating_to(&[here, there.clone()]);
