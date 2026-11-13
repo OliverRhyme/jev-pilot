@@ -106,7 +106,6 @@
    "frame": "main",
    "role": "textbox",
    "name": "Type the repository name",
-   "value": "",
    "states": {
     "focusable": true,
     "editable": true

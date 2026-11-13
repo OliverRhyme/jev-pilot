@@ -22,8 +22,6 @@
    "frame": "main",
    "role": "textbox",
    "name": "Email",
-   "value": "",
-   "description": "you@example.com",
    "states": {
     "focusable": true,
     "editable": true
@@ -39,9 +37,7 @@
   {
    "frame": "main",
    "role": "textbox",
-   "name": "",
-   "value": "",
-   "description": "Full name",
+   "name": "Full name",
    "states": {
     "focusable": true,
     "editable": true
@@ -58,7 +54,6 @@
    "frame": "main",
    "role": "textbox",
    "name": "",
-   "value": "",
    "states": {
     "focusable": true,
     "editable": true
@@ -75,7 +70,6 @@
    "frame": "main",
    "role": "textbox",
    "name": "Password",
-   "value": "hunter2",
    "states": {
     "focusable": true,
     "editable": true
@@ -86,7 +80,8 @@
     "width": 300,
     "height": 32
    },
-   "key": "main:5"
+   "key": "main:5",
+   "protected": true
   },
   {
    "frame": "main",
@@ -170,7 +165,6 @@
     "focusable": true,
     "disabled": true
    },
-   "clickable": true,
    "bounds": {
     "x": 220,
     "y": 430,

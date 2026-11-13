@@ -73,7 +73,9 @@ impl Default for Browser {
 
 /// A browser has no home screen, app switcher, keyboard to put away, or
 /// system gestures beyond Back, so none is offered: a choice the engine
-/// cannot carry out is a choice a model should never be handed.
+/// cannot carry out is a choice a model should never be handed. What it has
+/// instead is addresses, tabs and JavaScript dialogs; the catalog offers each
+/// of those only when the page gives it something to act on.
 const OPERATIONS: &[Operation] = &[
     Operation::Tap,
     Operation::TypeText,
@@ -81,6 +83,10 @@ const OPERATIONS: &[Operation] = &[
     Operation::ScrollUp,
     Operation::ScrollDown,
     Operation::Back,
+    Operation::Navigate,
+    Operation::SwitchTab,
+    Operation::AcceptDialog,
+    Operation::DismissDialog,
     Operation::Wait,
     Operation::Done,
     Operation::Blocked,
@@ -482,23 +488,44 @@ impl<'a> Page<'a> {
 ///
 /// A card with a click listener around a single link would otherwise be two
 /// rows that do the same thing, and the outer one is drawn over the inner.
+///
+/// A label around a field is the same case, told apart differently. Chrome
+/// reports it as a clickable node of its own, drawn under the field, and the
+/// field's box is often a pixel or two taller than the label's text, so the
+/// label does not contain it, and something else (a sticky header) may cross
+/// it too. But the field takes its name from the label, so the label is the
+/// field it overlaps that is called what it is called.
 fn collapse_wrappers(candidates: Vec<Candidate<'_>>) -> Vec<Candidate<'_>> {
-    let controls: Vec<PageBox> = candidates
+    let controls: Vec<&Candidate<'_>> = candidates.iter().filter(|c| !c.wrapper).collect();
+    let wrapped = |c: &Candidate<'_>| {
+        if matches!(lower(c.role).as_str(), "labeltext" | "label") {
+            controls.iter().any(|inner| {
+                inner.node.frame == c.node.frame
+                    && inner.label == c.label
+                    && overlaps(c.bounds, inner.bounds)
+            })
+        } else {
+            controls
+                .iter()
+                .filter(|inner| contains(c.bounds, inner.bounds))
+                .count()
+                == 1
+        }
+    };
+    let keep: Vec<bool> = candidates
         .iter()
-        .filter(|c| !c.wrapper)
-        .map(|c| c.bounds)
+        .map(|c| !c.wrapper || !wrapped(c))
         .collect();
     candidates
         .into_iter()
-        .filter(|c| {
-            !c.wrapper
-                || controls
-                    .iter()
-                    .filter(|inner| contains(c.bounds, **inner))
-                    .count()
-                    != 1
-        })
+        .zip(keep)
+        .filter_map(|(c, keep)| keep.then_some(c))
         .collect()
+}
+
+/// Whether two boxes share any area.
+fn overlaps(a: PageBox, b: PageBox) -> bool {
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
 }
 
 /// Whether `outer` holds `inner`, give or take a pixel of rounding.
@@ -549,27 +576,28 @@ impl Words {
             });
         }
 
-        // A field with no name is called by its placeholder, and says it holds
-        // nothing, as the Android reader does: a run that had typed once took
-        // a form that had reset for one already filled in.
-        let (label, nameless) = if !name.is_empty() {
-            (name, false)
-        } else if let Some(placeholder) = description {
-            (placeholder, false)
-        } else {
+        // Chrome names a field with no label by its placeholder, so such a
+        // field is called by it and says it holds nothing, as the Android
+        // reader does: a run that had typed once took a form that had reset
+        // for one already filled in. A description is never a placeholder.
+        let (label, nameless) = if name.is_empty() {
             (
                 if select { "drop-down" } else { "text field" }.to_owned(),
                 true,
             )
+        } else {
+            (name, false)
         };
         let value = node.value.as_deref().map(squash).filter(|v| !v.is_empty());
         let detail = if select {
             let current = value.unwrap_or_else(|| "nothing selected".to_owned());
             let options: Vec<&str> = node.options.iter().map(AsRef::as_ref).collect();
             Some(format!("{current} (options: {})", options.join(", ")))
-        } else if is_protected(node, &label) {
-            // Said to be full or empty, and never what it holds.
-            Some(if value.is_some() { "filled" } else { "empty" }.to_owned())
+        } else if node.protected {
+            // The read never carries what a password field holds, so whether
+            // it is empty is not known either; saying "empty" would invite
+            // typing it again.
+            Some("contents not shown".to_owned())
         } else {
             match value {
                 Some(value) => Some(value),
@@ -584,21 +612,6 @@ impl Words {
             field_only: select,
         })
     }
-}
-
-/// Whether a field holds a secret.
-///
-/// The page read has no flag for it, so it is judged by what the field says:
-/// a password is named as one, or shows only masking characters.
-fn is_protected(node: &PageNode, label: &str) -> bool {
-    let named = [Some(label), Some(&*node.name), node.description.as_deref()]
-        .into_iter()
-        .flatten()
-        .any(|text| lower(text).contains("password"));
-    let masked = node.value.as_deref().is_some_and(|value| {
-        !value.is_empty() && value.chars().all(|c| matches!(c, '•' | '●' | '·' | '*'))
-    });
-    named || masked
 }
 
 /// A toggle's state in words, when the node has one.
