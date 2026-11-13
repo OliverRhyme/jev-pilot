@@ -1,0 +1,330 @@
+{
+ "url": "https://search.example.test/?q=alike",
+ "title": "Results",
+ "viewport": {
+  "width": 1280.0,
+  "height": 720.0
+ },
+ "nodes": [
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 1",
+   "bounds": {
+    "x": 900,
+    "y": 20,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:1"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 2",
+   "bounds": {
+    "x": 900,
+    "y": 54,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:2"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 3",
+   "bounds": {
+    "x": 900,
+    "y": 88,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:3"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 4",
+   "bounds": {
+    "x": 900,
+    "y": 122,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:4"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 5",
+   "bounds": {
+    "x": 900,
+    "y": 156,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:5"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 6",
+   "bounds": {
+    "x": 900,
+    "y": 190,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:6"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 7",
+   "bounds": {
+    "x": 900,
+    "y": 224,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:7"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 8",
+   "bounds": {
+    "x": 900,
+    "y": 258,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:8"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 9",
+   "bounds": {
+    "x": 900,
+    "y": 292,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:9"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 10",
+   "bounds": {
+    "x": 900,
+    "y": 326,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:10"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 11",
+   "bounds": {
+    "x": 900,
+    "y": 360,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:11"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 12",
+   "bounds": {
+    "x": 900,
+    "y": 394,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:12"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 13",
+   "bounds": {
+    "x": 900,
+    "y": 428,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:13"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 14",
+   "bounds": {
+    "x": 900,
+    "y": 462,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:14"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 15",
+   "bounds": {
+    "x": 900,
+    "y": 496,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:15"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 16",
+   "bounds": {
+    "x": 900,
+    "y": 530,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:16"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 17",
+   "bounds": {
+    "x": 900,
+    "y": 564,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:17"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 18",
+   "bounds": {
+    "x": 900,
+    "y": 598,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:18"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 19",
+   "bounds": {
+    "x": 900,
+    "y": 632,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:19"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "About this result",
+   "states": {
+    "focusable": true
+   },
+   "context": "Result 20",
+   "bounds": {
+    "x": 900,
+    "y": 666,
+    "width": 120,
+    "height": 28
+   },
+   "key": "main:20"
+  }
+ ]
+}

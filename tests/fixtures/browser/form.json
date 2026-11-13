@@ -1,0 +1,183 @@
+{
+ "url": "https://shop.example.test/signup",
+ "title": "Sign up",
+ "viewport": {
+  "width": 1280.0,
+  "height": 720.0
+ },
+ "nodes": [
+  {
+   "frame": "main",
+   "role": "heading",
+   "name": "Create your account",
+   "bounds": {
+    "x": 100,
+    "y": 40,
+    "width": 400,
+    "height": 36
+   },
+   "key": "main:1"
+  },
+  {
+   "frame": "main",
+   "role": "textbox",
+   "name": "Email",
+   "value": "",
+   "description": "you@example.com",
+   "states": {
+    "focusable": true,
+    "editable": true
+   },
+   "bounds": {
+    "x": 100,
+    "y": 100,
+    "width": 300,
+    "height": 32
+   },
+   "key": "main:2"
+  },
+  {
+   "frame": "main",
+   "role": "textbox",
+   "name": "",
+   "value": "",
+   "description": "Full name",
+   "states": {
+    "focusable": true,
+    "editable": true
+   },
+   "bounds": {
+    "x": 100,
+    "y": 150,
+    "width": 300,
+    "height": 32
+   },
+   "key": "main:3"
+  },
+  {
+   "frame": "main",
+   "role": "textbox",
+   "name": "",
+   "value": "",
+   "states": {
+    "focusable": true,
+    "editable": true
+   },
+   "bounds": {
+    "x": 100,
+    "y": 200,
+    "width": 300,
+    "height": 32
+   },
+   "key": "main:4"
+  },
+  {
+   "frame": "main",
+   "role": "textbox",
+   "name": "Password",
+   "value": "hunter2",
+   "states": {
+    "focusable": true,
+    "editable": true
+   },
+   "bounds": {
+    "x": 100,
+    "y": 250,
+    "width": 300,
+    "height": 32
+   },
+   "key": "main:5"
+  },
+  {
+   "frame": "main",
+   "role": "combobox",
+   "name": "Country",
+   "value": "Philippines",
+   "states": {
+    "focusable": true
+   },
+   "options": [
+    "Japan",
+    "Philippines",
+    "Singapore"
+   ],
+   "bounds": {
+    "x": 100,
+    "y": 300,
+    "width": 300,
+    "height": 32
+   },
+   "key": "main:6"
+  },
+  {
+   "frame": "main",
+   "role": "LabelText",
+   "name": "Remember me",
+   "bounds": {
+    "x": 100,
+    "y": 350,
+    "width": 200,
+    "height": 24
+   },
+   "key": "main:7"
+  },
+  {
+   "frame": "main",
+   "role": "checkbox",
+   "name": "Remember me",
+   "states": {
+    "focusable": true,
+    "checked": "checked"
+   },
+   "key": "main:8"
+  },
+  {
+   "frame": "main",
+   "role": "checkbox",
+   "name": "Subscribe",
+   "states": {
+    "focusable": true,
+    "checked": "unchecked"
+   },
+   "bounds": {
+    "x": 100,
+    "y": 380,
+    "width": 200,
+    "height": 24
+   },
+   "key": "main:9"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "Cancel",
+   "states": {
+    "focusable": true
+   },
+   "bounds": {
+    "x": 100,
+    "y": 430,
+    "width": 100,
+    "height": 36
+   },
+   "key": "main:10"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "Submit",
+   "states": {
+    "focusable": true,
+    "disabled": true
+   },
+   "clickable": true,
+   "bounds": {
+    "x": 220,
+    "y": 430,
+    "width": 100,
+    "height": 36
+   },
+   "key": "main:11"
+  }
+ ]
+}
