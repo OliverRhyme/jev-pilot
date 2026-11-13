@@ -61,3 +61,34 @@ fn a_field_showing_only_its_hint_reads_as_empty() {
     assert!(row(empty).contains("empty"), "{}", row(empty));
     assert!(!row(filled).contains("empty"), "{}", row(filled));
 }
+
+/// A password field is marked protected, so what the run types into it is
+/// never repeated in its account of the step. UIAutomator and the helper both
+/// say so with `password="true"`; the field's name says nothing reliable.
+#[test]
+fn an_android_password_field_is_protected() {
+    let xml = r#"<hierarchy>
+<node class="android.widget.EditText" editable="true" clickable="true" text="" hint="Email" bounds="[0,0][400,80]"/>
+<node class="android.widget.EditText" editable="true" clickable="true" password="true" text="" hint="Password" bounds="[0,100][400,180]"/>
+<node class="android.widget.EditText" editable="true" clickable="true" password="false" text="" hint="Password hint" bounds="[0,200][400,280]"/>
+</hierarchy>"#;
+    let snapshot = Android.parse_hierarchy(xml).expect("parses");
+
+    let protected: Vec<(String, bool)> = snapshot
+        .refs()
+        .map(|(handle, element)| {
+            (
+                element.label.to_string(),
+                snapshot.is_protected(handle).expect("fresh"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        protected,
+        [
+            ("Email".to_owned(), false),
+            ("Password".to_owned(), true),
+            ("Password hint".to_owned(), false),
+        ]
+    );
+}
