@@ -65,6 +65,7 @@ fn node(role: &str, name: &str, y: f64) -> PageNode {
         role: role.into(),
         name: name.into(),
         value: None,
+        protected: false,
         description: None,
         states: NodeStates::default(),
         clickable: false,

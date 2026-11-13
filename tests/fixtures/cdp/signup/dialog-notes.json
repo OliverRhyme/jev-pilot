@@ -1,0 +1,19 @@
+{
+ "dialogEvent": {
+  "method": "Page.javascriptDialogOpening",
+  "params": {
+   "url": "http://127.0.0.1:52578/signup",
+   "frameId": "933B271DD0EC81D3402A478AE60B40E5",
+   "message": "Really delete?",
+   "type": "confirm",
+   "hasBrowserHandler": true,
+   "defaultPrompt": ""
+  },
+  "sessionId": "FFD4B6266F3078460198A59E58E2FEA0"
+ },
+ "Page.getFrameTree": "timed out after 3s",
+ "Accessibility.getFullAXTree": "timed out after 3s",
+ "DOMSnapshot.captureSnapshot": "timed out after 3s",
+ "Page.getLayoutMetrics": "timed out after 3s",
+ "DOM.getNodeForLocation": "timed out after 3s"
+}

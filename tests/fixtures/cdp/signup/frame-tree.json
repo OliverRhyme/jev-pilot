@@ -1,0 +1,45 @@
+{
+ "frameTree": {
+  "frame": {
+   "id": "933B271DD0EC81D3402A478AE60B40E5",
+   "loaderId": "8B8548426722B51D715F968EE0591595",
+   "url": "http://127.0.0.1:52578/signup",
+   "domainAndRegistry": "",
+   "securityOrigin": "http://127.0.0.1:52578",
+   "securityOriginDetails": {
+    "isLocalhost": true
+   },
+   "mimeType": "text/html",
+   "adFrameStatus": {
+    "adFrameType": "none"
+   },
+   "secureContextType": "SecureLocalhost",
+   "crossOriginIsolatedContextType": "NotIsolated",
+   "gatedAPIFeatures": []
+  },
+  "childFrames": [
+   {
+    "frame": {
+     "id": "4634BC906F07018102C158CE6AEB76E4",
+     "parentId": "933B271DD0EC81D3402A478AE60B40E5",
+     "loaderId": "254E4EB7FE9855183888BA2BC544190C",
+     "name": "frame",
+     "url": "about:srcdoc",
+     "domainAndRegistry": "",
+     "securityOrigin": "://",
+     "securityOriginDetails": {
+      "isLocalhost": false
+     },
+     "mimeType": "text/html",
+     "adFrameStatus": {
+      "adFrameType": "none",
+      "explanations": []
+     },
+     "secureContextType": "SecureLocalhost",
+     "crossOriginIsolatedContextType": "NotIsolated",
+     "gatedAPIFeatures": []
+    }
+   }
+  ]
+ }
+}
