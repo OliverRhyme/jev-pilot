@@ -138,10 +138,24 @@ pub struct PageRead {
     /// The message of an alert that was accepted since the last read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_alert: Option<Box<str>>,
-    /// The tabs the run owns.
+    /// The tabs the run owns, the driven one among them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tabs: Vec<PageTab>,
+    /// Which of `tabs` this read came from. By key, because two tabs can
+    /// show the same address and title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<TabKey>,
+    /// How many of the page's frames could not be read, such as a frame from
+    /// another site, which runs in a process of its own. Its nodes are not in
+    /// `nodes`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unreadable_frames: u32,
     /// The page's nodes, in paint order: later ones are drawn over earlier ones.
     #[serde(default)]
     pub nodes: Vec<PageNode>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's `skip_serializing_if` passes a reference.
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }

@@ -50,6 +50,9 @@ impl core::error::Error for ReadError {}
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OwnedTabs {
     tabs: Vec<(Box<str>, bool)>,
+    /// Tabs that were open before the run attached: the owner's, never the
+    /// run's, whatever opened them.
+    existing: Vec<Box<str>>,
 }
 
 impl OwnedTabs {
@@ -60,12 +63,26 @@ impl OwnedTabs {
         }
     }
 
-    /// Own a newly reported tab if a tab the run owns opened it, and say
-    /// whether it did.
+    /// Note a tab that was open before the run attached, so it is never
+    /// adopted.
+    pub fn existed(&mut self, target: &str) {
+        if !self.existing.iter().any(|t| &**t == target) {
+            self.existing.push(target.into());
+        }
+    }
+
+    /// Own a newly created tab if a tab the run owns opened it, and say
+    /// whether the run owns it.
     ///
     /// The protocol sets the opener even for a `noopener` link, so a tab the
-    /// run caused is never missed this way.
+    /// run caused is never missed this way. A tab that was open before the run
+    /// attached is never adopted: the protocol reports an opener for those
+    /// too, and an owner's tab opened from the start tab yesterday is not the
+    /// run's.
     pub fn adopt(&mut self, target: &str, opener: Option<&str>) -> bool {
+        if self.existing.iter().any(|t| &**t == target) {
+            return self.owns(target);
+        }
         match opener {
             Some(opener) if self.owns(opener) => {
                 self.start_on(target, true);
@@ -701,6 +718,8 @@ pub fn translate(
         dialog: None,
         accepted_alert: None,
         tabs: tabs(&targets, owned),
+        current: Some(TabKey::new(current)),
+        unreadable_frames: 0,
         nodes: placed.into_iter().map(|p| p.node).collect(),
     })
 }

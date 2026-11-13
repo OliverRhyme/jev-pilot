@@ -328,6 +328,7 @@ pub struct Snapshot {
     // whose reader has no such thing to say.
     node_keys: Box<[Option<NodeKey>]>,
     field_only: Box<[bool]>,
+    protected: Box<[bool]>,
     elements: Box<[Element]>,
 }
 
@@ -356,6 +357,7 @@ impl Snapshot {
             dialog: None,
             node_keys: Box::default(),
             field_only: Box::default(),
+            protected: Box::default(),
             elements: elements.into_boxed_slice(),
         })
     }
@@ -497,6 +499,32 @@ impl Snapshot {
         marks.truncate(self.elements.len());
         self.field_only = marks.into_boxed_slice();
         self
+    }
+
+    /// Note which rows are password fields, in the rows' order.
+    ///
+    /// What is typed into one is never repeated, not even in the run's own
+    /// account of what it did, which goes to the model with the next step.
+    /// Rows beyond the end of `marks` are not password fields.
+    #[must_use]
+    pub fn with_protected(mut self, mut marks: Vec<bool>) -> Self {
+        marks.truncate(self.elements.len());
+        self.protected = marks.into_boxed_slice();
+        self
+    }
+
+    /// Whether the row is a password field.
+    ///
+    /// # Errors
+    /// Returns [`StaleRef`] when the reference was issued by a different
+    /// observation.
+    pub fn is_protected(&self, handle: ElementRef) -> Result<bool, StaleRef> {
+        self.resolve(handle)?;
+        Ok(self
+            .protected
+            .get(usize::from(handle.index))
+            .copied()
+            .unwrap_or(false))
     }
 
     /// The reader's own handle for the row, when it gave one.

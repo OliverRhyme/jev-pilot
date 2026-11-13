@@ -475,9 +475,11 @@ Chrome in their usual places. `npx @puppeteer/browsers install chrome@stable`
 installs Chrome for Testing and prints its path. `--headless` runs it without a
 window.
 
-If a fresh run is killed before it can clean up, its profile is removed the
-next time a fresh run starts. When an MCP client stops a run, the server
-removes it at once, along with the browser.
+Ctrl-C closes a fresh run's browser and deletes its profile before the run
+exits; in attach mode it only lets go of Chrome and closes nothing. If a fresh
+run is killed outright, its profile is removed the next time a fresh run
+starts. When an MCP client stops a run, the server removes it at once, along
+with the browser.
 
 **`--browser attach`** drives the Chrome you already have open, signed in as
 you. Turn on remote debugging first, at `chrome://inspect/#remote-debugging`
@@ -496,6 +498,8 @@ you. Turn on remote debugging first, at `chrome://inspect/#remote-debugging`
   under System Settings > Privacy & Security > Files & Folders.
 - `--channel beta|dev|canary` attaches to another channel's Chrome, and
   `--endpoint ws://…` skips finding it.
+- `--sites-only` lists your tabs by id and site alone, with no titles or
+  paths. The MCP server passes it on every attach call.
 
 ### Choosing the tab, and where the run may go
 
@@ -541,7 +545,10 @@ run with `--url` offers it whenever a supplied address is not the current one.
 In attach mode the page text of the tab being driven goes to TypeSafe with
 each step, exactly as screen text does on a phone, and that tab may be signed
 in to your accounts. Only the tabs the run started on or opened are described;
-your other tabs never are. Password values are never read. Words you supply
+your other tabs never are. Over MCP, `devices` in attach mode and the error for
+a tab that could not be chosen name each tab by its id and its site alone
+(github.com), with no title and no path; the command line, run by hand in a
+terminal, lists them in full. Password values are never read. Words you supply
 are typed only after the endpoint has shown it is Chrome, and page script runs
 only for the engine's own fixed jobs (choosing a `<select>` option, watching
 for the page to go quiet), never with text from the model.
@@ -566,8 +573,10 @@ it through a derived `Debug` in a panic message or error report.
 `ureq`. The `mcp` feature adds `rmcp`, `tokio` and `schemars` for the server, and
 nothing else uses them. The `browser` feature adds `tungstenite`, with no TLS and
 no async runtime: every browser endpoint is a local websocket, and the DevTools
-messages are written by hand rather than generated for the whole protocol. No Appium, no WebDriverAgent client, no `mobile-use`. The
-Android adapter shells out to `adb` directly.
+messages are written by hand rather than generated for the whole protocol. It
+also adds `ctrlc`, so that Ctrl-C closes a fresh browser and removes its
+profile. No Appium, no WebDriverAgent client, no `mobile-use`. The Android
+adapter shells out to `adb` directly.
 
 Turn `http` off and the crate builds requests for you to send with whatever
 client you already have; `Judge` is the seam, and the loop is tested against a

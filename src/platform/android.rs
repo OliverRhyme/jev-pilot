@@ -55,7 +55,8 @@ impl Platform for Android {
         // decided to type into, and typing goes through the field. Offered as
         // targets they drown everything — 52 of 54 nodes in one measured case
         // — and flatten the judgement across them.
-        let elements = document
+        let mut protected = Vec::new();
+        let elements: Vec<Element> = document
             .descendants()
             .filter(|node| !within_input_method(node))
             .filter(|node| is_actionable(node))
@@ -79,16 +80,21 @@ impl Platform for Android {
                     },
                     None => return None,
                 };
-                Some(Element {
+                let element = Element {
                     label,
                     detail,
                     editable,
                     bounds: parse_bounds(node.attribute("bounds")?)?,
-                })
+                };
+                // UIAutomator and the helper both mark a password field, and
+                // what is typed into one is never repeated to the model.
+                protected.push(node.attribute("password") == Some("true"));
+                Some(element)
             })
             .collect();
 
         Snapshot::new(elements)
+            .map(|snapshot| snapshot.with_protected(protected))
             .map(|snapshot| snapshot.with_keyboard_open(shows_input_method(&document)))
             .map(|snapshot| snapshot.in_app(app_of(&document)))
             .map(|snapshot| snapshot.saying(notices_of(&document)))

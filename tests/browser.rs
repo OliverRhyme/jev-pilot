@@ -92,6 +92,8 @@ fn read(nodes: Vec<PageNode>) -> PageRead {
         dialog: None,
         accepted_alert: None,
         tabs: Vec::new(),
+        current: None,
+        unreadable_frames: 0,
         nodes,
     }
 }
@@ -308,6 +310,24 @@ fn a_password_value_is_never_read() {
         rows(&snapshot),
         [("PIN".to_string(), Some("contents not shown".to_string()))]
     );
+}
+
+/// The snapshot carries which rows are password fields, so the run's own
+/// account of what it typed can leave the words out.
+#[test]
+fn a_protected_field_is_marked_in_the_snapshot() {
+    let mut secret = node("textbox", "Password", 100.0);
+    secret.protected = true;
+    secret.states.editable = true;
+    let mut name = node("textbox", "Name", 200.0);
+    name.states.editable = true;
+    let snapshot = Browser::default().snapshot_from(&read(vec![secret, name]));
+
+    let marks: Vec<bool> = snapshot
+        .refs()
+        .map(|(handle, _)| snapshot.is_protected(handle).expect("current"))
+        .collect();
+    assert_eq!(marks, [true, false]);
 }
 
 /// The engine says which fields are passwords. A field merely named like one
@@ -665,6 +685,51 @@ fn the_other_tabs_are_carried_and_the_driven_one_is_not() {
         .collect();
     assert_eq!(others, [("tab-2".to_string(), "Page B".to_string())]);
     assert_eq!(snapshot.app(), Some("https://example.test"));
+}
+
+/// Two tabs can show the same page; the driven one is told apart by its key,
+/// not by its address and title.
+#[test]
+fn the_driven_tab_is_known_by_its_key() {
+    let tab = |key: &str| PageTab {
+        key: TabKey::new(key),
+        title: "Example".into(),
+        url: "https://example.test/".into(),
+        opened_by_run: true,
+    };
+    let mut page = read(vec![]);
+    page.tabs = vec![tab("t1"), tab("t2")];
+    page.current = Some(TabKey::new("t2"));
+
+    let snapshot = Browser::default().snapshot_from(&page);
+
+    let others: Vec<&str> = snapshot.tabs().map(|(_, t)| t.key.as_str()).collect();
+    assert_eq!(others, ["t1"]);
+}
+
+/// Rows inside a frame from another site are not offered, so the page says
+/// there is more to it than the rows show.
+#[test]
+fn a_frame_that_could_not_be_read_is_among_the_notices() {
+    let mut page = read(vec![node("button", "Pay", 100.0)]);
+    page.unreadable_frames = 1;
+    assert!(
+        notices(&Browser::default().snapshot_from(&page))
+            .contains(&"A frame from another site on this page cannot be read".to_owned())
+    );
+
+    page.unreadable_frames = 2;
+    assert!(
+        notices(&Browser::default().snapshot_from(&page))
+            .contains(&"2 frames from other sites on this page cannot be read".to_owned())
+    );
+
+    page.unreadable_frames = 0;
+    assert!(
+        !notices(&Browser::default().snapshot_from(&page))
+            .iter()
+            .any(|n| n.contains("frame")),
+    );
 }
 
 #[test]

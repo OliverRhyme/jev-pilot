@@ -124,6 +124,7 @@ impl Browser {
         let mut elements = Vec::with_capacity(kept.len());
         let mut keys = Vec::with_capacity(kept.len());
         let mut field_only = Vec::with_capacity(kept.len());
+        let mut protected = Vec::with_capacity(kept.len());
         for row in kept {
             elements.push(Element {
                 label: row.label.into(),
@@ -133,6 +134,7 @@ impl Browser {
             });
             keys.push(Some(row.key.clone()));
             field_only.push(row.field_only);
+            protected.push(row.node.protected);
         }
 
         // Cut to `MAX_ELEMENTS` above, so the snapshot cannot refuse.
@@ -146,6 +148,7 @@ impl Browser {
             .with_dialog(read.dialog.clone())
             .with_node_keys(keys)
             .with_field_only(field_only)
+            .with_protected(protected)
     }
 }
 
@@ -474,6 +477,12 @@ impl<'a> Page<'a> {
         if let Some(dialog) = &self.read.dialog {
             notices.push(describe_dialog(dialog).into());
         }
+        match self.read.unreadable_frames {
+            0 => {}
+            1 => notices.push("A frame from another site on this page cannot be read".into()),
+            n => notices
+                .push(format!("{n} frames from other sites on this page cannot be read").into()),
+        }
         if let Some(alert) = &self.read.accepted_alert {
             notices.push(format!("An alert was accepted: \"{alert}\"").into());
         }
@@ -643,17 +652,11 @@ fn describe_dialog(dialog: &Dialog) -> String {
 /// The tabs the run owns other than the one this read came from.
 ///
 /// The engine lists every tab it owns, the driven one included, and only the
-/// others can be switched to. The driven one is the tab showing this address
-/// and title.
+/// others can be switched to. The driven one is named by its key.
 fn other_tabs(read: &PageRead) -> Vec<Tab> {
-    let mut skipped = false;
     read.tabs
         .iter()
-        .filter(|tab| {
-            let current = !skipped && tab.url == read.url && tab.title == read.title;
-            skipped |= current;
-            !current
-        })
+        .filter(|tab| read.current.as_ref() != Some(&tab.key))
         .map(|tab| Tab {
             key: tab.key.clone(),
             title: tab.title.clone(),

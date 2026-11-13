@@ -182,7 +182,8 @@ pub fn read_active_port(dir: &Path) -> Result<ActivePort, AttachError> {
     ActivePort::parse(&text)
 }
 
-/// Whether a `Browser.getVersion` reply comes from Chrome or Chromium.
+/// Whether a `Browser.getVersion` reply comes from Chrome, Chromium, or a
+/// browser built on Chromium that speaks the same protocol (Edge).
 ///
 /// Checked before anything is typed: a stale file can point at a port some
 /// other program now holds.
@@ -192,9 +193,15 @@ pub fn is_chrome(version: &Value) -> bool {
         .get("product")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    ["Chrome/", "HeadlessChrome/", "Chromium/"]
-        .iter()
-        .any(|p| product.starts_with(p))
+    [
+        "Chrome/",
+        "HeadlessChrome/",
+        "Chromium/",
+        "Edg/",
+        "HeadlessEdg/",
+    ]
+    .iter()
+    .any(|p| product.starts_with(p))
 }
 
 /// Why a run could not attach to Chrome.
@@ -284,11 +291,13 @@ impl core::fmt::Display for AttachError {
             Self::Rejected { status } => write!(
                 f,
                 "Chrome refused the connection ({status}): Cancel was chosen (Enter chooses it), \
-                 or Chrome has no open window, and then refuses without asking. \
-                 Open a window and run again"
+                 or Chrome has no open window, and then refuses without asking. It is not \
+                 retried, because each attempt asks again; whether to try once more, with a \
+                 window open, is the owner's call"
             ),
             Self::TimedOut => f.write_str(
-                "Chrome's prompt timed out: Allow was not clicked. Run again and click Allow",
+                "Chrome's prompt timed out: Allow was not clicked. It is not retried, because \
+                 each attempt asks again; whether to try once more is the owner's call",
             ),
             Self::NotChrome { product } => write!(
                 f,
@@ -311,21 +320,59 @@ pub enum TabChoice {
     Ambiguous(Vec<PageTab>),
 }
 
-impl core::fmt::Display for TabChoice {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl TabChoice {
+    /// What went wrong, with the tabs listed in full or, with `sites_only`,
+    /// by id and site alone.
+    #[must_use]
+    pub fn listing(&self, sites_only: bool) -> String {
         let (lead, tabs) = match self {
-            Self::None(tabs) if tabs.is_empty() => {
-                return f.write_str("Chrome has no tabs open");
-            }
+            Self::None(tabs) if tabs.is_empty() => return "Chrome has no tabs open".to_owned(),
             Self::None(tabs) => ("no tab matches --tab; the tabs are:", tabs),
             Self::Ambiguous(tabs) => ("more than one tab matches; name one with --tab:", tabs),
         };
-        f.write_str(lead)?;
+        let mut said = lead.to_owned();
         for tab in tabs {
-            write!(f, "\n  {}  {}  {}", tab.key.as_str(), tab.title, tab.url)?;
+            said.push_str("\n  ");
+            said.push_str(&tab_line(tab, sites_only));
         }
-        Ok(())
+        said
     }
+}
+
+impl core::fmt::Display for TabChoice {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.listing(false))
+    }
+}
+
+/// One tab as a listing shows it: its id, title and address, or with
+/// `sites_only` its id and site.
+#[must_use]
+pub fn tab_line(tab: &PageTab, sites_only: bool) -> String {
+    if sites_only {
+        format!("{}  {}", tab.key.as_str(), site_of(&tab.url))
+    } else {
+        format!("{}  {}  {}", tab.key.as_str(), tab.title, tab.url)
+    }
+}
+
+/// The site an address belongs to: its host, and its port if it names one.
+///
+/// The path, query and fragment are dropped, and so is a sign-in written
+/// into the address. An address with no host keeps only its scheme
+/// (`file:`, `about:`), because a `data:` address is its own contents.
+#[must_use]
+pub fn site_of(url: &str) -> &str {
+    if let Some((_, rest)) = url.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let host = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
+        if !host.is_empty() {
+            return host;
+        }
+    }
+    url.find(':').map_or("", |colon| &url[..=colon])
 }
 
 impl core::error::Error for TabChoice {}

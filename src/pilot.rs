@@ -2298,6 +2298,11 @@ fn recount(act: &Act, snapshot: &Snapshot) -> String {
         Act::SwipeElement { target, direction } => {
             format!("Swiped {} {direction:?}", named(*target))
         }
+        // A password's words are not repeated even here: this account goes to
+        // the model with the next step.
+        Act::TypeText { into, .. } if snapshot.is_protected(*into).unwrap_or(false) => {
+            format!("Typed the supplied text into {}", named(*into))
+        }
         Act::TypeText { into, text } => format!("Typed {text:?} into {}", named(*into)),
         Act::Scroll(direction) => format!("Scrolled {direction:?}"),
         Act::System(gesture) => format!("Pressed {gesture:?}"),

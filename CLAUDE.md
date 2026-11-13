@@ -98,6 +98,9 @@ screen, and the loop does not know which it is driving.
   and gives two or three look-alikes their context.
 - **`browser`** (feature `browser`): the engine seam and its Chrome DevTools Protocol engine,
   written by hand over one blocking `tungstenite` websocket (no CDP crate, no async runtime).
+  The feature also brings `ctrlc`: on Ctrl-C, `main.rs` hands what to undo
+  (`launch::Interrupted`) to a handler thread, because the run may be blocked on the browser or
+  the model. A fresh run's browser is closed and its profile removed; an attach run only detaches.
   - `engine`: the `BrowserEngine` trait (read, perform a `BrowserCommand`, outcome, tabs) and
     `CdpEngine`. Clicks are checked when made: same document as the read (node keys carry a
     document number), scrolled into view if off screen, and hit-tested with

@@ -426,6 +426,7 @@ fn looking_at_an_attached_browser_waits_forty_seconds_for_allow() {
             "observe",
             "--browser",
             "attach",
+            "--sites-only",
             "--tab",
             "github.com",
             "--allow-wait",
@@ -434,7 +435,14 @@ fn looking_at_an_attached_browser_waits_forty_seconds_for_allow() {
     );
     assert_eq!(
         line("devices", &json!({"browser": {"mode": "attach"}})),
-        ["devices", "--browser", "attach", "--allow-wait", "40"]
+        [
+            "devices",
+            "--browser",
+            "attach",
+            "--sites-only",
+            "--allow-wait",
+            "40"
+        ]
     );
     assert_eq!(
         line(
@@ -558,4 +566,60 @@ fn stopping_a_run_clears_the_fresh_profile_it_left() {
     assert!(prefix_only.exists(), "process 42420 is not process 4242");
     drop(held);
     let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn a_browser_endpoint_must_be_local() {
+    let refused = invocation(
+        "observe",
+        &json!({"browser": {"mode": "attach", "endpoint": "ws://10.0.0.5:9222/devtools/browser/x"}}),
+    )
+    .expect_err("refused");
+    assert!(refused.contains("endpoint"), "{refused}");
+    assert!(
+        invocation(
+            "observe",
+            &json!({"browser": {"mode": "attach", "endpoint": "ws://127.0.0.1:9222/devtools/browser/x"}}),
+        )
+        .is_ok()
+    );
+}
+
+/// Over MCP the owner's tabs reach another agent, so every attach call asks
+/// the command line to name them by site alone. A fresh browser's tabs are the
+/// run's own.
+#[test]
+fn an_attached_browser_lists_its_tabs_by_site_over_mcp() {
+    for tool in ["devices", "observe"] {
+        let args = line(tool, &json!({"browser": {"mode": "attach"}}));
+        assert!(
+            args.contains(&"--sites-only".to_owned()),
+            "{tool}: {args:?}"
+        );
+        let args = line(tool, &json!({"browser": {"mode": "fresh"}}));
+        assert!(
+            !args.contains(&"--sites-only".to_owned()),
+            "{tool}: {args:?}"
+        );
+    }
+    let run = line(
+        "start_run",
+        &json!({"goal": "Star the repository", "browser": {"mode": "attach", "tab": "github"}}),
+    );
+    assert!(run.contains(&"--sites-only".to_owned()), "{run:?}");
+}
+
+/// The README and the server's guidance say the same thing about tab
+/// listings, word for word.
+#[test]
+fn the_readme_and_the_guidance_agree_on_tab_listings() {
+    let readme = include_str!("../README.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        readme.contains(jev_pilot::mcp::TABS_OVER_MCP),
+        "README lacks: {}",
+        jev_pilot::mcp::TABS_OVER_MCP
+    );
 }

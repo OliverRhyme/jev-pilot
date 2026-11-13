@@ -117,6 +117,9 @@ mod scripted {
         answers: Rc<RefCell<HashMap<String, VecDeque<Answer>>>>,
         sent: Rc<RefCell<Vec<Value>>>,
         inbox: Rc<RefCell<VecDeque<String>>>,
+        /// What crossed the wire, in order: `sent <method>` for a request and
+        /// `received <method>` for an event the engine took.
+        order: Rc<RefCell<Vec<String>>>,
     }
 
     impl Script {
@@ -147,6 +150,11 @@ mod scripted {
         /// Forget what was sent so far.
         pub fn clear_sent(&self) {
             self.sent.borrow_mut().clear();
+        }
+
+        /// Requests sent and events taken, in the order they crossed.
+        pub fn order(&self) -> Vec<String> {
+            self.order.borrow().clone()
         }
 
         /// Everything sent so far.
@@ -202,6 +210,7 @@ mod scripted {
             let message: Value = serde_json::from_str(text).expect("the engine sends JSON");
             let method = message["method"].as_str().unwrap_or_default().to_owned();
             let id = message["id"].clone();
+            self.order.borrow_mut().push(format!("sent {method}"));
             self.sent.borrow_mut().push(message);
             let answer = self
                 .answers
@@ -214,7 +223,14 @@ mod scripted {
         }
 
         fn receive(&mut self, _timeout: Duration) -> Result<Option<String>, WireError> {
-            Ok(self.inbox.borrow_mut().pop_front())
+            let next = self.inbox.borrow_mut().pop_front();
+            if let Some(text) = &next {
+                let message: Value = serde_json::from_str(text).unwrap_or_default();
+                if let Some(method) = message["method"].as_str() {
+                    self.order.borrow_mut().push(format!("received {method}"));
+                }
+            }
+            Ok(next)
         }
     }
 }
@@ -551,6 +567,7 @@ fn a_node_takes_the_nearest_heading_or_landmark_as_context() {
 #[test]
 fn only_run_owned_tabs_are_listed() {
     let read = signup_read();
+    assert_eq!(read.current, Some(TabKey::new(signup::TARGET)));
 
     assert_eq!(
         read.tabs,
@@ -584,6 +601,7 @@ const SESSION: &str = "S1";
 /// The replies attaching to the sign-up tab gets.
 fn script_attach(script: &Script) {
     script
+        .on("Target.getTargets", signup::load("targets"))
         .on("Target.setDiscoverTargets", json!({}))
         .on("Target.attachToTarget", json!({"sessionId": SESSION}))
         .on("Page.enable", json!({}));
@@ -682,6 +700,7 @@ fn attaching_discovers_tabs_and_enables_page_on_a_flat_session() {
     assert_eq!(
         without_ids(script.sent()),
         [
+            json!({"method": "Target.getTargets", "params": {}}),
             json!({"method": "Target.setDiscoverTargets", "params": {"discover": true}}),
             json!({"method": "Target.attachToTarget", "params": {"targetId": signup::TARGET, "flatten": true}}),
             json!({"method": "Page.enable", "params": {}, "sessionId": SESSION}),
@@ -1090,6 +1109,7 @@ fn a_password_field_does_not_have_its_value_repeated() {
 fn a_select_is_set_by_its_label_without_a_tap() {
     let (script, mut engine) = engine_after_read();
     script.on("DOM.describeNode", json!({"node": {"nodeName": "SELECT"}}));
+    script_select_checks(&script);
     script.on(
         "DOM.resolveNode",
         json!({"object": {"objectId": "country"}}),
@@ -1127,6 +1147,7 @@ fn a_select_is_set_by_its_label_without_a_tap() {
 fn a_select_with_no_single_matching_option_lists_the_options() {
     let (script, mut engine) = engine_after_read();
     script.on("DOM.describeNode", json!({"node": {"nodeName": "SELECT"}}));
+    script_select_checks(&script);
     script.on(
         "DOM.resolveNode",
         json!({"object": {"objectId": "country"}}),
@@ -1249,6 +1270,27 @@ fn navigate_loads_the_address_and_reports_where_it_went() {
         script.params_of("Page.createIsolatedWorld").len(),
         1,
         "the new document needs a new world for its watch"
+    );
+    // Nothing more is asked of the page until its load has been seen: the
+    // next request after the navigation comes after the load event.
+    let order = script.order();
+    let navigated = order
+        .iter()
+        .position(|e| e == "sent Page.navigate")
+        .expect("navigated");
+    let next_request = navigated
+        + 1
+        + order[navigated + 1..]
+            .iter()
+            .position(|e| e.starts_with("sent "))
+            .expect("the page is asked something after navigating");
+    let loaded = order
+        .iter()
+        .position(|e| e == "received Page.loadEventFired")
+        .expect("the load is seen");
+    assert!(
+        loaded < next_request,
+        "the page is asked nothing more until it has loaded: {order:?}"
     );
 }
 
@@ -1410,4 +1452,216 @@ fn a_dialogs_nodes_follow_it_even_when_painted_later() {
     let names: Vec<&str> = read.nodes.iter().map(|n| &*n.name).collect();
     assert_eq!(names, ["Delete file", "Delete", "Behind"]);
     assert!(read.nodes[0].states.modal);
+}
+
+/// The owner's tabs are never the run's. A tab that was already open when the
+/// run attached stays the owner's even when the protocol reports the start
+/// tab as its opener, whether it is reported again as discovery starts or
+/// later as it changes.
+#[test]
+fn a_tab_open_before_attaching_is_never_adopted() {
+    const OWNERS: &str = "E8DD778F620BA08560C3270923315360";
+    let owners_tab = |method: &str| {
+        json!({
+            "method": method,
+            "params": {"targetInfo": {"targetId": OWNERS, "type": "page", "title": "Bank", "url": "https://bank.example.test/", "attached": false, "openerId": signup::TARGET, "canAccessOpener": false}},
+        })
+    };
+    let script = Script::new();
+    script.on("Target.getTargets", signup::load("targets"));
+    script.answer(
+        "Target.setDiscoverTargets",
+        Answer::EventsThen(
+            vec![owners_tab("Target.targetCreated")],
+            Box::new(Answer::Result(json!({}))),
+        ),
+    );
+    script.on("Target.attachToTarget", json!({"sessionId": SESSION}));
+    script.on("Page.enable", json!({}));
+    script_read(&script);
+    let mut engine =
+        CdpEngine::attach(script.clone(), &TabKey::new(signup::TARGET), false).expect("attaches");
+    engine.read().expect("reads");
+
+    script_press_email(
+        &script,
+        Answer::EventsThen(
+            vec![owners_tab("Target.targetInfoChanged")],
+            Box::new(Answer::Result(json!({}))),
+        ),
+    );
+    script_settle(&script, 3);
+    engine
+        .perform(&BrowserCommand::Press {
+            at: Point { x: 120, y: 19 },
+            node: email(),
+        })
+        .expect("performs");
+
+    assert_ne!(engine.outcome(), Some("opened a new tab: Bank"));
+    script_read(&script);
+    let read = engine.read().expect("reads");
+    assert!(
+        read.tabs.iter().all(|tab| tab.key.as_str() != OWNERS),
+        "the owner's tab is not the run's: {:?}",
+        read.tabs
+    );
+}
+
+/// A tab the run's own tab opens after attaching is the run's.
+#[test]
+fn a_tab_created_after_attaching_by_the_start_tab_is_adopted() {
+    let (script, mut engine) = engine_after_read();
+    script_press_email(
+        &script,
+        Answer::EventsThen(
+            vec![
+                json!({"method": "Target.targetCreated", "params": {"targetInfo": {"targetId": "T9", "type": "page", "title": "Receipt", "url": "https://example.test/receipt", "attached": false, "openerId": signup::TARGET}}}),
+            ],
+            Box::new(Answer::Result(json!({}))),
+        ),
+    );
+    script_settle(&script, 3);
+
+    engine
+        .perform(&BrowserCommand::Press {
+            at: Point { x: 120, y: 19 },
+            node: email(),
+        })
+        .expect("performs");
+
+    assert_eq!(engine.outcome(), Some("opened a new tab: Receipt"));
+}
+
+/// The click-time checks of the country drop-down: the same document as the
+/// read, and the drop-down itself at the point.
+fn script_select_checks(script: &Script) {
+    script.on("Page.getFrameTree", signup::load("frame-tree"));
+    script.on("DOM.getNodeForLocation", json!({"backendNodeId": 4}));
+}
+
+/// A drop-down is checked as a tap is before its option is chosen: on a page
+/// that has been replaced, the same node id may be another control.
+#[test]
+fn a_select_on_a_page_that_changed_is_not_set() {
+    let (script, mut engine) = engine_after_read();
+    script.on("DOM.describeNode", json!({"node": {"nodeName": "SELECT"}}));
+    let mut tree = signup::load("frame-tree");
+    tree["frameTree"]["frame"]["loaderId"] = json!("ANOTHER-LOADER");
+    script.on("Page.getFrameTree", tree);
+    script_settle(&script, 3);
+
+    engine
+        .perform(&BrowserCommand::Fill {
+            at: Point { x: 538, y: 19 },
+            node: NodeKey::new("4:1"),
+            text: "spain".into(),
+        })
+        .expect("a refusal is not an error");
+
+    assert_eq!(
+        script.params_of("Runtime.callFunctionOn"),
+        Vec::<Value>::new()
+    );
+    assert_eq!(
+        script.params_of("DOM.getNodeForLocation"),
+        Vec::<Value>::new()
+    );
+    assert_eq!(
+        engine.outcome(),
+        Some("nothing was chosen: the page has changed since it was read")
+    );
+}
+
+#[test]
+fn a_covered_select_is_not_set() {
+    let (script, mut engine) = engine_after_read();
+    script.on("DOM.describeNode", json!({"node": {"nodeName": "SELECT"}}));
+    script.on("Page.getFrameTree", signup::load("frame-tree"));
+    script.on("DOM.getNodeForLocation", json!({"backendNodeId": 90}));
+    script.on("DOM.resolveNode", json!({"object": {"objectId": "row"}}));
+    script.on("DOM.resolveNode", json!({"object": {"objectId": "hit"}}));
+    script.on(
+        "Runtime.callFunctionOn",
+        json!({"result": {"type": "object", "value": {"inside": false, "what": "div \u{201c}Accept all\u{201d}"}}}),
+    );
+    script_settle(&script, 3);
+
+    engine
+        .perform(&BrowserCommand::Fill {
+            at: Point { x: 538, y: 19 },
+            node: NodeKey::new("4:1"),
+            text: "spain".into(),
+        })
+        .expect("a refusal is not an error");
+
+    let scripts: Vec<String> = script
+        .params_of("Runtime.callFunctionOn")
+        .iter()
+        .map(|p| {
+            p["functionDeclaration"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        scripts.iter().all(|f| !f.contains("selectedIndex")),
+        "the option is not chosen: {scripts:?}"
+    );
+    assert_eq!(
+        engine.outcome(),
+        Some("nothing was chosen: div \u{201c}Accept all\u{201d} covers it")
+    );
+}
+
+/// Chrome does not report a dialog that was open before the run attached,
+/// and the tab answers nothing under it, not even enabling Page. Attaching
+/// then says what is likely, as a read does.
+#[test]
+fn attaching_to_a_tab_that_does_not_answer_says_a_dialog_may_be_open() {
+    let script = Script::new();
+    script
+        .on("Target.getTargets", signup::load("targets"))
+        .on("Target.setDiscoverTargets", json!({}))
+        .on("Target.attachToTarget", json!({"sessionId": SESSION}));
+    script.answer("Page.enable", Answer::Silence);
+
+    let Err(error) = CdpEngine::attach(script, &TabKey::new(signup::TARGET), false) else {
+        panic!("the tab does not answer");
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("a JavaScript dialog may be open in this tab"),
+        "{error}"
+    );
+}
+
+/// A frame from another site runs in another process, and its tree cannot be
+/// read through this tab's session. The read says how many were left out, so
+/// the page is not taken for all there is.
+#[test]
+fn a_frame_that_cannot_be_read_is_counted() {
+    let script = Script::new();
+    script_attach(&script);
+    script
+        .on("Page.getFrameTree", signup::load("frame-tree"))
+        .on("Accessibility.getFullAXTree", signup::load("ax-0"));
+    script.answer(
+        "Accessibility.getFullAXTree",
+        Answer::Error("Frame with the given frameId is not found."),
+    );
+    script
+        .on("DOMSnapshot.captureSnapshot", signup::load("snapshot"))
+        .on("Page.getLayoutMetrics", signup::load("layout-metrics"))
+        .on("Target.getTargets", signup::load("targets"));
+    let mut engine =
+        CdpEngine::attach(script.clone(), &TabKey::new(signup::TARGET), false).expect("attaches");
+
+    let read = engine.read().expect("reads the rest");
+
+    assert_eq!(read.unreadable_frames, 1);
+    assert!(read.nodes.iter().all(|n| &*n.frame != signup::CHILD_FRAME));
 }

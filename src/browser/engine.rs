@@ -267,6 +267,21 @@ impl<W: Wire> CdpEngine<W> {
             world: None,
             seen: Seen::default(),
         };
+        // Listed before discovery starts, because discovery reports every tab
+        // already open as if it had just been created, opener and all.
+        let open_already = engine.browser_call("Target.getTargets", json!({}))?;
+        for info in open_already
+            .get("targetInfos")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = info.get("targetId").and_then(Value::as_str)
+                && id != tab.as_str()
+            {
+                engine.owned.existed(id);
+            }
+        }
         engine.browser_call("Target.setDiscoverTargets", json!({"discover": true}))?;
         engine.owned.start_on(tab.as_str(), opened_by_run);
         engine.attach_session(tab.as_str())?;
@@ -329,10 +344,15 @@ impl<W: Wire> CdpEngine<W> {
         self.world = None;
         self.dialog = None;
         self.viewport = None;
+        // A tab under a dialog that opened before the run attached answers
+        // nothing, Page.enable included, and Chrome never reports the dialog.
         self.call("Page.enable", json!({}))
             .map_err(|stop| match stop {
+                Stop::Dialog
+                | Stop::Failed(EngineError::Transport(TransportError::Timeout { .. })) => {
+                    EngineError::ReadTimedOut
+                }
                 Stop::Failed(e) => e,
-                Stop::Dialog => EngineError::ReadTimedOut,
             })?;
         Ok(())
     }
@@ -449,7 +469,9 @@ impl<W: Wire> CdpEngine<W> {
                 }
             }
             "Page.loadEventFired" if self.ours(event) => self.seen.loaded = true,
-            "Target.targetCreated" | "Target.targetInfoChanged" => {
+            // Only a tab created while the run watches can be the run's; a
+            // change to a tab says nothing about who it belongs to.
+            "Target.targetCreated" => {
                 let info = p.get("targetInfo").cloned().unwrap_or_default();
                 let id = info
                     .get("targetId")
@@ -502,6 +524,8 @@ impl<W: Wire> CdpEngine<W> {
             dialog: self.dialog.clone(),
             accepted_alert: self.accepted_alert.take(),
             tabs,
+            current: Some(TabKey::new(&*self.target)),
+            unreadable_frames: 0,
             nodes: Vec::new(),
         })
     }
@@ -515,13 +539,14 @@ impl<W: Wire> CdpEngine<W> {
                 json!({"frameId": &*self.target}),
             )?,
         )];
+        let mut unreadable_frames = 0;
         for frame in read::child_frames(&frame_tree) {
             // A frame in another process has its own target; its tree is not
-            // reachable from this session, and it is left out.
+            // reachable from this session, and it is left out and counted.
             match self.call("Accessibility.getFullAXTree", json!({"frameId": frame})) {
                 Ok(tree) => ax_trees.push((frame.into(), tree)),
                 Err(Stop::Dialog) => return Err(Stop::Dialog),
-                Err(Stop::Failed(_)) => {}
+                Err(Stop::Failed(_)) => unreadable_frames += 1,
             }
         }
         let snapshot = self.read_call(
@@ -543,6 +568,7 @@ impl<W: Wire> CdpEngine<W> {
             self.quiet_for_ms = Some(quiet);
             self.mutations = Some(mutations);
         }
+        read.unreadable_frames = unreadable_frames;
         read.accepted_alert = self.accepted_alert.take();
         read.dialog.clone_from(&self.dialog);
         self.viewport = Some(read.viewport);
@@ -643,6 +669,20 @@ impl<W: Wire> CdpEngine<W> {
     /// view first if it was off screen, and click it if so. `Err` carries why
     /// the click was not made.
     fn press(&mut self, at: Point, node: &NodeKey) -> Result<Result<(), Box<str>>, Stop> {
+        let (x, y) = match self.aim(at, node)? {
+            Ok(point) => point,
+            Err(reason) => return Ok(Err(reason)),
+        };
+        for event in input::click(x, y) {
+            self.call("Input.dispatchMouseEvent", event)?;
+        }
+        Ok(Ok(()))
+    }
+
+    /// The point at which the row is the node drawn, after checking the page
+    /// is the document that was read and scrolling an off-screen row into
+    /// view. `Err` carries why nothing should be done to it.
+    fn aim(&mut self, at: Point, node: &NodeKey) -> Result<Result<(f64, f64), Box<str>>, Stop> {
         let Some(parts) = KeyParts::parse(node) else {
             return Ok(Err("the row is not one this browser read".into()));
         };
@@ -694,10 +734,7 @@ impl<W: Wire> CdpEngine<W> {
         {
             return Ok(Err(format!("{what} covers it").into()));
         }
-        for event in input::click(x, y) {
-            self.call("Input.dispatchMouseEvent", event)?;
-        }
-        Ok(Ok(()))
+        Ok(Ok((x, y)))
     }
 
     /// `None` when the hit node is inside the row's, else what it is.
@@ -763,6 +800,13 @@ impl<W: Wire> CdpEngine<W> {
             Err(Stop::Failed(_)) => false,
         };
         if is_select {
+            // Checked as a tap is, though nothing is clicked: on a page that
+            // has been replaced the node id may name another control, and one
+            // that is covered is not one a person could change.
+            if let Err(reason) = self.aim(at, node)? {
+                self.outcome = Some(format!("nothing was chosen: {reason}").into());
+                return Ok(());
+            }
             let Some(object) = self.object(parts.backend)? else {
                 self.outcome =
                     Some("the tap was not made: the row is no longer on the page".into());
