@@ -2,8 +2,7 @@
 
 use jev_pilot::platform::{Android, HierarchyError, Platform};
 use jev_pilot::snapshot::{
-    Bounds, Dialog, DialogKind, Element, MAX_ELEMENTS, NodeKey, Point, Snapshot, Tab,
-    TabKey,
+    Bounds, Dialog, DialogKind, Element, MAX_ELEMENTS, NodeKey, Point, Snapshot, Tab, TabKey,
 };
 use std::fmt::Write as _;
 
@@ -913,7 +912,11 @@ fn the_dialog_and_the_tabs_change_the_place() {
 fn node_keys_and_field_only_marks_are_read_per_element() {
     let snapshot = Snapshot::new(vec![row("Country"), row("Search"), row("Go")])
         .expect("fits")
-        .with_node_keys(vec![Some(NodeKey::new("12:3")), None, Some(NodeKey::new("14:3"))])
+        .with_node_keys(vec![
+            Some(NodeKey::new("12:3")),
+            None,
+            Some(NodeKey::new("14:3")),
+        ])
         .with_field_only(vec![true, false, false]);
     let handles: Vec<_> = snapshot.refs().map(|(handle, _)| handle).collect();
 
@@ -923,7 +926,10 @@ fn node_keys_and_field_only_marks_are_read_per_element() {
     );
     assert_eq!(snapshot.node_key(handles[1]).expect("live"), None);
     assert_eq!(
-        snapshot.node_key(handles[2]).expect("live").map(NodeKey::as_str),
+        snapshot
+            .node_key(handles[2])
+            .expect("live")
+            .map(NodeKey::as_str),
         Some("14:3")
     );
     assert!(snapshot.is_field_only(handles[0]).expect("live"));

@@ -52,6 +52,7 @@ jobs:
       - run: cargo check --lib --no-default-features --features android
       - run: cargo check --lib --no-default-features --features ios
       - run: cargo check --lib --no-default-features --features http
+      - run: cargo check --lib --no-default-features --features browser
 
   msrv:
     name: minimum supported rust version
