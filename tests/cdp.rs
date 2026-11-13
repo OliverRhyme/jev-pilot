@@ -1577,3 +1577,27 @@ fn a_covered_select_is_not_set() {
         Some("nothing was chosen: div \u{201c}Accept all\u{201d} covers it")
     );
 }
+
+/// Chrome does not report a dialog that was open before the run attached,
+/// and the tab answers nothing under it, not even enabling Page. Attaching
+/// then says what is likely, as a read does.
+#[test]
+fn attaching_to_a_tab_that_does_not_answer_says_a_dialog_may_be_open() {
+    let script = Script::new();
+    script
+        .on("Target.getTargets", signup::load("targets"))
+        .on("Target.setDiscoverTargets", json!({}))
+        .on("Target.attachToTarget", json!({"sessionId": SESSION}));
+    script.answer("Page.enable", Answer::Silence);
+
+    let Err(error) = CdpEngine::attach(script, &TabKey::new(signup::TARGET), false) else {
+        panic!("the tab does not answer");
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("a JavaScript dialog may be open in this tab"),
+        "{error}"
+    );
+}

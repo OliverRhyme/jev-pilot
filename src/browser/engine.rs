@@ -344,10 +344,15 @@ impl<W: Wire> CdpEngine<W> {
         self.world = None;
         self.dialog = None;
         self.viewport = None;
+        // A tab under a dialog that opened before the run attached answers
+        // nothing, Page.enable included, and Chrome never reports the dialog.
         self.call("Page.enable", json!({}))
             .map_err(|stop| match stop {
+                Stop::Dialog
+                | Stop::Failed(EngineError::Transport(TransportError::Timeout { .. })) => {
+                    EngineError::ReadTimedOut
+                }
                 Stop::Failed(e) => e,
-                Stop::Dialog => EngineError::ReadTimedOut,
             })?;
         Ok(())
     }
