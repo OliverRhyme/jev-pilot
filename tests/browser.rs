@@ -92,6 +92,7 @@ fn read(nodes: Vec<PageNode>) -> PageRead {
         dialog: None,
         accepted_alert: None,
         tabs: Vec::new(),
+        current: None,
         nodes,
     }
 }
@@ -665,6 +666,26 @@ fn the_other_tabs_are_carried_and_the_driven_one_is_not() {
         .collect();
     assert_eq!(others, [("tab-2".to_string(), "Page B".to_string())]);
     assert_eq!(snapshot.app(), Some("https://example.test"));
+}
+
+/// Two tabs can show the same page; the driven one is told apart by its key,
+/// not by its address and title.
+#[test]
+fn the_driven_tab_is_known_by_its_key() {
+    let tab = |key: &str| PageTab {
+        key: TabKey::new(key),
+        title: "Example".into(),
+        url: "https://example.test/".into(),
+        opened_by_run: true,
+    };
+    let mut page = read(vec![]);
+    page.tabs = vec![tab("t1"), tab("t2")];
+    page.current = Some(TabKey::new("t2"));
+
+    let snapshot = Browser::default().snapshot_from(&page);
+
+    let others: Vec<&str> = snapshot.tabs().map(|(_, t)| t.key.as_str()).collect();
+    assert_eq!(others, ["t1"]);
 }
 
 #[test]

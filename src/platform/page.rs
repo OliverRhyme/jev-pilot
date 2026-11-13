@@ -138,9 +138,13 @@ pub struct PageRead {
     /// The message of an alert that was accepted since the last read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_alert: Option<Box<str>>,
-    /// The tabs the run owns.
+    /// The tabs the run owns, the driven one among them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tabs: Vec<PageTab>,
+    /// Which of `tabs` this read came from. By key, because two tabs can
+    /// show the same address and title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<TabKey>,
     /// The page's nodes, in paint order: later ones are drawn over earlier ones.
     #[serde(default)]
     pub nodes: Vec<PageNode>,

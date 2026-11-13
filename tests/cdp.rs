@@ -551,6 +551,7 @@ fn a_node_takes_the_nearest_heading_or_landmark_as_context() {
 #[test]
 fn only_run_owned_tabs_are_listed() {
     let read = signup_read();
+    assert_eq!(read.current, Some(TabKey::new(signup::TARGET)));
 
     assert_eq!(
         read.tabs,

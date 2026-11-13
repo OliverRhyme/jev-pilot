@@ -643,17 +643,11 @@ fn describe_dialog(dialog: &Dialog) -> String {
 /// The tabs the run owns other than the one this read came from.
 ///
 /// The engine lists every tab it owns, the driven one included, and only the
-/// others can be switched to. The driven one is the tab showing this address
-/// and title.
+/// others can be switched to. The driven one is named by its key.
 fn other_tabs(read: &PageRead) -> Vec<Tab> {
-    let mut skipped = false;
     read.tabs
         .iter()
-        .filter(|tab| {
-            let current = !skipped && tab.url == read.url && tab.title == read.title;
-            skipped |= current;
-            !current
-        })
+        .filter(|tab| read.current.as_ref() != Some(&tab.key))
         .map(|tab| Tab {
             key: tab.key.clone(),
             title: tab.title.clone(),

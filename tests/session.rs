@@ -521,6 +521,7 @@ fn button_page() -> PageRead {
         dialog: None,
         accepted_alert: None,
         tabs: Vec::new(),
+        current: None,
         nodes: vec![PageNode {
             frame: "main".into(),
             role: "button".into(),

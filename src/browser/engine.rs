@@ -519,6 +519,7 @@ impl<W: Wire> CdpEngine<W> {
             dialog: self.dialog.clone(),
             accepted_alert: self.accepted_alert.take(),
             tabs,
+            current: Some(TabKey::new(&*self.target)),
             nodes: Vec::new(),
         })
     }
