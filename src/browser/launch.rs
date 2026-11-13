@@ -182,15 +182,7 @@ impl Fresh {
     ) -> Result<(Self, ActivePort), LaunchError> {
         let temp = std::env::temp_dir();
         sweep_leftovers(&temp);
-        let dir = temp.join(format!(
-            "{PROFILE_PREFIX}{}-{:08x}",
-            std::process::id(),
-            random_word()
-        ));
-        std::fs::create_dir_all(&dir).map_err(LaunchError::Profile)?;
-        let lock = File::create(dir.join(LOCK_FILE)).map_err(LaunchError::Profile)?;
-        lock.try_lock()
-            .map_err(|e| LaunchError::Profile(std::io::Error::other(e.to_string())))?;
+        let (dir, lock) = make_profile(&temp).map_err(LaunchError::Profile)?;
         let child = Command::new(binary)
             .args(launch_args(&dir, headless))
             .stdin(Stdio::null())
@@ -263,6 +255,35 @@ impl Drop for Fresh {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// Make a fresh profile folder under `temp`, holding its lock.
+///
+/// Made and locked under a name the sweep does not look at, then renamed, so
+/// it never appears unlocked: a fresh run starting at the same moment would
+/// otherwise take it for a dead run's and remove it. The lock goes with the
+/// open file, so it holds across the rename.
+///
+/// # Errors
+/// Returns the I/O error when the folder cannot be made, locked or renamed.
+pub fn make_profile(temp: &Path) -> std::io::Result<(PathBuf, File)> {
+    let name = format!("{}-{:08x}", std::process::id(), random_word());
+    let making = temp.join(format!(".making-{PROFILE_PREFIX}{name}"));
+    let dir = temp.join(format!("{PROFILE_PREFIX}{name}"));
+    std::fs::create_dir_all(&making)?;
+    let locked = File::create(making.join(LOCK_FILE)).and_then(|lock| {
+        lock.try_lock()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        std::fs::rename(&making, &dir)?;
+        Ok(lock)
+    });
+    match locked {
+        Ok(lock) => Ok((dir, lock)),
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&making);
+            Err(error)
         }
     }
 }

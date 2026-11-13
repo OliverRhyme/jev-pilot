@@ -623,3 +623,40 @@ fn a_phone_only_command_is_an_error_and_reaches_no_engine() {
     assert!(error.to_string().contains("browser"), "{error}");
     assert_eq!(device.engine().performed, []);
 }
+
+/// A profile appears under its swept name already locked, so a sweep running
+/// at the same moment can never take it for a dead run's and remove it.
+#[test]
+fn a_fresh_profile_appears_already_locked() {
+    use jev_pilot::browser::launch::{PROFILE_PREFIX, make_profile};
+
+    let temp = std::env::temp_dir().join(format!("jev-pilot-profile-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    std::fs::create_dir_all(&temp).expect("a folder to work in");
+
+    let (dir, lock) = make_profile(&temp).expect("a profile");
+
+    let name = dir
+        .file_name()
+        .expect("a name")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        name.starts_with(&format!("{PROFILE_PREFIX}{}-", std::process::id())),
+        "{name}"
+    );
+    let entries: Vec<String> = std::fs::read_dir(&temp)
+        .expect("readable")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, [name], "nothing is left under another name");
+    let other = std::fs::File::open(dir.join("jev-pilot.lock")).expect("the lock file is there");
+    assert!(
+        other.try_lock().is_err(),
+        "the profile is locked as it appears"
+    );
+
+    drop((other, lock));
+    let _ = std::fs::remove_dir_all(&temp);
+}
