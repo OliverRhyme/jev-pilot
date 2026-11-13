@@ -17,5 +17,6 @@ install-path = "~/.jev-pilot/bin"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
-# Build with the MCP server, so a release's one program serves `jev-pilot mcp`.
-features = ["mcp"]
+# Build with the MCP server, so a release's one program serves `jev-pilot mcp`,
+# and with the browser driver, so it can drive a web browser as well as a phone.
+features = ["mcp", "browser"]

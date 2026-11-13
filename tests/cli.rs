@@ -22,7 +22,7 @@ fn a_goal_is_the_whole_command_line() {
 
     assert_eq!(&*goal, "Open the Wi-Fi settings");
     assert!(device.is_none(), "one attached device needs no naming");
-    assert!(accept.is_empty());
+    assert_eq!(accept, [] as [String; 0]);
 }
 
 /// A goal is not optional: without one there is nothing to pursue, and

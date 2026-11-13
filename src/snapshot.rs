@@ -14,6 +14,7 @@
 
 use core::fmt;
 use core::sync::atomic::{AtomicU32, Ordering};
+use serde::{Deserialize, Serialize};
 
 /// Identifies which observation a reference belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -79,6 +80,101 @@ impl Bounds {
 /// snapshot that issued it for a tap target, and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ElementRef {
+    generation: Generation,
+    index: u8,
+}
+
+/// An engine's own handle for one row of a page.
+///
+/// Opaque on purpose, and for the same reason as [`TabKey`]: it is kept in the
+/// snapshot so a device can find the element again, never described to the
+/// model, and never compared by anything but the engine that issued it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NodeKey(Box<str>);
+
+impl NodeKey {
+    /// Wrap an engine's node identifier.
+    #[must_use]
+    pub fn new(key: impl Into<Box<str>>) -> Self {
+        Self(key.into())
+    }
+
+    /// The identifier as the engine spelled it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// An engine's own name for a browser tab.
+///
+/// Opaque on purpose. It is kept in the snapshot so a device can find the tab
+/// again, never described to the model, and never compared by anything but the
+/// engine that issued it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TabKey(Box<str>);
+
+impl TabKey {
+    /// Wrap an engine's tab identifier.
+    #[must_use]
+    pub fn new(key: impl Into<Box<str>>) -> Self {
+        Self(key.into())
+    }
+
+    /// The identifier as the engine spelled it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A browser tab the run owns, other than the one being driven.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tab {
+    /// The engine's name for the tab.
+    pub key: TabKey,
+    /// The title the tab shows.
+    pub title: Box<str>,
+    /// The address the tab shows.
+    pub url: Box<str>,
+}
+
+/// Which kind of JavaScript dialog is open.
+///
+/// An alert is not here: it has one button, so it is accepted as it appears
+/// and only its message is carried on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DialogKind {
+    /// A question answered by accepting or dismissing.
+    Confirm,
+    /// A question answered with words, or dismissed.
+    Prompt,
+    /// The "leave this site?" question asked as a page is closed or left.
+    BeforeUnload,
+}
+
+/// A JavaScript dialog that is open and blocking its page.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Dialog {
+    /// Which kind of dialog it is.
+    pub kind: DialogKind,
+    /// What it says.
+    pub message: Box<str>,
+    /// The words a prompt would hold if accepted untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_prompt: Option<Box<str>>,
+}
+
+/// A handle to one tab of one snapshot.
+///
+/// Stamped with the snapshot's [`Generation`] exactly like an [`ElementRef`], so
+/// a tab chosen from an old read cannot be acted on once the list has changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TabRef {
     generation: Generation,
     index: u8,
 }
@@ -225,6 +321,13 @@ pub struct Snapshot {
     notices: Box<[Box<str>]>,
     unavailable: Box<[Box<str>]>,
     quiet_for_ms: Option<u32>,
+    url: Option<Box<str>>,
+    tabs: Box<[Tab]>,
+    dialog: Option<Dialog>,
+    // Both run alongside `elements`, row for row, and are empty on a screen
+    // whose reader has no such thing to say.
+    node_keys: Box<[Option<NodeKey>]>,
+    field_only: Box<[bool]>,
     elements: Box<[Element]>,
 }
 
@@ -248,6 +351,11 @@ impl Snapshot {
             notices: Box::default(),
             unavailable: Box::default(),
             quiet_for_ms: None,
+            url: None,
+            tabs: Box::default(),
+            dialog: None,
+            node_keys: Box::default(),
+            field_only: Box::default(),
             elements: elements.into_boxed_slice(),
         })
     }
@@ -344,6 +452,123 @@ impl Snapshot {
         self.unavailable.iter().map(|control| &**control)
     }
 
+    /// Note the address this screen was read from.
+    #[must_use]
+    pub fn at_url(mut self, url: Option<Box<str>>) -> Self {
+        self.url = url;
+        self
+    }
+
+    /// The address of the page this screen was read from, when it has one.
+    #[must_use]
+    pub fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+
+    /// Note the other tabs the run owns and could switch to.
+    ///
+    /// At most 256 are kept, which is what a [`TabRef`] can address.
+    #[must_use]
+    pub fn with_tabs(mut self, tabs: Vec<Tab>) -> Self {
+        let mut tabs = tabs;
+        tabs.truncate(usize::from(u8::MAX) + 1);
+        self.tabs = tabs.into_boxed_slice();
+        self
+    }
+
+    /// Note the reader's own handle for each row, in the rows' order.
+    ///
+    /// Rows beyond the end of `keys` have none.
+    #[must_use]
+    pub fn with_node_keys(mut self, mut keys: Vec<Option<NodeKey>>) -> Self {
+        keys.truncate(self.elements.len());
+        self.node_keys = keys.into_boxed_slice();
+        self
+    }
+
+    /// Note which rows are fields to type into and never targets to tap, in
+    /// the rows' order.
+    ///
+    /// A native drop-down is the case: tapping it opens a pop-up nothing can
+    /// read, so its words are the option to choose and nothing else is
+    /// offered. Rows beyond the end of `marks` are not field-only.
+    #[must_use]
+    pub fn with_field_only(mut self, mut marks: Vec<bool>) -> Self {
+        marks.truncate(self.elements.len());
+        self.field_only = marks.into_boxed_slice();
+        self
+    }
+
+    /// The reader's own handle for the row, when it gave one.
+    ///
+    /// # Errors
+    /// Returns [`StaleRef`] when the reference was issued by a different
+    /// observation.
+    pub fn node_key(&self, handle: ElementRef) -> Result<Option<&NodeKey>, StaleRef> {
+        self.resolve(handle)?;
+        Ok(self
+            .node_keys
+            .get(usize::from(handle.index))
+            .and_then(Option::as_ref))
+    }
+
+    /// Whether the row is a field only, and never a target to tap.
+    ///
+    /// # Errors
+    /// Returns [`StaleRef`] when the reference was issued by a different
+    /// observation.
+    pub fn is_field_only(&self, handle: ElementRef) -> Result<bool, StaleRef> {
+        self.resolve(handle)?;
+        Ok(self
+            .field_only
+            .get(usize::from(handle.index))
+            .copied()
+            .unwrap_or(false))
+    }
+
+    /// Note the dialog that is open over this screen, if there is one.
+    #[must_use]
+    pub fn with_dialog(mut self, dialog: Option<Dialog>) -> Self {
+        self.dialog = dialog;
+        self
+    }
+
+    /// The dialog that is open over this screen, if there is one.
+    #[must_use]
+    pub const fn dialog(&self) -> Option<&Dialog> {
+        self.dialog.as_ref()
+    }
+
+    /// Every other tab the run owns, paired with the reference that addresses it.
+    pub fn tabs(&self) -> impl Iterator<Item = (TabRef, &Tab)> {
+        self.tabs.iter().enumerate().map(|(index, tab)| {
+            let handle = TabRef {
+                generation: self.generation,
+                // The length was bounded by `with_tabs`.
+                index: u8::try_from(index).unwrap_or(u8::MAX),
+            };
+            (handle, tab)
+        })
+    }
+
+    /// Exchange a tab reference for the tab it names.
+    ///
+    /// # Errors
+    /// Returns [`StaleRef`] when the reference was issued by a different
+    /// observation, which means the tab list has since been read again.
+    #[must_use = "a stale reference must not be ignored"]
+    pub fn resolve_tab(&self, handle: TabRef) -> Result<&Tab, StaleRef> {
+        if handle.generation == self.generation
+            && let Some(tab) = self.tabs.get(usize::from(handle.index))
+        {
+            return Ok(tab);
+        }
+        Err(StaleRef {
+            expected: self.generation,
+            found: handle.generation,
+        })
+    }
+
     /// Which application this screen belongs to, when the reader could say.
     ///
     /// The identifier the platform uses — a package name on Android, a bundle
@@ -378,6 +603,8 @@ impl Snapshot {
         self.keyboard_open.hash(&mut hasher);
         self.notices.hash(&mut hasher);
         self.unavailable.hash(&mut hasher);
+        self.tab_identity().hash(&mut hasher);
+        self.dialog.hash(&mut hasher);
         for (handle, element) in self.refs() {
             // A field's words are what was typed into it, and a form is the
             // same place whatever it holds. Counted, a form that reformats its
@@ -428,6 +655,10 @@ impl Snapshot {
         // moment a form has a way on.
         self.notices.hash(&mut hasher);
         self.unavailable.hash(&mut hasher);
+        // A tab appearing, or a dialog opening, changes what can be done
+        // without touching a row.
+        self.tab_identity().hash(&mut hasher);
+        self.dialog.hash(&mut hasher);
         for element in &self.elements {
             element.label.hash(&mut hasher);
             element.detail.hash(&mut hasher);
@@ -440,15 +671,27 @@ impl Snapshot {
         hasher.finish()
     }
 
+    /// What the other tabs are called and where they are, without the engine's
+    /// own keys, which say nothing about what the tab shows.
+    fn tab_identity(&self) -> Vec<(&str, &str)> {
+        self.tabs
+            .iter()
+            .map(|tab| (&*tab.title, &*tab.url))
+            .collect()
+    }
+
     /// Whether this screen offers anything to act on.
     ///
     /// A screen caught between two others parses to nothing: the old view is
     /// gone and the new one has not been laid out. That is not a decision
     /// anyone can make — there is no row to choose, and no operation that
     /// helps — so a reader looks again rather than handing it to a model.
+    ///
+    /// An open dialog is the exception: the page behind it cannot be used, and
+    /// the dialog's own answer is the decision to make, rows or no rows.
     #[must_use]
     pub fn worth_acting_on(&self) -> bool {
-        !self.elements.is_empty()
+        !self.elements.is_empty() || self.dialog.is_some()
     }
 
     /// Every element, paired with the reference that addresses it.

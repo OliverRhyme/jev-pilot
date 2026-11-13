@@ -30,6 +30,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod act;
+#[cfg(feature = "browser")]
+#[cfg_attr(docsrs, doc(cfg(feature = "browser")))]
+pub mod browser;
 pub mod cli;
 pub mod client;
 pub mod credential;

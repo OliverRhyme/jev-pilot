@@ -24,6 +24,8 @@ ureq = { version = "3", optional = true, default-features = false, features = ["
 rmcp = { version = "3.4", optional = true, default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
 schemars = { version = "1", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["rt", "macros", "io-std", "signal"] }
+# Every browser endpoint is ws://127.0.0.1, so no TLS and no async runtime.
+tungstenite = { version = "0.30", optional = true, default-features = false, features = ["handshake"] }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
@@ -44,6 +46,10 @@ http = ["dep:ureq"]
 # each waits on the one before. Everything using this crate as a library would
 # pay for a runtime that only the server needs.
 mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
+# Driving a web browser over the Chrome DevTools Protocol, spoken by this crate
+# over one local websocket. Off by default like `mcp`: a library user who only
+# drives phones pays nothing for it.
+browser = ["dep:tungstenite"]
 
 # docs.rs renders every feature, and marks which items need which.
 # The server is a binary of its own, and only exists when its feature is on.

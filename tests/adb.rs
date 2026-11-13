@@ -298,7 +298,10 @@ fn the_attached_devices_are_read_from_adb_devices() {
         vec!["39081FDJG00G9A".to_owned(), "emulator-5554".to_owned()],
         "only devices that are ready to be driven"
     );
-    assert!(Adb::parse_devices("List of devices attached\n\n").is_empty());
+    assert_eq!(
+        Adb::parse_devices("List of devices attached\n\n"),
+        [] as [String; 0]
+    );
 }
 
 /// A screen withheld from accessibility services and a screen caught
