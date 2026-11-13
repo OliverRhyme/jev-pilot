@@ -117,6 +117,9 @@ mod scripted {
         answers: Rc<RefCell<HashMap<String, VecDeque<Answer>>>>,
         sent: Rc<RefCell<Vec<Value>>>,
         inbox: Rc<RefCell<VecDeque<String>>>,
+        /// What crossed the wire, in order: `sent <method>` for a request and
+        /// `received <method>` for an event the engine took.
+        order: Rc<RefCell<Vec<String>>>,
     }
 
     impl Script {
@@ -147,6 +150,11 @@ mod scripted {
         /// Forget what was sent so far.
         pub fn clear_sent(&self) {
             self.sent.borrow_mut().clear();
+        }
+
+        /// Requests sent and events taken, in the order they crossed.
+        pub fn order(&self) -> Vec<String> {
+            self.order.borrow().clone()
         }
 
         /// Everything sent so far.
@@ -202,6 +210,7 @@ mod scripted {
             let message: Value = serde_json::from_str(text).expect("the engine sends JSON");
             let method = message["method"].as_str().unwrap_or_default().to_owned();
             let id = message["id"].clone();
+            self.order.borrow_mut().push(format!("sent {method}"));
             self.sent.borrow_mut().push(message);
             let answer = self
                 .answers
@@ -214,7 +223,14 @@ mod scripted {
         }
 
         fn receive(&mut self, _timeout: Duration) -> Result<Option<String>, WireError> {
-            Ok(self.inbox.borrow_mut().pop_front())
+            let next = self.inbox.borrow_mut().pop_front();
+            if let Some(text) = &next {
+                let message: Value = serde_json::from_str(text).unwrap_or_default();
+                if let Some(method) = message["method"].as_str() {
+                    self.order.borrow_mut().push(format!("received {method}"));
+                }
+            }
+            Ok(next)
         }
     }
 }
@@ -1254,6 +1270,27 @@ fn navigate_loads_the_address_and_reports_where_it_went() {
         script.params_of("Page.createIsolatedWorld").len(),
         1,
         "the new document needs a new world for its watch"
+    );
+    // Nothing more is asked of the page until its load has been seen: the
+    // next request after the navigation comes after the load event.
+    let order = script.order();
+    let navigated = order
+        .iter()
+        .position(|e| e == "sent Page.navigate")
+        .expect("navigated");
+    let next_request = navigated
+        + 1
+        + order[navigated + 1..]
+            .iter()
+            .position(|e| e.starts_with("sent "))
+            .expect("the page is asked something after navigating");
+    let loaded = order
+        .iter()
+        .position(|e| e == "received Page.loadEventFired")
+        .expect("the load is seen");
+    assert!(
+        loaded < next_request,
+        "the page is asked nothing more until it has loaded: {order:?}"
     );
 }
 
