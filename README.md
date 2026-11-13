@@ -566,8 +566,9 @@ it through a derived `Debug` in a panic message or error report.
 `ureq`. The `mcp` feature adds `rmcp`, `tokio` and `schemars` for the server, and
 nothing else uses them. The `browser` feature adds `tungstenite`, with no TLS and
 no async runtime: every browser endpoint is a local websocket, and the DevTools
-messages are written by hand rather than generated for the whole protocol. No Appium, no WebDriverAgent client, no `mobile-use`. The
-Android adapter shells out to `adb` directly.
+messages are written by hand rather than generated for the whole protocol. No
+Appium, no WebDriverAgent client, no `mobile-use`. The Android adapter shells out
+to `adb` directly.
 
 Turn `http` off and the crate builds requests for you to send with whatever
 client you already have; `Judge` is the seam, and the loop is tested against a
