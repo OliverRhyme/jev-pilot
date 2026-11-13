@@ -7,7 +7,7 @@
 
 use crate::judgment::{Confidence, OptionId, Options, Question};
 use crate::platform::Platform;
-use crate::snapshot::{ElementRef, Snapshot};
+use crate::snapshot::{ElementRef, Snapshot, TabRef};
 use core::fmt;
 use serde::Serialize;
 
@@ -124,6 +124,20 @@ pub enum Operation {
     Submit,
     /// Let the screen settle and look again.
     Wait,
+    /// Go to one of the addresses the caller supplied. Browser only.
+    ///
+    /// Never an address of the model's own: it chooses among the supplied ones
+    /// by position, as it chooses a row.
+    Navigate,
+    /// Switch to another tab the run owns. Browser only.
+    SwitchTab,
+    /// Answer an open dialog by accepting it. Browser only.
+    ///
+    /// A confirm is usually "really delete?" and a "leave this site?" is
+    /// "discard what you typed?", so accepting costs what a swipe-to-delete does.
+    AcceptDialog,
+    /// Answer an open dialog by dismissing it. Browser only.
+    DismissDialog,
     /// Stop: the goal is satisfied.
     Done,
     /// Stop: the goal cannot be reached from here.
@@ -163,6 +177,10 @@ impl Operation {
             Self::AppSwitcher => "app_switcher",
             Self::Submit => "submit",
             Self::Wait => "wait",
+            Self::Navigate => "navigate",
+            Self::SwitchTab => "switch_tab",
+            Self::AcceptDialog => "accept_dialog",
+            Self::DismissDialog => "dismiss_dialog",
             Self::Done => "done",
             Self::Blocked => "blocked",
         }
@@ -197,6 +215,12 @@ impl Operation {
             Self::AppSwitcher => "Open the list of running apps",
             Self::Submit => "Submit what has been typed, as pressing enter or search",
             Self::Wait => "Wait for the screen to finish loading, then look again",
+            Self::Navigate => "Go to one of the addresses this goal allows",
+            Self::SwitchTab => "Switch to another tab of this run, such as one a link just opened",
+            Self::AcceptDialog => {
+                "Accept the dialog that is open: confirm it, or agree to leave the page"
+            }
+            Self::DismissDialog => "Dismiss the dialog that is open, answering no or cancelling",
             Self::Done => "Stop: the goal is satisfied on this screen",
             Self::Blocked => "Stop: the goal cannot be reached from this screen",
         }
@@ -216,7 +240,13 @@ impl Operation {
             // app's navigation stack, and an app holding a session tears that
             // down too. Coming back lands on a different screen than the one
             // left, and everything typed on the way there is gone.
-            Self::SwipeLeft | Self::SwipeRight | Self::Home => Consequence::Destructive,
+            //
+            // Accepting a dialog is the same kind of thing: a confirm is
+            // usually "really delete?", and agreeing to leave a page discards
+            // what was typed on it.
+            Self::SwipeLeft | Self::SwipeRight | Self::Home | Self::AcceptDialog => {
+                Consequence::Destructive
+            }
             _ => Consequence::Ordinary,
         }
     }
@@ -276,6 +306,10 @@ const ALL: &[Operation] = &[
     Operation::AppSwitcher,
     Operation::Submit,
     Operation::Wait,
+    Operation::Navigate,
+    Operation::SwitchTab,
+    Operation::AcceptDialog,
+    Operation::DismissDialog,
     Operation::Done,
     Operation::Blocked,
 ];
@@ -355,10 +389,32 @@ pub enum Act {
     Return(Box<str>),
     /// Scroll the screen.
     Scroll(Direction),
+    /// Go to an address the caller supplied.
+    Navigate(Box<str>),
+    /// Switch to another tab the run owns.
+    ///
+    /// Carries the reference rather than the tab's key, so a choice made from
+    /// an old read of the tab list is refused when it is carried out.
+    SwitchTab(TabRef),
+    /// Answer the open dialog.
+    Dialog(DialogReply),
     /// Let the screen settle and observe again.
     Wait,
     /// Stop, with a verdict.
     Finish(Outcome),
+}
+
+/// How an open dialog is answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogReply {
+    /// Accept it, giving a prompt the words to hold.
+    Accept {
+        /// What a prompt is answered with. `None` for a confirm, or for a
+        /// "leave this site?" question, which are not asked for words.
+        words: Option<Box<str>>,
+    },
+    /// Dismiss it.
+    Dismiss,
 }
 
 /// The instructions attached to an action choice.

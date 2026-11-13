@@ -5,8 +5,8 @@
 //! step limit — is tested against scripted answers instead of against a model.
 
 use crate::act::{
-    Act, Catalog, Consequence, Decision, Direction, Floors, Indecision, Operation, Outcome,
-    SystemAct,
+    Act, Catalog, Consequence, Decision, DialogReply, Direction, Floors, Indecision, Operation,
+    Outcome, SystemAct,
 };
 use crate::device::{Command, Device, command_for};
 use crate::judgment::{Confidence, Criterion, Progress};
@@ -2184,6 +2184,16 @@ fn recount(act: &Act, snapshot: &Snapshot) -> String {
         Act::System(gesture) => format!("Pressed {gesture:?}"),
         Act::CloseKeyboard => "Put the keyboard away".to_owned(),
         Act::Return(app) => format!("Returned to {app}"),
+        Act::Navigate(url) => format!("Went to {url}"),
+        Act::SwitchTab(tab) => snapshot.resolve_tab(*tab).map_or_else(
+            |_| "Switched to a tab that is gone".to_owned(),
+            |tab| format!("Switched to the tab {:?} at {}", tab.title, tab.url),
+        ),
+        Act::Dialog(DialogReply::Accept { words: Some(words) }) => {
+            format!("Accepted the dialog, answering {words:?}")
+        }
+        Act::Dialog(DialogReply::Accept { words: None }) => "Accepted the dialog".to_owned(),
+        Act::Dialog(DialogReply::Dismiss) => "Dismissed the dialog".to_owned(),
         Act::Wait => "Waited for the screen to settle".to_owned(),
         Act::Finish(outcome) => format!("Declared {outcome:?}"),
     }

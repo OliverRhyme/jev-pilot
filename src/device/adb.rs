@@ -1589,6 +1589,27 @@ impl super::Device for AdbDevice {
             super::Command::Peek(_) => {
                 return Err(AdbError::Unsupported { gesture: "peek" });
             }
+            // A phone has no page, so these are only reachable by a caller
+            // building the command by hand.
+            super::Command::Press { .. } => {
+                return Err(AdbError::Unsupported { gesture: "press" });
+            }
+            super::Command::Fill { .. } => {
+                return Err(AdbError::Unsupported { gesture: "fill" });
+            }
+            super::Command::Navigate(_) => {
+                return Err(AdbError::Unsupported {
+                    gesture: "navigate",
+                });
+            }
+            super::Command::SwitchTab(_) => {
+                return Err(AdbError::Unsupported {
+                    gesture: "switch tab",
+                });
+            }
+            super::Command::Dialog(_) => {
+                return Err(AdbError::Unsupported { gesture: "dialog" });
+            }
         };
         Self::run(&args).map(|_| ())
     }

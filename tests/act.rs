@@ -1,6 +1,7 @@
 //! Enumerating actions and turning a model's choice back into one.
 
 use jev_pilot::act::{Catalog, Consequence, Operation};
+use jev_pilot::device::{Command, command_for};
 use jev_pilot::judgment::Confidence;
 use jev_pilot::platform::{Android, Platform};
 
@@ -204,5 +205,149 @@ fn a_row_left_out_of_the_choice_can_still_be_named_by_an_escalation() {
     assert_eq!(
         snapshot.resolve(last).expect("current").label.as_ref(),
         "Result A"
+    );
+}
+
+/// A browser can be sent to a supplied address, switched to another of the
+/// run's tabs, and asked to answer a dialog. Each has its own name, and
+/// accepting is held to the stricter floor: a confirm is usually "really
+/// delete?" and a "leave site?" is "discard what you typed?".
+#[test]
+fn the_browser_operations_are_named_and_priced() {
+    for (operation, key) in [
+        (Operation::Navigate, "navigate"),
+        (Operation::SwitchTab, "switch_tab"),
+        (Operation::AcceptDialog, "accept_dialog"),
+        (Operation::DismissDialog, "dismiss_dialog"),
+    ] {
+        assert_eq!(operation.key(), key);
+        assert_eq!(Operation::from_key(key), Some(operation));
+        assert!(Operation::all().contains(&operation));
+        assert!(!operation.rubric().is_empty());
+        assert!(!operation.needs_tap_target());
+        assert!(!operation.needs_field());
+    }
+    assert_eq!(
+        Operation::AcceptDialog.consequence(),
+        Consequence::Destructive
+    );
+    assert_eq!(
+        Operation::DismissDialog.consequence(),
+        Consequence::Ordinary
+    );
+    assert_eq!(Operation::Navigate.consequence(), Consequence::Ordinary);
+    assert_eq!(Operation::SwitchTab.consequence(), Consequence::Ordinary);
+}
+
+fn row(label: &str, editable: bool, top: i32) -> jev_pilot::snapshot::Element {
+    jev_pilot::snapshot::Element {
+        label: label.into(),
+        detail: None,
+        editable,
+        bounds: jev_pilot::snapshot::Bounds::from_origin_size(0, top, 100, 20),
+    }
+}
+
+/// Geometry leaves a snapshot only through a tap point. A row the reader gave
+/// a node key for is pressed or filled by that key, so an engine can check it
+/// is still the thing under the pointer; a row with none is tapped and typed
+/// into as on a phone, whose adapters know nothing of keys.
+#[test]
+fn a_row_with_a_node_key_is_pressed_and_filled_and_one_without_is_not() {
+    use jev_pilot::act::Act;
+    use jev_pilot::snapshot::{NodeKey, Point, Snapshot};
+
+    let snapshot = Snapshot::new(vec![row("Search", true, 0), row("Go", false, 40)])
+        .expect("fits")
+        .with_node_keys(vec![Some(NodeKey::new("7:1")), None]);
+    let handles: Vec<_> = snapshot.refs().map(|(handle, _)| handle).collect();
+
+    assert_eq!(
+        command_for(
+            &Act::TypeText {
+                into: handles[0],
+                text: "opus".into()
+            },
+            &snapshot
+        )
+        .expect("resolves"),
+        Some(Command::Fill {
+            at: Point { x: 50, y: 10 },
+            node: NodeKey::new("7:1"),
+            text: "opus".into(),
+        }),
+    );
+    assert_eq!(
+        command_for(&Act::Tap(handles[0]), &snapshot).expect("resolves"),
+        Some(Command::Press {
+            at: Point { x: 50, y: 10 },
+            node: NodeKey::new("7:1"),
+        }),
+    );
+    assert_eq!(
+        command_for(&Act::Tap(handles[1]), &snapshot).expect("resolves"),
+        Some(Command::Tap(Point { x: 50, y: 50 })),
+    );
+    assert_eq!(
+        command_for(
+            &Act::TypeText {
+                into: handles[1],
+                text: "x".into()
+            },
+            &snapshot
+        )
+        .expect("resolves"),
+        Some(Command::TypeText {
+            at: Point { x: 50, y: 50 },
+            text: "x".into()
+        }),
+    );
+}
+
+/// Navigating, switching tab and answering a dialog touch no row. A tab is
+/// resolved to the engine's own key here, against the snapshot that issued the
+/// reference, so a choice from an earlier read of the tab list is refused.
+#[test]
+fn navigation_tabs_and_dialogs_become_commands() {
+    use jev_pilot::act::{Act, DialogReply};
+    use jev_pilot::snapshot::{Snapshot, Tab, TabKey, TapError};
+
+    let tabs = || {
+        vec![Tab {
+            key: TabKey::new("tab-2"),
+            title: "Results".into(),
+            url: "https://example.test/r".into(),
+        }]
+    };
+    let first = Snapshot::new(vec![row("Go", false, 0)])
+        .expect("fits")
+        .with_tabs(tabs());
+    let second = Snapshot::new(vec![row("Go", false, 0)])
+        .expect("fits")
+        .with_tabs(tabs());
+    let chosen = first.tabs().next().expect("a tab").0;
+
+    assert_eq!(
+        command_for(&Act::Navigate("https://example.test/".into()), &first).expect("resolves"),
+        Some(Command::Navigate("https://example.test/".into())),
+    );
+    assert_eq!(
+        command_for(&Act::SwitchTab(chosen), &first).expect("resolves"),
+        Some(Command::SwitchTab(TabKey::new("tab-2"))),
+    );
+    assert!(matches!(
+        command_for(&Act::SwitchTab(chosen), &second),
+        Err(TapError::Stale(_))
+    ));
+    let accept = DialogReply::Accept {
+        words: Some("Ada".into()),
+    };
+    assert_eq!(
+        command_for(&Act::Dialog(accept.clone()), &first).expect("resolves"),
+        Some(Command::Dialog(accept)),
+    );
+    assert_eq!(
+        command_for(&Act::Dialog(DialogReply::Dismiss), &first).expect("resolves"),
+        Some(Command::Dialog(DialogReply::Dismiss)),
     );
 }
