@@ -278,6 +278,7 @@ pub fn sweep_leftovers(temp: &Path) {
 /// For whoever ended the run outright, as stopping a run over MCP does. The
 /// run gets no chance to close its browser then, and a headless browser left
 /// running is invisible until the next fresh start would have swept it.
+#[must_use = "the count says whether anything was left behind"]
 pub fn reap_run(temp: &Path, run: u32) -> usize {
     let mine = format!("{PROFILE_PREFIX}{run}-");
     let Ok(entries) = std::fs::read_dir(temp) else {

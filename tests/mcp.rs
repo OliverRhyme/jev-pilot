@@ -516,9 +516,8 @@ fn browser_runs_keep_one_run_per_target() {
     assert_eq!(busy_with("abc123", &["abc123"]), Some("abc123".to_owned()));
     assert_eq!(busy_with("def456", &["abc123"]), None);
 
-    use jev_pilot::mcp::which_run;
     assert_eq!(
-        which_run(Some("browser:fresh"), &["abc123", "browser:fresh"]),
+        jev_pilot::mcp::which_run(Some("browser:fresh"), &["abc123", "browser:fresh"]),
         Ok("browser:fresh".to_owned())
     );
 }

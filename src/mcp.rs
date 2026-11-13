@@ -1072,7 +1072,7 @@ impl Run {
         let _ = self.child.kill();
         let _ = self.child.wait();
         #[cfg(feature = "browser")]
-        crate::browser::launch::reap_run(&std::env::temp_dir(), self.child.id());
+        let _ = crate::browser::launch::reap_run(&std::env::temp_dir(), self.child.id());
     }
 
     /// Whether this run has ended on its own.
