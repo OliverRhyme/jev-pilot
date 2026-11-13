@@ -261,23 +261,56 @@ pub fn sweep_leftovers(temp: &Path) {
         return;
     };
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        if !name.to_string_lossy().starts_with(PROFILE_PREFIX) {
-            continue;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(PROFILE_PREFIX)
+        {
+            clear_if_abandoned(&entry.path());
         }
-        let dir = entry.path();
-        let Ok(lock) = File::open(dir.join(LOCK_FILE)) else {
-            continue;
-        };
-        if lock.try_lock().is_err() {
-            continue;
-        }
-        if let Ok(pid) = std::fs::read_to_string(dir.join(PID_FILE)) {
-            end_leftover_browser(pid.trim(), &dir);
-        }
-        drop(lock);
-        let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// Remove what the run with process id `run` left behind: its fresh
+/// profiles, and their browsers if those outlived it. Returns how many
+/// profiles were removed.
+///
+/// For whoever ended the run outright, as stopping a run over MCP does. The
+/// run gets no chance to close its browser then, and a headless browser left
+/// running is invisible until the next fresh start would have swept it.
+pub fn reap_run(temp: &Path, run: u32) -> usize {
+    let mine = format!("{PROFILE_PREFIX}{run}-");
+    let Ok(entries) = std::fs::read_dir(temp) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&mine))
+        .filter(|entry| clear_if_abandoned(&entry.path()))
+        .count()
+}
+
+/// Remove a fresh profile, and the browser started on it, if the run that
+/// made it has gone. `true` when it was removed.
+fn clear_if_abandoned(dir: &Path) -> bool {
+    let Ok(lock) = File::open(dir.join(LOCK_FILE)) else {
+        return false;
+    };
+    if lock.try_lock().is_err() {
+        return false;
+    }
+    let ended = std::fs::read_to_string(dir.join(PID_FILE))
+        .is_ok_and(|pid| end_leftover_browser(pid.trim(), dir));
+    drop(lock);
+    // A browser just ended can hold its files for a moment longer.
+    let tries = if ended { 30 } else { 1 };
+    for _ in 0..tries {
+        if std::fs::remove_dir_all(dir).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 /// End a leftover browser by its process id, but only if that process is
@@ -286,20 +319,24 @@ pub fn sweep_leftovers(temp: &Path) {
 ///
 /// Only where `ps` can say what a process was started with; elsewhere the
 /// folder is removed and a leftover browser is left alone.
-fn end_leftover_browser(pid: &str, dir: &Path) {
+///
+/// `true` when a browser was told to end.
+fn end_leftover_browser(pid: &str, dir: &Path) -> bool {
     if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) || cfg!(windows) {
-        return;
+        return false;
     }
     let Ok(output) = Command::new("ps")
         .args(["-p", pid, "-o", "command="])
         .output()
     else {
-        return;
+        return false;
     };
     let started_with = String::from_utf8_lossy(&output.stdout);
-    if started_with.contains(&format!("--user-data-dir={}", dir.display())) {
-        let _ = Command::new("kill").arg(pid).status();
-    }
+    started_with.contains(&format!("--user-data-dir={}", dir.display()))
+        && Command::new("kill")
+            .arg(pid)
+            .status()
+            .is_ok_and(|status| status.success())
 }
 
 fn random_word() -> u32 {
