@@ -1,5 +1,5 @@
-//! An MCP server, so another agent can drive a device — and be the second
-//! opinion a run escalates to.
+//! An MCP server, so another agent can drive a device or a web browser — and
+//! be the second opinion a run escalates to.
 //!
 //! The interesting part is not the transport. This crate already has the seam
 //! an MCP client wants to sit in: a run that cannot decide stops and asks, and
@@ -42,11 +42,53 @@ use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-/// Which device a call is about, when more than one is attached.
+/// Which run a call is about, when more than one is going.
 #[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
 pub struct Which {
+    /// Which run: a device serial, or `browser:fresh` or
+    /// `browser:attach:<channel>` for a browser run. Needed only when more
+    /// than one run is going.
+    pub device: Option<String>,
+}
+
+/// A web browser to drive instead of a device.
+#[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
+pub struct BrowserArgs {
+    /// `attach` drives the owner's running Chrome, which asks them to click
+    /// Allow for every tool call; `fresh` starts a browser on a throwaway
+    /// profile and asks nobody.
+    pub mode: String,
+    /// An existing tab to drive: its id, or a piece of its address that only
+    /// one tab has.
+    pub tab: Option<String>,
+    /// An address to open in a new tab and drive. Not with `tab`.
+    pub open: Option<String>,
+    /// attach: which Chrome — `stable` (the default), `beta`, `dev` or
+    /// `canary`.
+    pub channel: Option<String>,
+    /// attach: a browser websocket (`ws://127.0.0.1:<port>/devtools/browser/<id>`)
+    /// to use instead of finding Chrome's.
+    pub endpoint: Option<String>,
+    /// fresh: the browser binary, when it is not in a usual place.
+    pub chrome: Option<String>,
+    /// fresh: run without a window.
+    pub headless: Option<bool>,
+}
+
+/// What looking at a screen takes.
+#[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
+pub struct ObserveArgs {
     /// Which device, when more than one is attached.
     pub device: Option<String>,
+    /// A browser tab to look at instead of a device.
+    pub browser: Option<BrowserArgs>,
+}
+
+/// What listing devices takes.
+#[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
+pub struct DevicesArgs {
+    /// List this browser's tabs instead of the attached devices.
+    pub browser: Option<BrowserArgs>,
 }
 
 /// What the helper tool takes.
@@ -67,6 +109,11 @@ pub struct StartArgs {
     pub goal: String,
     /// Which device, when more than one is attached.
     pub device: Option<String>,
+    /// A web browser to drive instead of a device.
+    pub browser: Option<BrowserArgs>,
+    /// For a browser run, further addresses the run may navigate to. The
+    /// `open` address is always one of them. This is what `app` is to a phone.
+    pub urls: Option<Vec<String>>,
     /// The app package the goal is about. It is brought to the front first,
     /// and the run knows when it has left it.
     pub app: Option<String>,
@@ -103,11 +150,14 @@ pub struct StartArgs {
 /// What answering a run takes.
 #[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
 pub struct AnswerArgs {
-    /// Which device's run, when more than one is being driven.
+    /// Which run, when more than one is going: a device serial, or
+    /// `browser:fresh` or `browser:attach:<channel>`.
     pub device: Option<String>,
     /// One of the operations the run listed, or `stop` to end it.
     pub operation: Option<String>,
-    /// Which row, or which field when typing, counting from zero.
+    /// Which row, or which field when typing, counting from zero. For
+    /// `switch_tab` and `navigate`, which tab or address, numbered on their
+    /// own as the question lists them.
     pub target: Option<u32>,
     /// The words, when it asked for some.
     pub text: Option<String>,
@@ -177,24 +227,31 @@ fn refused(said: &str) -> CallToolResult {
 impl Pilot {
     /// Read what is on the device's screen right now.
     #[tool(
-        description = "Read what is on the device's screen right now: the rows that can be \
-                       acted on, what the screen says, which controls it shows but will not \
-                       let anything use, and which app is in front. Changes nothing. This is \
-                       the cheapest way to find out where a device is.",
+        description = "Read what is on the device's screen, or a browser tab, right now: the \
+                       rows that can be acted on, what the screen says, which controls it shows \
+                       but will not let anything use, and which app or site is in front. \
+                       Changes nothing. This is the cheapest way to find out where a run would \
+                       start.",
         annotations(title = "Look at the screen", read_only_hint = true)
     )]
-    pub async fn observe(&self, Parameters(which): Parameters<Which>) -> CallToolResult {
-        ran(&invocation("observe", &to_value(&which)).unwrap_or_default())
+    pub async fn observe(&self, Parameters(args): Parameters<ObserveArgs>) -> CallToolResult {
+        match invocation("observe", &to_value(&args)) {
+            Ok(line) => ran(&line),
+            Err(said) => refused(&said),
+        }
     }
 
     /// List the devices attached to this machine.
     #[tool(
-        description = "List the devices attached to this machine, so a later call can name \
-                       one. Changes nothing.",
+        description = "List the devices attached to this machine, or with `browser` a \
+                       browser's tabs, so a later call can name one. Changes nothing.",
         annotations(title = "List devices", read_only_hint = true)
     )]
-    pub async fn devices(&self) -> CallToolResult {
-        ran(&["devices".to_owned()])
+    pub async fn devices(&self, Parameters(args): Parameters<DevicesArgs>) -> CallToolResult {
+        match invocation("devices", &to_value(&args)) {
+            Ok(line) => ran(&line),
+            Err(said) => refused(&said),
+        }
     }
 
     /// Report on the on-device helper, and install it when asked.
@@ -205,7 +262,10 @@ impl Pilot {
         annotations(title = "The screen-reading helper", read_only_hint = false)
     )]
     pub async fn helper(&self, Parameters(args): Parameters<HelperArgs>) -> CallToolResult {
-        ran(&invocation("helper", &to_value(&args)).unwrap_or_default())
+        match invocation("helper", &to_value(&args)) {
+            Ok(line) => ran(&line),
+            Err(said) => refused(&said),
+        }
     }
 
     /// Drive the device towards a goal.
@@ -229,11 +289,12 @@ impl Pilot {
         Parameters(args): Parameters<StartArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let arguments = to_value(&args);
-        let Some(line) = invocation("start_run", &arguments) else {
-            return Ok(refused("a run needs a goal"));
+        let line = match invocation("start_run", &arguments) {
+            Ok(line) => line,
+            Err(said) => return Ok(refused(&said)),
         };
 
-        let (name, desk) = match self.launch(line, args.device.as_deref()) {
+        let (name, desk) = match self.launch(line, &run_key(&arguments)) {
             Ok(run) => run,
             Err(said) => return Ok(said),
         };
@@ -251,15 +312,13 @@ impl Pilot {
     fn launch(
         &self,
         mut line: Vec<String>,
-        device: Option<&str>,
+        name: &str,
     ) -> Result<(String, std::path::PathBuf), CallToolResult> {
         let Ok(mut sessions) = self.sessions.lock() else {
             return Err(refused(&poisoned()));
         };
         let busy = sessions.still_running();
-        if let Some(already) = busy
-            .iter()
-            .find(|running| device.is_none_or(|asked| *running == asked))
+        if let Some(already) = busy_with(name, &busy.iter().map(String::as_str).collect::<Vec<_>>())
         {
             return Err(refused(&format!(
                 "{already} is already being driven. Watch it with run_status, answer it with \
@@ -267,7 +326,7 @@ impl Pilot {
             )));
         }
 
-        let name = device.map_or_else(|| "the attached device".to_owned(), ToOwned::to_owned);
+        let name = name.to_owned();
         let desk = std::env::temp_dir().join(format!(
             "jev-pilot-mcp-{}",
             name.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
@@ -404,8 +463,9 @@ impl Pilot {
 
     /// End a run that is still going.
     #[tool(
-        description = "End a run that is still going, leaving the device wherever it got to. \
-                       Nothing further is done to the device.",
+        description = "End a run that is still going, leaving the device or tab wherever it \
+                       got to. Nothing further is done to it. A fresh browser the run started \
+                       is closed and its profile removed.",
         annotations(title = "Stop a run", read_only_hint = false)
     )]
     pub async fn stop_run(
@@ -421,7 +481,7 @@ impl Pilot {
         };
         if sessions.forget(&run) {
             Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "the run on {run} is stopped; the device is left where it got to"
+                "the run on {run} is stopped; what it drove is left where it got to"
             ))]))
         } else {
             Ok(refused(&format!("no run on {run}")))
@@ -451,9 +511,9 @@ impl ServerHandler for Pilot {
 /// that sent it hunting through a launcher, a claim about text that was below
 /// the fold, a floor lowered in the belief it only made things quicker.
 const GUIDANCE: &str = "\
-Drives an Android or iOS device towards a goal. Code enumerates what the \
-screen allows and a model picks one of those, so nothing here can invent a \
-coordinate or name a row that is not on screen.
+Drives an Android or iOS device, or a tab of a web browser, towards a goal. \
+Code enumerates what the screen allows and a model picks one of those, so \
+nothing here can invent a coordinate or name a row that is not on screen.
 
 LOOK FIRST. `observe` is free and changes nothing, and it tells you the rows, \
 what the screen says, the controls it shows but will not let anything use, \
@@ -505,7 +565,27 @@ minutes and then gives up, so a run nobody comes back to is a run that dies \
 of it.
 
 ONE RUN PER DEVICE. A second run on the same phone would take turns at the \
-same screen with the first. Stop or finish the one that is there.";
+same screen with the first. Stop or finish the one that is there.
+
+A BROWSER. Pass `browser` instead of `device` to `observe`, `devices` and \
+`start_run`; naming both is refused. `mode` 'fresh' starts a browser on a \
+throwaway profile and asks nobody. `mode` 'attach' drives the owner's own \
+Chrome, which must have remote debugging turned on at \
+chrome://inspect/#remote-debugging, and then:
+- Every tool call is a new connection, and Chrome asks the owner to click \
+Allow for each one. Its dialog has Cancel focused, so Enter refuses. A look \
+waits forty seconds for the click.
+- If the attach is refused (Cancel was chosen, or Chrome had no window open), \
+say so to the owner and stop. Never retry: each retry raises another dialog.
+- Page text from the owner's signed-in sessions goes to the model, as screen \
+text does on a phone. Only tabs the run opened or started on are described.
+Choose the tab with `tab` (its id or part of its address, as `devices` lists \
+them) or open one with `open`. For a browser, `urls` replaces `app`: it lists \
+the addresses the run may go to, and `open` is always one of them. A browser \
+run is named `browser:fresh` or `browser:attach:<channel>`; pass that as \
+`device` to `run_status`, `answer_run` and `stop_run` when more than one run \
+is going. A run may ask you to `switch_tab` or `navigate` by index, or to \
+`accept_dialog` or `dismiss_dialog` a JavaScript dialog.";
 
 /// Say what came of waiting, in a way the caller can act on.
 fn waited(run: &str, how: Waited) -> CallToolResult {
@@ -642,29 +722,47 @@ pub fn which_run(asked: Option<&str>, running: &[&str]) -> Result<String, String
 
 /// The command line one tool call stands for.
 ///
-/// `None` when the arguments do not make a call worth running — a run with no
-/// goal is not a run.
-///
 /// Built here rather than in a shell string: the goal and the words to type
 /// come from whoever is talking to this server, and a string handed to a shell
 /// is a string that can carry a second command. These reach the process as
 /// separate arguments and nothing parses them again.
-#[must_use]
-pub fn invocation(tool: &str, arguments: &serde_json::Value) -> Option<Vec<String>> {
+///
+/// # Errors
+/// Returns what to tell the caller when the arguments do not make a call
+/// worth running: a run with no goal, or a call naming both a device and a
+/// browser.
+pub fn invocation(tool: &str, arguments: &serde_json::Value) -> Result<Vec<String>, String> {
     let text = |key: &str| {
         arguments
             .get(key)
             .and_then(serde_json::Value::as_str)
             .map(ToOwned::to_owned)
     };
+    let browser = arguments.get("browser").filter(|b| b.is_object());
+    if browser.is_some() && text("device").is_some() {
+        return Err(
+            "name a device or a browser, not both: a run drives one thing at a time".to_owned(),
+        );
+    }
     let mut args = Vec::new();
     if let Some(device) = text("device") {
         args.push("--device".to_owned());
         args.push(device);
     }
     match tool {
-        "observe" => args.push("observe".to_owned()),
-        "devices" => args.push("devices".to_owned()),
+        "observe" | "devices" => {
+            args.push(tool.to_owned());
+            if let Some(browser) = browser {
+                browser_flags(browser, &mut args);
+                // Each look is a new connection, so the owner clicks Allow
+                // again; a client gives up long before the command line's
+                // two minutes.
+                if browser.get("mode").and_then(serde_json::Value::as_str) == Some("attach") {
+                    args.push("--allow-wait".to_owned());
+                    args.push(ALLOW_WAIT_FOR_A_LOOK.to_string());
+                }
+            }
+        }
         "helper" => {
             args.push("helper".to_owned());
             if arguments
@@ -676,18 +774,19 @@ pub fn invocation(tool: &str, arguments: &serde_json::Value) -> Option<Vec<Strin
             }
         }
         "start_run" => {
-            let goal = text("goal")?;
+            let goal = text("goal").ok_or_else(|| "a run needs a goal".to_owned())?;
+            if let Some(browser) = browser {
+                browser_flags(browser, &mut args);
+            }
+            for url in strings(arguments.get("urls")) {
+                args.push("--url".to_owned());
+                args.push(url.to_owned());
+            }
             if let Some(app) = text("app") {
                 args.push("--app".to_owned());
                 args.push(app);
             }
-            for claim in arguments
-                .get("accept")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(serde_json::Value::as_str)
-            {
+            for claim in strings(arguments.get("accept")) {
                 args.push("--accept".to_owned());
                 args.push(claim.to_owned());
             }
@@ -699,13 +798,7 @@ pub fn invocation(tool: &str, arguments: &serde_json::Value) -> Option<Vec<Strin
                     }
                 }
             }
-            for step in arguments
-                .get("plan")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(serde_json::Value::as_str)
-            {
+            for step in strings(arguments.get("plan")) {
                 args.push("--then".to_owned());
                 args.push(step.to_owned());
             }
@@ -726,9 +819,92 @@ pub fn invocation(tool: &str, arguments: &serde_json::Value) -> Option<Vec<Strin
             args.push("--".to_owned());
             args.push(goal);
         }
-        _ => return None,
+        _ => return Err(format!("{tool} is not a tool this server has")),
     }
-    Some(args)
+    Ok(args)
+}
+
+/// How long a look at an attached browser waits for the owner to click Allow,
+/// in seconds.
+const ALLOW_WAIT_FOR_A_LOOK: u64 = 40;
+
+/// The strings in a JSON array, skipping anything else.
+fn strings(value: Option<&serde_json::Value>) -> impl Iterator<Item = &str> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+}
+
+/// The command line's flags for a `browser` argument, in the order the
+/// argument's fields are documented.
+fn browser_flags(browser: &serde_json::Value, args: &mut Vec<String>) {
+    let text = |key: &str| browser.get(key).and_then(serde_json::Value::as_str);
+    for (key, flag) in [
+        ("mode", "--browser"),
+        ("tab", "--tab"),
+        ("open", "--open"),
+        ("channel", "--channel"),
+        ("endpoint", "--endpoint"),
+        ("chrome", "--chrome"),
+    ] {
+        if let Some(value) = text(key) {
+            args.push(flag.to_owned());
+            args.push(value.to_owned());
+        }
+    }
+    if browser.get("headless").and_then(serde_json::Value::as_bool) == Some(true) {
+        args.push("--headless".to_owned());
+    }
+}
+
+/// What a run is called: the device serial it drives, or for a browser
+/// `browser:attach:<channel>` or `browser:fresh`.
+///
+/// One attached Chrome per channel and one fresh browser at a time, because
+/// that is what each names: two runs attached to one Chrome would take turns
+/// at its tabs.
+#[must_use]
+pub fn run_key(arguments: &serde_json::Value) -> String {
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+    };
+    if let Some(browser) = arguments.get("browser").filter(|b| b.is_object()) {
+        return match text(browser, "mode").as_deref() {
+            Some("attach") => format!(
+                "browser:attach:{}",
+                text(browser, "channel").unwrap_or_else(|| "stable".to_owned())
+            ),
+            _ => "browser:fresh".to_owned(),
+        };
+    }
+    text(arguments, "device").unwrap_or_else(|| UNNAMED_DEVICE.to_owned())
+}
+
+/// What a phone run that named no device is called.
+const UNNAMED_DEVICE: &str = "the attached device";
+
+/// The run already going that a new run called `key` would collide with.
+///
+/// The same name collides. So does a phone run that named no device with any
+/// other phone run, since it could be on any of them; browser runs are never
+/// on a phone.
+#[must_use]
+pub fn busy_with(key: &str, running: &[&str]) -> Option<String> {
+    let phone = |name: &str| !name.starts_with("browser:");
+    running
+        .iter()
+        .find(|name| {
+            **name == key
+                || (phone(key)
+                    && phone(name)
+                    && (key == UNNAMED_DEVICE || **name == UNNAMED_DEVICE))
+        })
+        .map(|name| (*name).to_owned())
 }
 
 /// What an answer to an impasse writes to the desk.
@@ -858,8 +1034,7 @@ impl Sessions {
     pub fn forget(&mut self, run: &str) -> bool {
         match self.runs.remove(run) {
             Some(mut run) => {
-                let _ = run.child.kill();
-                let _ = run.child.wait();
+                run.end();
                 true
             }
             None => false,
@@ -873,10 +1048,8 @@ impl Drop for Sessions {
     /// Left going, a run carries on tapping at somebody's phone with nothing
     /// watching it and nothing able to answer it when it asks.
     fn drop(&mut self) {
-        for (_, run) in std::mem::take(&mut self.runs) {
-            let mut run = run;
-            let _ = run.child.kill();
-            let _ = run.child.wait();
+        for (_, mut run) in std::mem::take(&mut self.runs) {
+            run.end();
         }
     }
 }
@@ -889,6 +1062,19 @@ struct Run {
 }
 
 impl Run {
+    /// End the run outright, and clear what it leaves behind.
+    ///
+    /// Ended without warning, a run cannot close a browser it started, so the
+    /// fresh profile it was using, and the browser if it is still running, are
+    /// removed here. Nothing of the kind exists for a phone run, and nothing
+    /// is found.
+    fn end(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        #[cfg(feature = "browser")]
+        let _ = crate::browser::launch::reap_run(&std::env::temp_dir(), self.child.id());
+    }
+
     /// Whether this run has ended on its own.
     fn finished(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))

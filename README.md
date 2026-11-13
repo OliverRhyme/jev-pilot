@@ -1,6 +1,7 @@
 # jev-pilot
 
-Drive a mobile UI with [TypeSafe Jev] as the decision provider.
+Drive a mobile UI, or a tab of a web browser, with [TypeSafe Jev] as the
+decision provider.
 
 Most mobile agents put a large model in the loop and ask it *what to do*. It
 answers in prose or JSON you parse, containing coordinates it invented. Every
@@ -40,6 +41,7 @@ One program, `jev-pilot`, prebuilt for macOS (Apple silicon and Intel), Linux
 | Command | What it does |
 | --- | --- |
 | `jev-pilot "<goal>"` | Observes the screen, asks Jev, and drives the device. |
+| `jev-pilot --browser attach\|fresh "<goal>"` | The same, in a Chrome tab. See [A web browser](#a-web-browser). |
 | `jev-pilot mcp` | Serves the Model Context Protocol over stdio, so an agent can start runs and answer their questions. Each tool call runs this same program, so the server and the command line cannot drift apart. |
 
 ### 1. Install jev-pilot
@@ -194,11 +196,12 @@ Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%jev-pilot%mcp%'" | Inv
 With Rust 1.98 or newer, from a clone:
 
 ```console
-$ cargo install --path . --features mcp --locked
+$ cargo install --path . --features mcp,browser --locked
 ```
 
-This installs into `~/.cargo/bin` instead. Leave off `--features mcp` for a
-build without the server; it brings an async runtime nothing else needs.
+This installs into `~/.cargo/bin` instead. Leave off `mcp` for a build without
+the server; it brings an async runtime nothing else needs. Leave off `browser`
+for a build that drives phones only. The prebuilt releases have both.
 
 ### Releasing
 
@@ -315,7 +318,7 @@ A run is four calls rather than one that blocks until it is over:
 | `start_run` | begin, and come back with the first thing it wants |
 | `run_status` | every step so far, what it is asking, or how it ended |
 | `answer_run` | answer it — an operation and row it was offered, or the words to type — and come back with the next thing it wants |
-| `stop_run` | end it, leaving the device where it got to |
+| `stop_run` | end it, leaving the device or tab where it got to |
 
 Latency matters here more than anywhere else in the loop, because a run at an
 impasse is doing *nothing* — not observing, not judging, not tapping — until an
@@ -349,6 +352,19 @@ already being driven is refused, and told to watch, answer or stop the run it ha
 
 Runs end when the conversation does. Left going, one carries on tapping at
 somebody's phone with nothing watching it and nothing able to answer it.
+
+**A browser over MCP.** `observe`, `devices` and `start_run` take a `browser`
+argument in place of `device` (`mode`, `tab`, `open`, `channel`, `endpoint`,
+`chrome`, `headless`), and `start_run` takes `urls` in place of `app`; each
+becomes the command line's flag, and a call naming both a device and a browser
+is refused. A browser run is named `browser:attach:<channel>` or
+`browser:fresh`, beside device serials, so the rule of one run per target still
+holds and a browser run never blocks a phone run. Every tool call is its own
+connection, so in attach mode each one needs its own click on Allow; a look
+waits forty seconds for it, because a client gives up long before the command
+line's two minutes. The server's instructions tell the client never to retry a
+refused attach. Stopping a fresh run closes its browser and removes its
+profile.
 
 **When a run cannot decide, the client answers it** — on its own turn, through
 the result of the call it is already waiting on. The model holding the
@@ -425,6 +441,7 @@ iOS does not, so an iOS catalog never offers one.
 |---|---|---|---|
 | Android | UIAutomator dump | Back, Home, App switcher | Drives a physical Pixel 8 Pro end to end |
 | iOS | XCUITest | Home, App switcher | **Unverified against hardware** — see below |
+| Browser | Accessibility tree + layout, over the DevTools Protocol | Back | Reads and acts on Chrome for Testing 153; attach mode not yet run against an everyday Chrome |
 
 ### iOS caveat
 
@@ -434,6 +451,100 @@ clickable containers with no text of their own, so labelling the leaf text
 yields elements that read well and cannot be tapped. The iOS reader has had no
 such contact with reality. Treat it as a starting point to correct against a
 real hierarchy dump, not as a finished counterpart.
+
+## A web browser
+
+`--browser` drives a tab of Chrome (or Chrome for Testing, or Chromium) with
+the same loop, the same desk and the same rules: code lists what the page
+allows, and Jev picks one. It needs a build with the `browser` feature, which
+the prebuilt releases have.
+
+The engine speaks the Chrome DevTools Protocol itself, over one websocket to
+127.0.0.1. Each step reads the tab's accessibility tree and its layout (boxes,
+paint order, which elements have click listeners) and joins them into a page
+read; the Browser platform turns that into rows, just as the Android reader
+turns a UIAutomator dump into rows.
+
+### Two ways to reach a browser
+
+**`--browser fresh`** starts a browser for the run on a new, empty profile, and
+closes it and deletes the profile when the run ends. Nobody is asked anything,
+and nothing of yours is touched. It looks for the binary in this order:
+`--chrome <path>`, `JEV_PILOT_CHROME`, then Chrome for Testing, Chromium and
+Chrome in their usual places. `npx @puppeteer/browsers install chrome@stable`
+installs Chrome for Testing and prints its path. `--headless` runs it without a
+window.
+
+If a fresh run is killed before it can clean up, its profile is removed the
+next time a fresh run starts. When an MCP client stops a run, the server
+removes it at once, along with the browser.
+
+**`--browser attach`** drives the Chrome you already have open, signed in as
+you. Turn on remote debugging first, at `chrome://inspect/#remote-debugging`
+(Chrome 144 or later). Then:
+
+- **Chrome asks every time.** Each connection raises "Allow remote debugging?",
+  and nothing remembers the answer. Cancel is the focused button, so pressing
+  Enter refuses. A run connects once, at its start, and says "Click Allow in
+  Chrome (Enter chooses Cancel)" while it waits, for up to two minutes
+  (`--allow-wait <seconds>` to change that).
+- **It never retries.** Each retry would stack another dialog. A refusal says
+  what to do: Cancel was chosen, or Chrome had no window open (it then refuses
+  without asking), or remote debugging is off, or its `DevToolsActivePort` file
+  is stale.
+- **On macOS**, if the terminal may not read Chrome's folder, grant it access
+  under System Settings > Privacy & Security > Files & Folders.
+- `--channel beta|dev|canary` attaches to another channel's Chrome, and
+  `--endpoint ws://…` skips finding it.
+
+### Choosing the tab, and where the run may go
+
+| Flag | Meaning |
+| --- | --- |
+| `--tab <id\|text>` | Drive an existing tab: by its id, or the one tab whose address contains the text. `jev-pilot devices --browser attach` lists the tabs and their ids. Without it, a browser with a single tab drives that tab. |
+| `--open <url>` | Open a new tab at the address and drive it. In fresh mode it loads in the browser's first tab. Not with `--tab`. |
+| `--url <url>` | Another address `navigate` may go to; repeatable. The `--open` address is always one. This is what `--app` is to a phone, and `--app` and `--device` are refused alongside `--browser`. |
+
+`observe` and `devices` take the same flags. `observe`'s list of operations
+never includes `navigate`, because the addresses are given only to a run; a
+run with `--url` offers it whenever a supplied address is not the current one.
+
+### What a run sees and does
+
+- **Rows** are the controls a person could use, in paint order, so a sticky
+  header or a modal covers what is under it. Rows up to one viewport above or
+  below the screen are offered too, marked "off screen"; anything further is
+  reached by scrolling. A password field says "contents not shown", and its
+  value is never read.
+- **Clicks are checked when they are made.** Before clicking, the engine
+  checks that the page has not been replaced since it was read, scrolls an
+  off-screen row into view, and hit-tests the point. If something else is
+  drawn there (a cookie banner, say), it does not click, and tells the run
+  what is in the way.
+- **Each action reports what it did**: "navigated to …", "opened a new tab:
+  …", "a dialog opened: …", "the field now holds …", "the tap was not made:
+  …", or "nothing changed". The line reaches the next step's judgment and the
+  transcript.
+- **JavaScript dialogs.** An alert is accepted at once and its words shown on
+  the next step. A confirm, prompt or "leave this page?" waits for
+  `accept_dialog` or `dismiss_dialog`; accepting is held to the floor for
+  destructive actions. The page cannot be read or touched while one is open,
+  and Chrome does not report a dialog that was already open before the run
+  attached, so a page that will not answer is reported as possibly blocked by
+  one.
+- **Tabs.** Tabs the run opens, and tabs those open, belong to the run, and
+  `switch_tab` can move to them. Other tabs are never described. In attach
+  mode no tab the run did not open is closed.
+
+### Privacy
+
+In attach mode the page text of the tab being driven goes to TypeSafe with
+each step, exactly as screen text does on a phone, and that tab may be signed
+in to your accounts. Only the tabs the run started on or opened are described;
+your other tabs never are. Password values are never read. Words you supply
+are typed only after the endpoint has shown it is Chrome, and page script runs
+only for the engine's own fixed jobs (choosing a `<select>` option, watching
+for the page to go quiet), never with text from the model.
 
 ## Credentials
 
@@ -453,7 +564,9 @@ it through a derived `Debug` in a panic message or error report.
 
 `serde`, `serde_json`, `roxmltree`, and — only with the default `http` feature —
 `ureq`. The `mcp` feature adds `rmcp`, `tokio` and `schemars` for the server, and
-nothing else uses them. No Appium, no WebDriverAgent client, no `mobile-use`. The
+nothing else uses them. The `browser` feature adds `tungstenite`, with no TLS and
+no async runtime: every browser endpoint is a local websocket, and the DevTools
+messages are written by hand rather than generated for the whole protocol. No Appium, no WebDriverAgent client, no `mobile-use`. The
 Android adapter shells out to `adb` directly.
 
 Turn `http` off and the crate builds requests for you to send with whatever
