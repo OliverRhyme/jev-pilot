@@ -72,7 +72,7 @@ fn without_an_escalation_policy_an_impasse_ends_the_run() {
         .expect("the run completes");
 
     assert!(matches!(ending, Ending::Uncertain { .. }), "got {ending:?}");
-    assert!(pilot.device().performed.is_empty());
+    assert_eq!(pilot.device().performed, [] as [Command; 0]);
 }
 
 /// A second opinion picks from the same enumerated set Jev was offered. It is
@@ -138,7 +138,7 @@ fn an_escalation_may_decline_and_stop_the_run() {
         .expect("the run completes");
 
     assert!(matches!(ending, Ending::Uncertain { .. }), "got {ending:?}");
-    assert!(pilot.device().performed.is_empty());
+    assert_eq!(pilot.device().performed, [] as [Command; 0]);
 }
 
 /// The explicit do-nothing policy, for a caller who wants the default named.
@@ -733,7 +733,7 @@ fn a_tap_on_a_screen_that_commits_is_held_to_the_higher_floor() {
         .pursue("Send fifty pesos")
         .expect("the run completes");
     assert!(matches!(ending, Ending::Uncertain { .. }), "{ending:?}");
-    assert!(committing.device().performed.is_empty());
+    assert_eq!(committing.device().performed, [] as [Command; 0]);
 
     let mut ordinary = Pilot::new(
         Fake::default(),
