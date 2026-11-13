@@ -660,3 +660,20 @@ fn a_fresh_profile_appears_already_locked() {
     drop((other, lock));
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+/// A refused or unanswered prompt is the owner's call. Read by an agent over
+/// MCP, "run again" is an instruction to retry, and each retry raises another
+/// prompt, so these say that nothing is retried and leave the next attempt to
+/// the owner.
+#[test]
+fn a_refused_attach_does_not_invite_a_retry() {
+    for error in [
+        AttachError::from(ConnectError::Rejected { status: 403 }),
+        AttachError::from(ConnectError::TimedOut),
+    ] {
+        let message = error.to_string();
+        assert!(!message.to_lowercase().contains("run again"), "{message}");
+        assert!(message.contains("not retried"), "{message}");
+        assert!(message.contains("owner"), "{message}");
+    }
+}

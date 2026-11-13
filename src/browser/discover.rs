@@ -291,11 +291,13 @@ impl core::fmt::Display for AttachError {
             Self::Rejected { status } => write!(
                 f,
                 "Chrome refused the connection ({status}): Cancel was chosen (Enter chooses it), \
-                 or Chrome has no open window, and then refuses without asking. \
-                 Open a window and run again"
+                 or Chrome has no open window, and then refuses without asking. It is not \
+                 retried, because each attempt asks again; whether to try once more, with a \
+                 window open, is the owner's call"
             ),
             Self::TimedOut => f.write_str(
-                "Chrome's prompt timed out: Allow was not clicked. Run again and click Allow",
+                "Chrome's prompt timed out: Allow was not clicked. It is not retried, because \
+                 each attempt asks again; whether to try once more is the owner's call",
             ),
             Self::NotChrome { product } => write!(
                 f,
