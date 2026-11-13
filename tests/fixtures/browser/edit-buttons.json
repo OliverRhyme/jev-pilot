@@ -1,0 +1,108 @@
+{
+ "url": "https://profile.example.test/me",
+ "title": "Profile",
+ "viewport": {
+  "width": 1280.0,
+  "height": 720.0
+ },
+ "nodes": [
+  {
+   "frame": "main",
+   "role": "heading",
+   "name": "Experience",
+   "bounds": {
+    "x": 100,
+    "y": 100,
+    "width": 200,
+    "height": 28
+   },
+   "key": "main:1"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "Edit",
+   "states": {
+    "focusable": true
+   },
+   "context": "Experience",
+   "bounds": {
+    "x": 900,
+    "y": 100,
+    "width": 60,
+    "height": 28
+   },
+   "key": "main:2"
+  },
+  {
+   "frame": "main",
+   "role": "listitem",
+   "name": "Education: State University",
+   "bounds": {
+    "x": 100,
+    "y": 200,
+    "width": 900,
+    "height": 60
+   },
+   "key": "main:3"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "Edit",
+   "states": {
+    "focusable": true
+   },
+   "bounds": {
+    "x": 900,
+    "y": 210,
+    "width": 60,
+    "height": 28
+   },
+   "key": "main:4"
+  },
+  {
+   "frame": "main",
+   "role": "heading",
+   "name": "Skills",
+   "bounds": {
+    "x": 100,
+    "y": 300,
+    "width": 200,
+    "height": 28
+   },
+   "key": "main:5"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "Edit",
+   "states": {
+    "focusable": true
+   },
+   "context": "Skills",
+   "bounds": {
+    "x": 900,
+    "y": 300,
+    "width": 60,
+    "height": 28
+   },
+   "key": "main:6"
+  },
+  {
+   "frame": "main",
+   "role": "button",
+   "name": "Save",
+   "states": {
+    "focusable": true
+   },
+   "bounds": {
+    "x": 900,
+    "y": 400,
+    "width": 80,
+    "height": 36
+   },
+   "key": "main:7"
+  }
+ ]
+}
