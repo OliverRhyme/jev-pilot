@@ -31,6 +31,7 @@ fn sample() -> PageRead {
                 role: "combobox".into(),
                 name: "Country".into(),
                 value: Some("Philippines".into()),
+                protected: false,
                 description: Some("Where you live".into()),
                 states: jev_pilot::platform::page::NodeStates {
                     focusable: true,
@@ -58,6 +59,7 @@ fn sample() -> PageRead {
                 role: "generic".into(),
                 name: String::new().into(),
                 value: None,
+                protected: false,
                 description: None,
                 states: jev_pilot::platform::page::NodeStates::default(),
                 clickable: false,
@@ -108,4 +110,8 @@ fn a_fixture_may_leave_out_what_a_node_does_not_have() {
     );
     assert_eq!(node.options, Vec::<Box<str>>::new());
     assert_eq!(node.value, None);
+    assert!(
+        !node.protected,
+        "a node is not a password field unless it says so"
+    );
 }

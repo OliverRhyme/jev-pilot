@@ -95,9 +95,12 @@ pub struct PageNode {
     /// What a screen reader would call it.
     #[serde(default)]
     pub name: Box<str>,
-    /// What it holds, for a field.
+    /// What it holds, for a field. Never set for a password field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<Box<str>>,
+    /// Whether it is a password field, whose value is never read.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub protected: bool,
     /// Supporting text beyond its name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Box<str>>,
