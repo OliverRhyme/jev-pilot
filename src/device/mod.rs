@@ -192,4 +192,17 @@ pub trait Device {
     fn home_screen_app(&mut self) -> Option<Box<str>> {
         None
     }
+
+    /// What the last command did, as the device saw it.
+    ///
+    /// A tap that was refused, a link that opened a new tab and a click that
+    /// changed nothing look alike from the screen alone, and a run that cannot
+    /// tell them apart repeats what did not work. The pilot tells the judge, and
+    /// records it in the transcript.
+    ///
+    /// Defaulted to `None`: a phone has nothing to add to what its next
+    /// reading shows.
+    fn outcome(&mut self) -> Option<Box<str>> {
+        None
+    }
 }

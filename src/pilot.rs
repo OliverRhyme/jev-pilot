@@ -11,7 +11,7 @@ use crate::act::{
 use crate::device::{Command, Device, command_for};
 use crate::judgment::{Confidence, Criterion, Progress};
 use crate::platform::Platform;
-use crate::snapshot::{Element, ElementRef, Snapshot, TapError};
+use crate::snapshot::{Bounds, Dialog, Element, ElementRef, Snapshot, TapError};
 use crate::step::{StepAnswers, StepQuestions};
 use core::fmt;
 
@@ -391,6 +391,11 @@ pub struct StepReport<'s> {
     pub goal_met: Progress,
     /// How likely the screen was an error state.
     pub is_error_screen: f64,
+    /// What the device said the action did, when it said anything.
+    ///
+    /// Recorded so a transcript can tell a tap that did nothing from one that
+    /// was never made, which the screen alone cannot.
+    pub outcome: Option<String>,
     /// Whether the step carried its action out, or waited instead.
     ///
     /// Recorded because the two look identical otherwise: a step that chose
@@ -510,6 +515,10 @@ pub struct Pilot<'p, D, J, X = Halt, C = Mute> {
     keys: Vec<Box<str>>,
     /// Names of the fields the caller supplied words for, lowercased.
     supplied: Vec<Box<str>>,
+    /// The addresses the caller allows a browser to be sent to.
+    destinations: Vec<Box<str>>,
+    /// What the device said the last action did, for the step report.
+    outcome: Option<Box<str>>,
 }
 
 impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
@@ -539,6 +548,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             plan: self.plan,
             keys: self.keys,
             supplied: self.supplied,
+            destinations: self.destinations,
+            outcome: self.outcome,
         }
     }
 
@@ -566,6 +577,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             plan: self.plan,
             keys: self.keys,
             supplied: self.supplied,
+            destinations: self.destinations,
+            outcome: self.outcome,
         }
     }
 }
@@ -590,6 +603,8 @@ impl<'p, D: Device, J: Judge> Pilot<'p, D, J, Halt, Mute> {
             plan: Vec::new(),
             keys: Vec::new(),
             supplied: Vec::new(),
+            destinations: Vec::new(),
+            outcome: None,
         }
     }
 }
@@ -745,6 +760,16 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             .into_iter()
             .map(|field| field.as_ref().to_lowercase().into_boxed_str())
             .collect();
+        self
+    }
+
+    /// The addresses a browser may be sent to.
+    ///
+    /// Only these are ever offered to `navigate`, and the model chooses among
+    /// them by position: an address of its own is not something it can write.
+    #[must_use]
+    pub fn navigating_to<S: Into<Box<str>>>(mut self, urls: impl IntoIterator<Item = S>) -> Self {
+        self.destinations = urls.into_iter().map(Into::into).collect();
         self
     }
 
@@ -961,6 +986,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),
             goal_met: answers.goal_met.progress(),
             is_error_screen: answers.is_error_screen.noul,
+            outcome: self.outcome.as_deref().map(ToOwned::to_owned),
             acted: went.acted,
             read_ms: spent.read_ms,
             step_ms: spent.step_ms,
@@ -1242,6 +1268,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // Filled in as the step goes: zero until the act, since a step
             // that touches nothing settles nothing.
             let mut settled_ms = 0_u64;
+            self.outcome = None;
             let mut snapshot = self.device.observe().map_err(RunError::Device)?;
             // A sheet whose scrim renders before its contents offers exactly
             // one row, and that row is the way out of it. Acting then taps
@@ -1266,8 +1293,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             {
                 origin = Some(app.into());
             }
-            let mut catalog =
-                Catalog::for_screen(&snapshot, self.platform).returning_to(origin.as_deref());
+            let mut catalog = Catalog::for_screen(&snapshot, self.platform)
+                .returning_to(origin.as_deref())
+                .navigating_to(&self.destinations);
             if self.types {
                 catalog = catalog.accepting_text();
             }
@@ -1355,6 +1383,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             sequence: sequence.as_ref(),
                             empty_fields: &empty_fields,
                             words_ready_for: &words_ready_for,
+                            url: snapshot.url(),
+                            dialog: snapshot.dialog(),
                         },
                     ),
                     &questions,
@@ -1642,10 +1672,36 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     let text = text?;
                     Act::TypeText { into, text }
                 }
+                // The same handover as a field, with the prompt's own question
+                // standing where a field's name would: whoever writes the
+                // words, or looks them up by key, sees what is being asked.
                 Decision::NeedsPromptText => {
-                    return Ok(Ending::Uncertain {
-                        because: Indecision::NoTarget,
-                    });
+                    let rows: Vec<String> = snapshot
+                        .refs()
+                        .map(|(_, element)| element.describe())
+                        .collect();
+                    let question = snapshot.dialog().map_or("", |open| &*open.message);
+                    let asked = Element {
+                        label: question.into(),
+                        detail: None,
+                        editable: true,
+                        bounds: Bounds::from_origin_size(0, 0, 0, 0),
+                    };
+                    let asking = std::time::Instant::now();
+                    let words = self
+                        .composer
+                        .compose(&Writing {
+                            goal,
+                            step: index,
+                            field: &asked,
+                            rows: &rows,
+                            previous: previous.as_deref(),
+                        })
+                        .map_err(RunError::Composition);
+                    waited.set(waited.get().saturating_add(elapsed_ms(asking)));
+                    Act::Dialog(DialogReply::Accept {
+                        words: Some(words?),
+                    })
                 }
             };
 
@@ -1840,6 +1896,17 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     let moved =
                         self.settled_on_a_new_screen(snapshot.fingerprint(), ineffective + 1)?;
                     settled_ms = elapsed_ms(acting);
+                    // What the device saw the command do, which the screen
+                    // alone cannot say: a tap refused because a banner sat
+                    // over its target leaves the page as it was, exactly as a
+                    // tap that worked on nothing does.
+                    self.outcome = self.device.outcome();
+                    if let Some(outcome) = &self.outcome {
+                        previous = Some(format!(
+                            "{} — {outcome}",
+                            previous.as_deref().unwrap_or("Acted")
+                        ));
+                    }
                     if moved {
                         ineffective = 0;
                         just_moved = true;
@@ -1943,6 +2010,10 @@ struct Standing<'s> {
     empty_fields: &'s [&'s str],
     /// Fields the caller supplied words for, by name.
     words_ready_for: &'s [&'s str],
+    /// Where a browser is, when the screen is a page.
+    url: Option<&'s str>,
+    /// The dialog open over the page, if there is one.
+    dialog: Option<&'s Dialog>,
 }
 
 fn describe(
@@ -1963,6 +2034,8 @@ fn describe(
         sequence,
         empty_fields,
         words_ready_for,
+        url,
+        dialog,
     } = where_it_stands;
     // Rows are keyed the way the Choice offers them, so its options can be
     // bare keys and the text travels once rather than twice.
@@ -2033,6 +2106,20 @@ fn describe(
     {
         state["in_progress"] =
             format!("The app is still working on the previous action: {busy}").into();
+    }
+    // Said only of a page, so a phone's state is the one it always was.
+    if let Some(url) = url {
+        state["url"] = url.into();
+    }
+    if let Some(open) = dialog {
+        // Under a dialog the page cannot be touched, and what is being asked
+        // is the whole decision: said as its own fact, not left among the
+        // words the page happens to show.
+        state["dialog"] = serde_json::json!({
+            "kind": open.kind,
+            "message": open.message,
+            "default_text": open.default_prompt,
+        });
     }
     if !says.is_empty() {
         // Apart from the rows, and unkeyed: none of it can be chosen, and a

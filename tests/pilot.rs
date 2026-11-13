@@ -1838,3 +1838,325 @@ fn a_run_whose_last_step_did_not_reach_the_goal_runs_out() {
     assert_eq!(ending, Ending::OutOfSteps { limit: 1 });
     assert_eq!(pilot.device().performed.len(), 1);
 }
+
+// ── Driving a browser ───────────────────────────────────────────────────────
+
+mod browser {
+    use super::{Recording, Scripted, answer};
+    use jev_pilot::act::{DialogReply, Operation, Outcome};
+    use jev_pilot::device::{Command, Device};
+    use jev_pilot::pilot::{Ending, Pilot, Writing};
+    use jev_pilot::platform::{HierarchyError, Platform};
+    use jev_pilot::snapshot::{
+        Bounds, Dialog, DialogKind, Element, NodeKey, Snapshot, Tab, TabKey,
+    };
+    use std::cell::RefCell;
+    use std::convert::Infallible;
+    use std::rc::Rc;
+
+    /// The browser's operations, standing in for the real platform.
+    struct Web;
+
+    impl Platform for Web {
+        fn name(&self) -> &'static str {
+            "Web"
+        }
+        fn operations(&self) -> &'static [Operation] {
+            &[
+                Operation::Tap,
+                Operation::TypeText,
+                Operation::Submit,
+                Operation::ScrollDown,
+                Operation::Back,
+                Operation::Navigate,
+                Operation::SwitchTab,
+                Operation::AcceptDialog,
+                Operation::DismissDialog,
+                Operation::Wait,
+                Operation::Done,
+                Operation::Blocked,
+            ]
+        }
+        fn parse_hierarchy(&self, _raw: &str) -> Result<Snapshot, HierarchyError> {
+            unreachable!("these tests build snapshots by hand")
+        }
+    }
+
+    fn row(label: &str, top: i32) -> Element {
+        Element {
+            label: label.into(),
+            detail: None,
+            editable: false,
+            bounds: Bounds::from_origin_size(0, top, 100, 20),
+        }
+    }
+
+    /// A browser whose screen depends on how many commands it has carried out.
+    struct Browser {
+        performed: Vec<Command>,
+        screens: Vec<Snapshot>,
+        outcomes: Vec<Option<&'static str>>,
+    }
+
+    impl Browser {
+        fn new(
+            screens: impl IntoIterator<Item = Snapshot>,
+            outcomes: Vec<Option<&'static str>>,
+        ) -> Self {
+            Self {
+                performed: Vec::new(),
+                screens: screens.into_iter().collect(),
+                outcomes,
+            }
+        }
+    }
+
+    impl Device for Browser {
+        type Error = Infallible;
+        fn observe(&mut self) -> Result<Snapshot, Infallible> {
+            // The same screen read again is a fresh snapshot of it.
+            let index = self.performed.len().min(self.screens.len() - 1);
+            let shown = &self.screens[index];
+            let mut again = Snapshot::new(shown.refs().map(|(_, e)| e.clone()).collect())
+                .expect("fits")
+                .at_url(shown.url().map(Box::from))
+                .with_tabs(shown.tabs().map(|(_, tab)| tab.clone()).collect())
+                .with_dialog(shown.dialog().cloned());
+            again = again.with_node_keys(
+                shown
+                    .refs()
+                    .map(|(handle, _)| shown.node_key(handle).ok().flatten().cloned())
+                    .collect(),
+            );
+            Ok(again)
+        }
+        fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+            self.performed.push(command.clone());
+            Ok(())
+        }
+        fn outcome(&mut self) -> Option<Box<str>> {
+            let index = self.performed.len().checked_sub(1)?;
+            self.outcomes.get(index).copied().flatten().map(Box::from)
+        }
+    }
+
+    fn page(url: &str, rows: &[&str], tabs: Vec<Tab>) -> Snapshot {
+        Snapshot::new(
+            rows.iter()
+                .enumerate()
+                .map(|(n, label)| row(label, i32::try_from(n).expect("small") * 40))
+                .collect(),
+        )
+        .expect("fits")
+        .at_url(Some(url.into()))
+        .with_tabs(tabs)
+    }
+
+    fn results_tab() -> Tab {
+        Tab {
+            key: TabKey::new("tab-2"),
+            title: "Results".into(),
+            url: "https://example.test/results".into(),
+        }
+    }
+
+    /// A link opened a tab. The run follows it, and then goes to an address it
+    /// was given — by number, never by typing one.
+    #[test]
+    fn a_run_switches_to_a_newly_opened_tab_and_then_navigates_to_a_supplied_address() {
+        let screens = [
+            page(
+                "https://example.test/",
+                &["Open", "Close"],
+                vec![results_tab()],
+            ),
+            page(
+                "https://example.test/results",
+                &["Next", "Prev"],
+                Vec::new(),
+            ),
+            page(
+                "https://example.test/other",
+                &["Done", "Back to start"],
+                Vec::new(),
+            ),
+        ];
+        let mut pilot = Pilot::new(
+            Browser::new(screens, vec![None, None]),
+            Scripted::new(vec![
+                answer("switch_tab", None, 0.99, 0.1),
+                answer("navigate", None, 0.99, 0.5),
+                answer("done", None, 0.99, 0.97),
+            ]),
+            &Web,
+        )
+        .navigating_to(["https://example.test/other"]);
+
+        let ending = pilot
+            .pursue("Reach the other page")
+            .expect("the run completes");
+
+        assert_eq!(ending, Ending::Finished(Outcome::Achieved));
+        assert_eq!(
+            pilot.device().performed,
+            [
+                Command::SwitchTab(TabKey::new("tab-2")),
+                Command::Navigate("https://example.test/other".into()),
+            ],
+        );
+    }
+
+    /// Under a confirm the run answers it; nothing that touches the page is
+    /// even a choice.
+    #[test]
+    fn under_a_confirm_the_run_answers_it_and_is_offered_nothing_else() {
+        let confirm = Dialog {
+            kind: DialogKind::Confirm,
+            message: "Delete this draft?".into(),
+            default_prompt: None,
+        };
+        let under = page("https://example.test/", &["Delete", "Keep"], Vec::new())
+            .with_dialog(Some(confirm));
+        let after = page("https://example.test/", &["Delete", "Keep"], Vec::new());
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let judge = Recording {
+            seen: Rc::clone(&seen),
+            turns: RefCell::new(vec![
+                answer("dismiss_dialog", None, 0.99, 0.1),
+                answer("done", None, 0.99, 0.97),
+            ]),
+        };
+        let mut pilot = Pilot::new(Browser::new([under, after], vec![None]), judge, &Web);
+
+        let ending = pilot.pursue("Keep the draft").expect("the run completes");
+
+        assert_eq!(ending, Ending::Finished(Outcome::Achieved));
+        assert_eq!(
+            pilot.device().performed,
+            [Command::Dialog(DialogReply::Dismiss)]
+        );
+        // The first state is the one judged under the dialog, and the judge
+        // is told the dialog is there and what it says.
+        let first = &seen.borrow()[0];
+        assert_eq!(first["dialog"]["message"], "Delete this draft?");
+        assert_eq!(first["dialog"]["kind"], "confirm");
+    }
+
+    /// Accepting a prompt takes its words from the composer, as an unsupplied
+    /// field does: the model chooses to accept and never writes the words.
+    #[test]
+    fn accepting_a_prompt_asks_for_its_words() {
+        let prompt = Dialog {
+            kind: DialogKind::Prompt,
+            message: "Name this draft".into(),
+            default_prompt: Some("Untitled".into()),
+        };
+        let under = page("https://example.test/", &["Save", "Cancel"], Vec::new())
+            .with_dialog(Some(prompt));
+        let after = page("https://example.test/", &["Save", "Share"], Vec::new());
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let log = Rc::clone(&asked);
+        let mut pilot = Pilot::new(
+            Browser::new([under, after], vec![None]),
+            Scripted::new(vec![
+                answer("accept_dialog", None, 0.99, 0.1),
+                answer("done", None, 0.99, 0.97),
+            ]),
+            &Web,
+        )
+        .writing_with(
+            move |request: &Writing<'_>| -> Result<Box<str>, Infallible> {
+                log.borrow_mut().push(request.field.describe());
+                Ok("Quarterly plan".into())
+            },
+        );
+
+        let ending = pilot.pursue("Name the draft").expect("the run completes");
+
+        assert_eq!(ending, Ending::Finished(Outcome::Achieved));
+        assert_eq!(asked.borrow().as_slice(), ["Name this draft"]);
+        assert_eq!(
+            pilot.device().performed,
+            [Command::Dialog(DialogReply::Accept {
+                words: Some("Quarterly plan".into())
+            })],
+        );
+    }
+
+    /// What the device says the last command did reaches the next step's
+    /// previous action, and the step report that becomes the transcript.
+    #[test]
+    fn the_outcome_reaches_the_next_step_and_the_report() {
+        let screens = [
+            page("https://example.test/", &["Accept all", "Open"], Vec::new()),
+            page(
+                "https://example.test/",
+                &["Accept all", "Open", "Menu"],
+                Vec::new(),
+            ),
+        ];
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let judge = Recording {
+            seen: Rc::clone(&seen),
+            turns: RefCell::new(vec![
+                answer("tap", Some("A2"), 0.99, 0.1),
+                answer("done", None, 0.99, 0.97),
+            ]),
+        };
+        let reports = Rc::new(RefCell::new(Vec::new()));
+        let log = Rc::clone(&reports);
+        let mut pilot = Pilot::new(
+            Browser::new(
+                screens,
+                vec![Some("the tap was not made: a cookie banner covers it")],
+            ),
+            judge,
+            &Web,
+        )
+        .watching(move |step| log.borrow_mut().push(step.outcome.clone()));
+
+        pilot.pursue("Open it").expect("the run completes");
+
+        let second = seen.borrow()[1]["previous_action"].to_string();
+        assert!(second.contains("Open"), "got {second}");
+        assert!(
+            second.contains("the tap was not made: a cookie banner covers it"),
+            "got {second}"
+        );
+        assert_eq!(
+            reports.borrow().first().cloned().flatten().as_deref(),
+            Some("the tap was not made: a cookie banner covers it"),
+        );
+    }
+
+    /// Keys on rows are how a browser presses them, and the run never sees one.
+    #[test]
+    fn a_tap_on_a_keyed_row_is_pressed_by_its_key() {
+        let keyed = page("https://example.test/", &["Open", "Close"], Vec::new())
+            .with_node_keys(vec![Some(NodeKey::new("9:1")), Some(NodeKey::new("9:2"))]);
+        let after = page(
+            "https://example.test/",
+            &["Open", "Close", "Menu"],
+            Vec::new(),
+        );
+        let mut pilot = Pilot::new(
+            Browser::new([keyed, after], vec![None]),
+            Scripted::new(vec![
+                answer("tap", Some("A1"), 0.99, 0.1),
+                answer("done", None, 0.99, 0.97),
+            ]),
+            &Web,
+        );
+
+        pilot.pursue("Open it").expect("the run completes");
+
+        assert!(
+            matches!(
+                pilot.device().performed.as_slice(),
+                [Command::Press { node, .. }] if *node == NodeKey::new("9:1")
+            ),
+            "got {:?}",
+            pilot.device().performed
+        );
+    }
+}
