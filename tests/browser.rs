@@ -656,3 +656,33 @@ fn rows_carry_the_engines_node_keys_in_order() {
     assert!(keys.iter().all(Option::is_some));
     assert_eq!(keys[1].as_deref().map(|k| k.starts_with("f1:")), Some(true));
 }
+
+#[test]
+fn a_modal_with_too_many_rows_keeps_its_visible_ones_first() {
+    let mut dialog = node("dialog", "Pick one", 0.0);
+    dialog.states.modal = true;
+    dialog.bounds = Some(PageBox {
+        x: 0.0,
+        y: -5000.0,
+        width: 1280.0,
+        height: 10000.0,
+    });
+    let mut nodes = vec![node("link", "Behind", 10.0), dialog];
+    // Two hundred below the screen first in paint order, then 100 on it.
+    for i in 0..200 {
+        nodes.push(node("option", &format!("Far {i}"), 800.0 + f64::from(i)));
+    }
+    for i in 0..100 {
+        nodes.push(node("option", &format!("Near {i}"), f64::from(i) * 5.0));
+    }
+    let snapshot = Browser::default().snapshot_from(&read(nodes));
+    let shown = labels(&snapshot);
+    assert_eq!(shown.len(), MAX_ELEMENTS);
+    assert!(!shown.contains(&"Behind".to_string()));
+    assert!((0..100).all(|i| shown.contains(&format!("Near {i}"))));
+    assert!(
+        notices(&snapshot)
+            .iter()
+            .any(|n| n.contains("50 more rows"))
+    );
+}
