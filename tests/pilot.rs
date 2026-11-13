@@ -1753,6 +1753,50 @@ fn an_unsure_step_fills_the_one_empty_field_it_has_words_for() {
     assert_eq!(pilot.device().typed, ["Password123!"]);
 }
 
+/// The reset login form, with its password field marked as one.
+#[derive(Default)]
+struct ProtectedLogin(ResetLogin);
+
+impl Device for ProtectedLogin {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        Ok(self.0.observe()?.with_protected(vec![true, false]))
+    }
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        self.0.perform(command)
+    }
+}
+
+/// What was typed into a password field is never repeated to the model: the
+/// next step is told only that the supplied text was typed.
+#[test]
+fn what_was_typed_into_a_protected_field_is_not_repeated() {
+    use jev_pilot::pilot::{Resolution, Writing};
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("tap", Some("A2"), 0.20, 0.02),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    let mut pilot = Pilot::new(ProtectedLogin::default(), judge, &Android)
+        .requiring(Confidence::new(0.6).expect("valid"))
+        .supplying(["password"])
+        .escalating_to(|_: &jev_pilot::pilot::Impasse<'_>| Ok::<_, Infallible>(Resolution::Stop))
+        .writing_with(|_: &Writing<'_>| Ok::<_, Infallible>(Box::<str>::from("Password123!")));
+
+    pilot.pursue("log in").expect("the run completes");
+
+    assert_eq!(pilot.device().0.typed, ["Password123!"], "it was typed");
+    let told: String = seen.borrow().iter().map(ToString::to_string).collect();
+    assert!(!told.contains("Password123!"), "{told}");
+    assert!(
+        told.contains("Typed the supplied text into Password"),
+        "{told}"
+    );
+}
+
 /// A login button reading "Logging in..." is the app still at work.
 struct LoggingIn;
 

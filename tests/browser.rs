@@ -312,6 +312,24 @@ fn a_password_value_is_never_read() {
     );
 }
 
+/// The snapshot carries which rows are password fields, so the run's own
+/// account of what it typed can leave the words out.
+#[test]
+fn a_protected_field_is_marked_in_the_snapshot() {
+    let mut secret = node("textbox", "Password", 100.0);
+    secret.protected = true;
+    secret.states.editable = true;
+    let mut name = node("textbox", "Name", 200.0);
+    name.states.editable = true;
+    let snapshot = Browser::default().snapshot_from(&read(vec![secret, name]));
+
+    let marks: Vec<bool> = snapshot
+        .refs()
+        .map(|(handle, _)| snapshot.is_protected(handle).expect("current"))
+        .collect();
+    assert_eq!(marks, [true, false]);
+}
+
 /// The engine says which fields are passwords. A field merely named like one
 /// is an ordinary field, whose value is its detail.
 #[test]

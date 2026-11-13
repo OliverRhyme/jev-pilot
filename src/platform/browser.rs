@@ -124,6 +124,7 @@ impl Browser {
         let mut elements = Vec::with_capacity(kept.len());
         let mut keys = Vec::with_capacity(kept.len());
         let mut field_only = Vec::with_capacity(kept.len());
+        let mut protected = Vec::with_capacity(kept.len());
         for row in kept {
             elements.push(Element {
                 label: row.label.into(),
@@ -133,6 +134,7 @@ impl Browser {
             });
             keys.push(Some(row.key.clone()));
             field_only.push(row.field_only);
+            protected.push(row.node.protected);
         }
 
         // Cut to `MAX_ELEMENTS` above, so the snapshot cannot refuse.
@@ -146,6 +148,7 @@ impl Browser {
             .with_dialog(read.dialog.clone())
             .with_node_keys(keys)
             .with_field_only(field_only)
+            .with_protected(protected)
     }
 }
 
