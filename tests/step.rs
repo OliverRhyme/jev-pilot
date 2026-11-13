@@ -156,3 +156,54 @@ fn every_step_asks_what_acting_here_would_cost() {
     assert_eq!(wire["commits"]["type"], "noul");
     assert_eq!(wire["warns"]["type"], "noul");
 }
+
+/// The browser's two target heads are asked only on a screen that offers
+/// their operations, so a phone's request keeps exactly the questions it has
+/// always had, and the operations it has always offered.
+#[test]
+fn a_phone_request_carries_no_browser_head_and_no_browser_operation() {
+    let snapshot = Android.parse_hierarchy(SETTINGS).expect("fixture parses");
+    let catalog = Catalog::for_screen(&snapshot, &Android);
+
+    let wire = serde_json::to_value(StepQuestions::new("Open Wi-Fi settings", &catalog))
+        .expect("serializes");
+
+    let mut heads: Vec<_> = wire.as_object().expect("a map").keys().cloned().collect();
+    heads.sort();
+    assert_eq!(
+        heads,
+        [
+            "commits",
+            "goal_met",
+            "is_error_screen",
+            "operation",
+            "tap_target",
+            "warns"
+        ]
+    );
+    let operations: Vec<_> = wire["operation"]["criteria"]
+        .as_object()
+        .expect("a map")
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(
+        operations,
+        [
+            "app_switcher",
+            "back",
+            "blocked",
+            "done",
+            "double_tap",
+            "home",
+            "long_press",
+            "scroll_down",
+            "scroll_up",
+            "submit",
+            "swipe_left",
+            "swipe_right",
+            "tap",
+            "wait"
+        ]
+    );
+}

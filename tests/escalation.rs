@@ -782,3 +782,135 @@ fn a_run_getting_nowhere_asks_before_it_ends() {
     );
     assert!(matches!(ending, Ending::Uncertain { .. }), "{ending:?}");
 }
+
+/// A browser-shaped page with two other tabs, for the tests below.
+mod web {
+    use super::{Command, Device, Infallible, Operation, Platform, Snapshot};
+    use jev_pilot::platform::HierarchyError;
+    use jev_pilot::snapshot::{Bounds, Element, Tab, TabKey};
+
+    pub struct Web;
+    impl Platform for Web {
+        fn name(&self) -> &'static str {
+            "Web"
+        }
+        fn operations(&self) -> &'static [Operation] {
+            &[
+                Operation::Tap,
+                Operation::Navigate,
+                Operation::SwitchTab,
+                Operation::Wait,
+                Operation::Done,
+                Operation::Blocked,
+            ]
+        }
+        fn parse_hierarchy(&self, _raw: &str) -> Result<Snapshot, HierarchyError> {
+            unreachable!("these tests build snapshots by hand")
+        }
+    }
+    pub struct Browser(pub Vec<Command>);
+    impl Device for Browser {
+        type Error = Infallible;
+        fn observe(&mut self) -> Result<Snapshot, Infallible> {
+            let rows = ["Open", "Close", "Menu"]
+                .iter()
+                .enumerate()
+                .map(|(n, label)| Element {
+                    label: (*label).into(),
+                    detail: None,
+                    editable: false,
+                    bounds: Bounds::from_origin_size(
+                        0,
+                        i32::try_from(n).expect("small") * 40,
+                        50,
+                        20,
+                    ),
+                })
+                .collect();
+            let tabs = ["Results", "Cart"]
+                .iter()
+                .map(|title| Tab {
+                    key: TabKey::new(format!("tab-{title}")),
+                    title: (*title).into(),
+                    url: format!("https://example.test/{title}").into(),
+                })
+                .collect();
+            Ok(Snapshot::new(rows)
+                .expect("a page")
+                .at_url(Some("https://example.test/".into()))
+                .with_tabs(tabs)
+                .with_keyboard_open(self.0.len() % 2 == 1))
+        }
+        fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+            self.0.push(command.clone());
+            Ok(())
+        }
+    }
+}
+
+/// A second opinion on a browser run is shown the tabs and addresses on their
+/// own lists, and `switch_tab 1` or `navigate 0` resolve through the same
+/// catalog: the second tab, the first address — and a number past the end is
+/// refused like any other thing the screen does not offer.
+#[test]
+fn a_second_opinion_switches_tab_and_navigates_by_their_own_numbers() {
+    use jev_pilot::snapshot::TabKey;
+    use web::{Browser, Web};
+
+    let shown = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let recorded = std::rc::Rc::clone(&shown);
+    // The step after one that moved the screen looks again before it asks.
+    let mut turns = vec![unsure(), unsure(), unsure()];
+    turns.push(serde_json::json!({
+        "operation": { "type": "choice", "choice": "done", "confidence": 0.99 },
+        "goal_met": { "type": "score", "score": 1.9, "confidence": 0.9 },
+        "is_error_screen": { "type": "noul", "noul": 0.01 },
+    }));
+    let mut asked = 0;
+    let mut pilot = Pilot::new(Browser(Vec::new()), Scripted(RefCell::new(turns)), &Web)
+        .requiring(floor())
+        .navigating_to(["https://example.test/pricing", "https://example.test/blog"])
+        .escalating_to(
+            move |impasse: &Impasse<'_>| -> Result<Resolution, Infallible> {
+                recorded
+                    .borrow_mut()
+                    .push((impasse.tabs.to_vec(), impasse.destinations.to_vec()));
+                asked += 1;
+                Ok(if asked == 1 {
+                    Resolution::Choose {
+                        operation: Operation::SwitchTab,
+                        target: Some(1),
+                    }
+                } else {
+                    Resolution::Choose {
+                        operation: Operation::Navigate,
+                        target: Some(0),
+                    }
+                })
+            },
+        );
+
+    let ending = pilot.pursue("Find the price").expect("the run completes");
+
+    assert!(matches!(ending, Ending::Finished(_)), "got {ending:?}");
+    let first = shown.borrow()[0].clone();
+    assert_eq!(
+        first.0,
+        [
+            "Results — https://example.test/Results",
+            "Cart — https://example.test/Cart"
+        ]
+    );
+    assert_eq!(
+        first.1,
+        ["https://example.test/pricing", "https://example.test/blog"]
+    );
+    assert_eq!(
+        pilot.device().0,
+        [
+            Command::SwitchTab(TabKey::new("tab-Cart")),
+            Command::Settle,
+            Command::Navigate("https://example.test/pricing".into()),
+        ],
+    );
+}

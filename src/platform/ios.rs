@@ -33,6 +33,10 @@ const OPERATIONS: &[Operation] = &[
     Operation::Home,
     Operation::AppSwitcher,
     Operation::Submit,
+    // Going back into the app a goal is about is offered by the catalog
+    // only on a screen that belongs to some other app; listing it here says
+    // this platform has such a thing as another app.
+    Operation::Return,
     Operation::Wait,
     Operation::Done,
     Operation::Blocked,
