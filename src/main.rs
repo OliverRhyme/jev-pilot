@@ -592,7 +592,7 @@ mod web {
         AttachError, Channel, Os, choose_tab, is_chrome, read_active_port, user_data_dir,
     };
     use jev_pilot::browser::engine::{BrowserCommand, BrowserEngine as _, CdpEngine};
-    use jev_pilot::browser::launch::{Fresh, LaunchError, find_chrome};
+    use jev_pilot::browser::launch::{Fresh, Interrupted, LaunchError, find_chrome};
     use jev_pilot::browser::transport::{Connection, Socket};
     use jev_pilot::cli::{BrowserMode, BrowserTarget};
     use jev_pilot::credential::ApiKey;
@@ -602,9 +602,56 @@ mod web {
     use jev_pilot::snapshot::{Snapshot, TabKey};
     use serde_json::{Value, json};
     use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, Once, PoisonError};
     use std::time::Duration;
 
     type Error = Box<dyn core::error::Error>;
+
+    /// What Ctrl-C has to undo while a browser session is open.
+    ///
+    /// The run may be blocked on the browser or on the model when Ctrl-C
+    /// comes, and would never reach its own clean-up, so the handler does it
+    /// on its own thread. It holds this lock while it works, and a run ending
+    /// normally holds it while it closes up, so the two never both clean up.
+    static ON_INTERRUPT: Mutex<Option<Interrupted>> = Mutex::new(None);
+
+    fn on_interrupt() -> MutexGuard<'static, Option<Interrupted>> {
+        ON_INTERRUPT.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Note what Ctrl-C has to undo, handling Ctrl-C from now on.
+    fn undo_on_interrupt(what: Interrupted) {
+        static HANDLER: Once = Once::new();
+        HANDLER.call_once(|| {
+            let _ = ctrlc::set_handler(|| {
+                let mut held = on_interrupt();
+                match held.take() {
+                    Some(what @ Interrupted::Fresh { .. }) => {
+                        what.clean_up(|endpoint| {
+                            if let Ok(socket) = Socket::connect(endpoint, Duration::from_secs(2)) {
+                                let _ = Connection::new(socket).send("Browser.close", json!({}), None);
+                            }
+                        });
+                        eprintln!("\ninterrupted: closed the fresh browser and removed its profile");
+                    }
+                    Some(Interrupted::Attached) => {
+                        eprintln!("\ninterrupted: let go of Chrome, and closed nothing");
+                    }
+                    None => {}
+                }
+                std::process::exit(130);
+            });
+        });
+        *on_interrupt() = Some(what);
+    }
+
+    /// Close a fresh browser and remove its profile, with Ctrl-C held off
+    /// until that is done.
+    fn let_go(fresh: Option<Fresh>) {
+        let mut held = on_interrupt();
+        *held = None;
+        drop(fresh);
+    }
 
     /// How long a fresh browser is given to open its debugging port.
     const FRESH_START: Duration = Duration::from_secs(20);
@@ -624,8 +671,11 @@ mod web {
 
     impl Drop for Session {
         fn drop(&mut self) {
-            if self.fresh.is_some() {
+            let mut held = on_interrupt();
+            *held = None;
+            if let Some(fresh) = self.fresh.take() {
                 let _ = self.device.engine_mut().close_browser();
+                drop(fresh);
             }
         }
     }
@@ -686,6 +736,7 @@ mod web {
                     });
                     read_active_port(&dir)?.endpoint()
                 };
+                undo_on_interrupt(Interrupted::Attached);
                 eprintln!("Click Allow in Chrome (Enter chooses Cancel)");
                 let socket = Socket::connect(&endpoint, Duration::from_secs(*allow_wait))
                     .map_err(AttachError::from)?;
@@ -700,6 +751,7 @@ mod web {
                 )
                 .ok_or(LaunchError::NoBrowser)?;
                 let (fresh, port) = Fresh::start(&binary, *headless, FRESH_START)?;
+                undo_on_interrupt(fresh.interrupted(&port));
                 let socket = Socket::connect(&port.endpoint(), CALL).map_err(AttachError::from)?;
                 (socket, Some(fresh), Some(binary))
             }
@@ -806,6 +858,7 @@ mod web {
         if fresh.is_some() {
             let _ = Connection::new(socket).send("Browser.close", json!({}), None);
         }
+        let_go(fresh);
         Ok(())
     }
 

@@ -23,7 +23,7 @@ pub const PROFILE_PREFIX: &str = "jev-pilot-fresh-";
 ///
 /// The operating system lets go of the lock when the process ends however it
 /// ends, so a folder whose lock can be taken belongs to a run that is gone,
-/// such as one stopped by Ctrl-C, and the next fresh run removes it.
+/// such as one killed outright, and the next fresh run removes it.
 const LOCK_FILE: &str = "jev-pilot.lock";
 
 /// Where the browser's process id is kept, for removing a leftover browser
@@ -234,6 +234,16 @@ impl Fresh {
     pub fn dir(&self) -> &Path {
         &self.dir
     }
+
+    /// What Ctrl-C has to undo for this browser, reached at `port`.
+    #[must_use]
+    pub fn interrupted(&self, port: &ActivePort) -> Interrupted {
+        Interrupted::Fresh {
+            endpoint: port.endpoint(),
+            pid: self.child.id(),
+            dir: self.dir.clone(),
+        }
+    }
 }
 
 impl Drop for Fresh {
@@ -357,6 +367,18 @@ fn clear_if_abandoned(dir: &Path) -> bool {
 ///
 /// `true` when a browser was told to end.
 fn end_leftover_browser(pid: &str, dir: &Path) -> bool {
+    browser_running(pid, dir)
+        && Command::new("kill")
+            .arg(pid)
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+/// Whether process `pid` is running, and is the browser started on `dir`.
+///
+/// Only where `ps` can say what a process was started with; elsewhere this
+/// says no, and the browser is never ended by its process id.
+fn browser_running(pid: &str, dir: &Path) -> bool {
     if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) || cfg!(windows) {
         return false;
     }
@@ -366,12 +388,57 @@ fn end_leftover_browser(pid: &str, dir: &Path) -> bool {
     else {
         return false;
     };
-    let started_with = String::from_utf8_lossy(&output.stdout);
-    started_with.contains(&format!("--user-data-dir={}", dir.display()))
-        && Command::new("kill")
-            .arg(pid)
-            .status()
-            .is_ok_and(|status| status.success())
+    String::from_utf8_lossy(&output.stdout).contains(&format!("--user-data-dir={}", dir.display()))
+}
+
+/// What an interrupted run has to undo.
+///
+/// Kept apart from the run so that a Ctrl-C handler, on a thread of its own,
+/// can undo it while the run is blocked on the browser or on the model and
+/// will never reach its own clean-up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Interrupted {
+    /// Attached to the owner's Chrome. Ending the process closes the
+    /// connection, which detaches; nothing of the owner's is closed.
+    Attached,
+    /// A browser this run started.
+    Fresh {
+        /// Its browser websocket, for asking it to close.
+        endpoint: String,
+        /// Its process id.
+        pid: u32,
+        /// Its throwaway profile.
+        dir: PathBuf,
+    },
+}
+
+impl Interrupted {
+    /// Undo what the run leaves behind.
+    ///
+    /// For a fresh browser, `close` is handed its endpoint to send
+    /// `Browser.close`; the browser is given a moment to go, ended if it is
+    /// still running on its profile, and the profile is removed. An attached
+    /// run has nothing to undo.
+    pub fn clean_up(&self, close: impl FnOnce(&str)) {
+        let Self::Fresh { endpoint, pid, dir } = self else {
+            return;
+        };
+        close(endpoint);
+        let pid = pid.to_string();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while browser_running(&pid, dir) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let ended = end_leftover_browser(&pid, dir);
+        // A browser just ended can hold its files for a moment longer.
+        let tries = if ended { 30 } else { 5 };
+        for _ in 0..tries {
+            if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 
 fn random_word() -> u32 {

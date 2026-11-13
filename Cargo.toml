@@ -26,6 +26,9 @@ schemars = { version = "1", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["rt", "macros", "io-std", "signal"] }
 # Every browser endpoint is ws://127.0.0.1, so no TLS and no async runtime.
 tungstenite = { version = "0.30", optional = true, default-features = false, features = ["handshake"] }
+# Ctrl-C in a fresh run closes the browser and removes its profile, from a
+# thread of its own while the run is blocked.
+ctrlc = { version = "3.5", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
@@ -49,7 +52,7 @@ mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
 # Driving a web browser over the Chrome DevTools Protocol, spoken by this crate
 # over one local websocket. Off by default like `mcp`: a library user who only
 # drives phones pays nothing for it.
-browser = ["dep:tungstenite"]
+browser = ["dep:tungstenite", "dep:ctrlc"]
 
 # docs.rs renders every feature, and marks which items need which.
 # The server is a binary of its own, and only exists when its feature is on.

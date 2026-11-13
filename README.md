@@ -475,9 +475,11 @@ Chrome in their usual places. `npx @puppeteer/browsers install chrome@stable`
 installs Chrome for Testing and prints its path. `--headless` runs it without a
 window.
 
-If a fresh run is killed before it can clean up, its profile is removed the
-next time a fresh run starts. When an MCP client stops a run, the server
-removes it at once, along with the browser.
+Ctrl-C closes a fresh run's browser and deletes its profile before the run
+exits; in attach mode it only lets go of Chrome and closes nothing. If a fresh
+run is killed outright, its profile is removed the next time a fresh run
+starts. When an MCP client stops a run, the server removes it at once, along
+with the browser.
 
 **`--browser attach`** drives the Chrome you already have open, signed in as
 you. Turn on remote debugging first, at `chrome://inspect/#remote-debugging`
@@ -566,9 +568,10 @@ it through a derived `Debug` in a panic message or error report.
 `ureq`. The `mcp` feature adds `rmcp`, `tokio` and `schemars` for the server, and
 nothing else uses them. The `browser` feature adds `tungstenite`, with no TLS and
 no async runtime: every browser endpoint is a local websocket, and the DevTools
-messages are written by hand rather than generated for the whole protocol. No
-Appium, no WebDriverAgent client, no `mobile-use`. The Android adapter shells out
-to `adb` directly.
+messages are written by hand rather than generated for the whole protocol. It
+also adds `ctrlc`, so that Ctrl-C closes a fresh browser and removes its
+profile. No Appium, no WebDriverAgent client, no `mobile-use`. The Android
+adapter shells out to `adb` directly.
 
 Turn `http` off and the crate builds requests for you to send with whatever
 client you already have; `Judge` is the seam, and the loop is tested against a

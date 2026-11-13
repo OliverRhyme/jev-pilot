@@ -677,3 +677,49 @@ fn a_refused_attach_does_not_invite_a_retry() {
         assert!(message.contains("owner"), "{message}");
     }
 }
+
+/// Ctrl-C in a fresh run asks the browser to close, ends it if it lingers,
+/// and removes its profile; the run is blocked elsewhere and never gets to
+/// drop its browser itself.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_fresh_run_closes_its_browser_and_removes_its_profile() {
+    use jev_pilot::browser::launch::{Interrupted, make_profile};
+
+    let temp = std::env::temp_dir().join(format!("jev-pilot-interrupt-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    std::fs::create_dir_all(&temp).expect("a folder to work in");
+    let (dir, _lock) = make_profile(&temp).expect("a profile");
+    // A stand-in for the browser that ignores Browser.close, started on the
+    // profile the way a fresh browser is.
+    let mut browser = std::process::Command::new("sh")
+        .args(["-c", "sleep 20; true"])
+        .arg(format!("--user-data-dir={}", dir.display()))
+        .spawn()
+        .expect("a stand-in browser");
+
+    let interrupted = Interrupted::Fresh {
+        endpoint: "ws://127.0.0.1:9/devtools/browser/x".into(),
+        pid: browser.id(),
+        dir: dir.clone(),
+    };
+    let mut closed = Vec::new();
+    interrupted.clean_up(|endpoint| closed.push(endpoint.to_owned()));
+
+    assert_eq!(closed, ["ws://127.0.0.1:9/devtools/browser/x"]);
+    let status = browser.wait().expect("it ended");
+    assert!(!status.success(), "it was ended, not left to finish: {status}");
+    assert!(!dir.exists(), "the profile is gone");
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+/// Ctrl-C in an attach run only lets go: the owner's Chrome is never closed,
+/// and its profile is never touched.
+#[test]
+fn an_interrupted_attach_run_only_detaches() {
+    use jev_pilot::browser::launch::Interrupted;
+
+    let mut closed = Vec::new();
+    Interrupted::Attached.clean_up(|endpoint| closed.push(endpoint.to_owned()));
+    assert!(closed.is_empty(), "{closed:?}");
+}
