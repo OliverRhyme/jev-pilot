@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         let browser = Browser::with_band(band);
         let rows = browser.parse_hierarchy(&raw)?.rows();
         eprintln!("band {band}: {rows} rows offered");
-        println!("{}", first_request(&browser, &raw, &goal)?);
+        println!("{}", first_request(browser, &raw, &goal)?);
     }
     Ok(())
 }
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
 /// JSON.
 #[cfg(feature = "browser")]
 fn first_request(
-    browser: &jev_pilot::platform::browser::Browser,
+    browser: jev_pilot::platform::browser::Browser,
     raw: &str,
     goal: &str,
 ) -> Result<String, Box<dyn core::error::Error>> {
@@ -66,7 +66,7 @@ fn first_request(
 
     /// The recorded page, served as a screen that never changes.
     struct Page<'a> {
-        browser: &'a jev_pilot::platform::browser::Browser,
+        browser: jev_pilot::platform::browser::Browser,
         raw: &'a str,
     }
 
@@ -111,7 +111,7 @@ fn first_request(
     }
 
     let kept = Rc::new(RefCell::new(None));
-    let mut pilot = Pilot::new(Page { browser, raw }, Keep(Rc::clone(&kept)), browser);
+    let mut pilot = Pilot::new(Page { browser, raw }, Keep(Rc::clone(&kept)), &browser);
     // The run ends at its first judgement, by design; what matters is the
     // request that judgement was asked.
     let _ = pilot.pursue(goal);
