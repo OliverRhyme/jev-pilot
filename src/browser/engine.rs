@@ -661,6 +661,20 @@ impl<W: Wire> CdpEngine<W> {
     /// view first if it was off screen, and click it if so. `Err` carries why
     /// the click was not made.
     fn press(&mut self, at: Point, node: &NodeKey) -> Result<Result<(), Box<str>>, Stop> {
+        let (x, y) = match self.aim(at, node)? {
+            Ok(point) => point,
+            Err(reason) => return Ok(Err(reason)),
+        };
+        for event in input::click(x, y) {
+            self.call("Input.dispatchMouseEvent", event)?;
+        }
+        Ok(Ok(()))
+    }
+
+    /// The point at which the row is the node drawn, after checking the page
+    /// is the document that was read and scrolling an off-screen row into
+    /// view. `Err` carries why nothing should be done to it.
+    fn aim(&mut self, at: Point, node: &NodeKey) -> Result<Result<(f64, f64), Box<str>>, Stop> {
         let Some(parts) = KeyParts::parse(node) else {
             return Ok(Err("the row is not one this browser read".into()));
         };
@@ -712,10 +726,7 @@ impl<W: Wire> CdpEngine<W> {
         {
             return Ok(Err(format!("{what} covers it").into()));
         }
-        for event in input::click(x, y) {
-            self.call("Input.dispatchMouseEvent", event)?;
-        }
-        Ok(Ok(()))
+        Ok(Ok((x, y)))
     }
 
     /// `None` when the hit node is inside the row's, else what it is.
@@ -781,6 +792,13 @@ impl<W: Wire> CdpEngine<W> {
             Err(Stop::Failed(_)) => false,
         };
         if is_select {
+            // Checked as a tap is, though nothing is clicked: on a page that
+            // has been replaced the node id may name another control, and one
+            // that is covered is not one a person could change.
+            if let Err(reason) = self.aim(at, node)? {
+                self.outcome = Some(format!("nothing was chosen: {reason}").into());
+                return Ok(());
+            }
             let Some(object) = self.object(parts.backend)? else {
                 self.outcome =
                     Some("the tap was not made: the row is no longer on the page".into());

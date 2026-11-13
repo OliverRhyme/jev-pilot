@@ -1093,6 +1093,7 @@ fn a_password_field_does_not_have_its_value_repeated() {
 fn a_select_is_set_by_its_label_without_a_tap() {
     let (script, mut engine) = engine_after_read();
     script.on("DOM.describeNode", json!({"node": {"nodeName": "SELECT"}}));
+    script_select_checks(&script);
     script.on(
         "DOM.resolveNode",
         json!({"object": {"objectId": "country"}}),
@@ -1130,6 +1131,7 @@ fn a_select_is_set_by_its_label_without_a_tap() {
 fn a_select_with_no_single_matching_option_lists_the_options() {
     let (script, mut engine) = engine_after_read();
     script.on("DOM.describeNode", json!({"node": {"nodeName": "SELECT"}}));
+    script_select_checks(&script);
     script.on(
         "DOM.resolveNode",
         json!({"object": {"objectId": "country"}}),
@@ -1492,4 +1494,86 @@ fn a_tab_created_after_attaching_by_the_start_tab_is_adopted() {
         .expect("performs");
 
     assert_eq!(engine.outcome(), Some("opened a new tab: Receipt"));
+}
+
+/// The click-time checks of the country drop-down: the same document as the
+/// read, and the drop-down itself at the point.
+fn script_select_checks(script: &Script) {
+    script.on("Page.getFrameTree", signup::load("frame-tree"));
+    script.on("DOM.getNodeForLocation", json!({"backendNodeId": 4}));
+}
+
+/// A drop-down is checked as a tap is before its option is chosen: on a page
+/// that has been replaced, the same node id may be another control.
+#[test]
+fn a_select_on_a_page_that_changed_is_not_set() {
+    let (script, mut engine) = engine_after_read();
+    script.on("DOM.describeNode", json!({"node": {"nodeName": "SELECT"}}));
+    let mut tree = signup::load("frame-tree");
+    tree["frameTree"]["frame"]["loaderId"] = json!("ANOTHER-LOADER");
+    script.on("Page.getFrameTree", tree);
+    script_settle(&script, 3);
+
+    engine
+        .perform(&BrowserCommand::Fill {
+            at: Point { x: 538, y: 19 },
+            node: NodeKey::new("4:1"),
+            text: "spain".into(),
+        })
+        .expect("a refusal is not an error");
+
+    assert_eq!(
+        script.params_of("Runtime.callFunctionOn"),
+        Vec::<Value>::new()
+    );
+    assert_eq!(
+        script.params_of("DOM.getNodeForLocation"),
+        Vec::<Value>::new()
+    );
+    assert_eq!(
+        engine.outcome(),
+        Some("nothing was chosen: the page has changed since it was read")
+    );
+}
+
+#[test]
+fn a_covered_select_is_not_set() {
+    let (script, mut engine) = engine_after_read();
+    script.on("DOM.describeNode", json!({"node": {"nodeName": "SELECT"}}));
+    script.on("Page.getFrameTree", signup::load("frame-tree"));
+    script.on("DOM.getNodeForLocation", json!({"backendNodeId": 90}));
+    script.on("DOM.resolveNode", json!({"object": {"objectId": "row"}}));
+    script.on("DOM.resolveNode", json!({"object": {"objectId": "hit"}}));
+    script.on(
+        "Runtime.callFunctionOn",
+        json!({"result": {"type": "object", "value": {"inside": false, "what": "div \u{201c}Accept all\u{201d}"}}}),
+    );
+    script_settle(&script, 3);
+
+    engine
+        .perform(&BrowserCommand::Fill {
+            at: Point { x: 538, y: 19 },
+            node: NodeKey::new("4:1"),
+            text: "spain".into(),
+        })
+        .expect("a refusal is not an error");
+
+    let scripts: Vec<String> = script
+        .params_of("Runtime.callFunctionOn")
+        .iter()
+        .map(|p| {
+            p["functionDeclaration"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        scripts.iter().all(|f| !f.contains("selectedIndex")),
+        "the option is not chosen: {scripts:?}"
+    );
+    assert_eq!(
+        engine.outcome(),
+        Some("nothing was chosen: div \u{201c}Accept all\u{201d} covers it")
+    );
 }
