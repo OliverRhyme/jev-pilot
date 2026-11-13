@@ -589,7 +589,8 @@ mod web {
     use super::{Plan, drive, print_screen};
     use jev_pilot::browser::device::BrowserDevice;
     use jev_pilot::browser::discover::{
-        AttachError, Channel, Os, choose_tab, is_chrome, read_active_port, user_data_dir,
+        AttachError, Channel, Os, TabChoice, choose_tab, is_chrome, read_active_port, tab_line,
+        user_data_dir,
     };
     use jev_pilot::browser::engine::{BrowserCommand, BrowserEngine as _, CdpEngine};
     use jev_pilot::browser::launch::{Fresh, Interrupted, LaunchError, find_chrome};
@@ -629,10 +630,13 @@ mod web {
                     Some(what @ Interrupted::Fresh { .. }) => {
                         what.clean_up(|endpoint| {
                             if let Ok(socket) = Socket::connect(endpoint, Duration::from_secs(2)) {
-                                let _ = Connection::new(socket).send("Browser.close", json!({}), None);
+                                let _ =
+                                    Connection::new(socket).send("Browser.close", json!({}), None);
                             }
                         });
-                        eprintln!("\ninterrupted: closed the fresh browser and removed its profile");
+                        eprintln!(
+                            "\ninterrupted: closed the fresh browser and removed its profile"
+                        );
                     }
                     Some(Interrupted::Attached) => {
                         eprintln!("\ninterrupted: let go of Chrome, and closed nothing");
@@ -725,6 +729,7 @@ mod web {
                 channel,
                 endpoint,
                 allow_wait,
+                ..
             } => {
                 let endpoint = if let Some(endpoint) = endpoint {
                     endpoint.to_string()
@@ -806,6 +811,29 @@ mod web {
             .collect()
     }
 
+    /// Whether tabs are to be listed by id and site alone.
+    fn sites_only(target: &BrowserTarget) -> bool {
+        matches!(
+            target.mode,
+            BrowserMode::Attach {
+                sites_only: true,
+                ..
+            }
+        )
+    }
+
+    /// A tab that could not be chosen, as an error that lists the tabs the
+    /// way the target asks.
+    fn unchosen(target: &BrowserTarget) -> impl Fn(TabChoice) -> Error + '_ {
+        move |choice| {
+            if sites_only(target) {
+                choice.listing(true).into()
+            } else {
+                choice.into()
+            }
+        }
+    }
+
     fn home_dir() -> Option<PathBuf> {
         std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
     }
@@ -824,7 +852,7 @@ mod web {
         let engine = match (&target.open, fresh.is_some()) {
             (Some(url), false) => CdpEngine::open(socket, url)?,
             (open, true) if target.tab.is_none() => {
-                let tab = choose_tab(&tabs, None)?;
+                let tab = choose_tab(&tabs, None).map_err(unchosen(target))?;
                 let mut engine = CdpEngine::attach(socket, &tab.key, true)?;
                 if let Some(url) = open {
                     engine.perform(&BrowserCommand::Navigate(url.clone()))?;
@@ -832,7 +860,7 @@ mod web {
                 engine
             }
             _ => {
-                let tab = choose_tab(&tabs, target.tab.as_deref())?;
+                let tab = choose_tab(&tabs, target.tab.as_deref()).map_err(unchosen(target))?;
                 CdpEngine::attach(socket, &tab.key, fresh.is_some())?
             }
         };
@@ -853,7 +881,7 @@ mod web {
             println!("no tabs open");
         }
         for tab in &tabs {
-            println!("{}  {}  {}", tab.key.as_str(), tab.title, tab.url);
+            println!("{}", tab_line(tab, sites_only(target)));
         }
         if fresh.is_some() {
             let _ = Connection::new(socket).send("Browser.close", json!({}), None);

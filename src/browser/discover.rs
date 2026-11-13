@@ -320,21 +320,59 @@ pub enum TabChoice {
     Ambiguous(Vec<PageTab>),
 }
 
-impl core::fmt::Display for TabChoice {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl TabChoice {
+    /// What went wrong, with the tabs listed in full or, with `sites_only`,
+    /// by id and site alone.
+    #[must_use]
+    pub fn listing(&self, sites_only: bool) -> String {
         let (lead, tabs) = match self {
-            Self::None(tabs) if tabs.is_empty() => {
-                return f.write_str("Chrome has no tabs open");
-            }
+            Self::None(tabs) if tabs.is_empty() => return "Chrome has no tabs open".to_owned(),
             Self::None(tabs) => ("no tab matches --tab; the tabs are:", tabs),
             Self::Ambiguous(tabs) => ("more than one tab matches; name one with --tab:", tabs),
         };
-        f.write_str(lead)?;
+        let mut said = lead.to_owned();
         for tab in tabs {
-            write!(f, "\n  {}  {}  {}", tab.key.as_str(), tab.title, tab.url)?;
+            said.push_str("\n  ");
+            said.push_str(&tab_line(tab, sites_only));
         }
-        Ok(())
+        said
     }
+}
+
+impl core::fmt::Display for TabChoice {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.listing(false))
+    }
+}
+
+/// One tab as a listing shows it: its id, title and address, or with
+/// `sites_only` its id and site.
+#[must_use]
+pub fn tab_line(tab: &PageTab, sites_only: bool) -> String {
+    if sites_only {
+        format!("{}  {}", tab.key.as_str(), site_of(&tab.url))
+    } else {
+        format!("{}  {}  {}", tab.key.as_str(), tab.title, tab.url)
+    }
+}
+
+/// The site an address belongs to: its host, and its port if it names one.
+///
+/// The path, query and fragment are dropped, and so is a sign-in written
+/// into the address. An address with no host keeps only its scheme
+/// (`file:`, `about:`), because a `data:` address is its own contents.
+#[must_use]
+pub fn site_of(url: &str) -> &str {
+    if let Some((_, rest)) = url.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let host = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
+        if !host.is_empty() {
+            return host;
+        }
+    }
+    url.find(':').map_or("", |colon| &url[..=colon])
 }
 
 impl core::error::Error for TabChoice {}

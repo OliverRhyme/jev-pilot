@@ -498,6 +498,8 @@ you. Turn on remote debugging first, at `chrome://inspect/#remote-debugging`
   under System Settings > Privacy & Security > Files & Folders.
 - `--channel beta|dev|canary` attaches to another channel's Chrome, and
   `--endpoint ws://…` skips finding it.
+- `--sites-only` lists your tabs by id and site alone, with no titles or
+  paths. The MCP server passes it on every attach call.
 
 ### Choosing the tab, and where the run may go
 
@@ -543,7 +545,10 @@ run with `--url` offers it whenever a supplied address is not the current one.
 In attach mode the page text of the tab being driven goes to TypeSafe with
 each step, exactly as screen text does on a phone, and that tab may be signed
 in to your accounts. Only the tabs the run started on or opened are described;
-your other tabs never are. Password values are never read. Words you supply
+your other tabs never are. Over MCP, `devices` in attach mode and the error for
+a tab that could not be chosen name each tab by its id and its site alone
+(github.com), with no title and no path; the command line, run by hand in a
+terminal, lists them in full. Password values are never read. Words you supply
 are typed only after the endpoint has shown it is Chrome, and page script runs
 only for the engine's own fixed jobs (choosing a `<select>` option, watching
 for the page to go quiet), never with text from the model.

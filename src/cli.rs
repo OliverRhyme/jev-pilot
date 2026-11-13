@@ -100,6 +100,10 @@ pub enum BrowserMode {
         endpoint: Option<Box<str>>,
         /// How long to wait for the owner to click Allow, in seconds.
         allow_wait: u64,
+        /// Name the owner's tabs by id and site alone, never by title or
+        /// path, wherever they are listed: for a caller other than the
+        /// owner, such as an agent over MCP.
+        sites_only: bool,
     },
     /// A browser started for the run, on a throwaway profile.
     Fresh {
@@ -385,6 +389,7 @@ struct BrowserFlags {
     allow_wait: Option<u64>,
     chrome: Option<String>,
     headless: bool,
+    sites_only: bool,
     tab: Option<String>,
     open: Option<String>,
     urls: Vec<String>,
@@ -440,6 +445,7 @@ impl BrowserFlags {
             }
             "--chrome" => self.chrome = Some(value(args, "--chrome")?),
             "--headless" => self.headless = true,
+            "--sites-only" => self.sites_only = true,
             "--tab" => self.tab = Some(value(args, "--tab")?),
             "--open" => self.open = Some(value(args, "--open")?),
             "--url" => self.urls.push(value(args, "--url")?),
@@ -455,6 +461,7 @@ impl BrowserFlags {
                 (self.channel.is_some(), "--channel", "attach"),
                 (self.endpoint.is_some(), "--endpoint", "attach"),
                 (self.allow_wait.is_some(), "--allow-wait", "attach"),
+                (self.sites_only, "--sites-only", "attach"),
                 (self.chrome.is_some(), "--chrome", "fresh"),
                 (self.headless, "--headless", "fresh"),
                 (self.tab.is_some(), "--tab", "attach|fresh"),
@@ -503,12 +510,14 @@ impl BrowserFlags {
                 channel: self.channel.unwrap_or_else(|| "stable".to_owned()).into(),
                 endpoint: self.endpoint.map(Into::into),
                 allow_wait: self.allow_wait.unwrap_or(DEFAULT_ALLOW_WAIT),
+                sites_only: self.sites_only,
             }
         } else {
             for (set, flag) in [
                 (self.channel.is_some(), "--channel"),
                 (self.endpoint.is_some(), "--endpoint"),
                 (self.allow_wait.is_some(), "--allow-wait"),
+                (self.sites_only, "--sites-only"),
             ] {
                 if set {
                     return Err(CliError::NeedsMode {
@@ -637,6 +646,8 @@ BROWSER (runs, observe and devices; needs a build with the `browser` feature)
       --channel <name>    attach: stable (default), beta, dev or canary
       --endpoint <ws-url> attach: this browser websocket, instead of finding it
       --allow-wait <s>    attach: how long to wait for Allow (default 120)
+      --sites-only        attach: list tabs by id and site, with no titles or
+                          paths
       --chrome <path>     fresh: the browser binary (else JEV_PILOT_CHROME,
                           else Chrome for Testing, Chromium or Chrome)
       --headless          fresh: run without a window

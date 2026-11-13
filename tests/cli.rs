@@ -363,6 +363,7 @@ fn attach_mode_takes_its_channel_endpoint_and_wait() {
                 channel: "stable".into(),
                 endpoint: None,
                 allow_wait: 120,
+                sites_only: false,
             },
             tab: Some("github.com".into()),
             open: None,
@@ -386,6 +387,7 @@ fn attach_mode_takes_its_channel_endpoint_and_wait() {
                 channel: "canary".into(),
                 endpoint: Some("ws://127.0.0.1:9222/devtools/browser/x".into()),
                 allow_wait: 40,
+                sites_only: false,
             },
             tab: None,
             open: None,
@@ -615,4 +617,33 @@ fn an_endpoint_must_be_a_local_websocket() {
             "{endpoint} is refused"
         );
     }
+}
+
+/// `--sites-only` asks for the owner's tabs by site alone, for a caller that
+/// is not the owner. It means something only for the owner's own Chrome.
+#[test]
+fn sites_only_belongs_to_attach_mode() {
+    assert!(matches!(
+        browser_of(parsed(&["devices", "--browser", "attach", "--sites-only"])),
+        Some(BrowserTarget {
+            mode: BrowserMode::Attach {
+                sites_only: true,
+                ..
+            },
+            ..
+        })
+    ));
+    assert!(matches!(
+        browser_of(parsed(&["devices", "--browser", "attach"])),
+        Some(BrowserTarget {
+            mode: BrowserMode::Attach {
+                sites_only: false,
+                ..
+            },
+            ..
+        })
+    ));
+    let refused = |words: &[&str]| parse(words.iter().map(|w| (*w).to_owned())).is_err();
+    assert!(refused(&["devices", "--browser", "fresh", "--sites-only"]));
+    assert!(refused(&["devices", "--sites-only"]));
 }

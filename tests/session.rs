@@ -686,7 +686,8 @@ fn a_refused_attach_does_not_invite_a_retry() {
 fn an_interrupted_fresh_run_closes_its_browser_and_removes_its_profile() {
     use jev_pilot::browser::launch::{Interrupted, make_profile};
 
-    let temp = std::env::temp_dir().join(format!("jev-pilot-interrupt-test-{}", std::process::id()));
+    let temp =
+        std::env::temp_dir().join(format!("jev-pilot-interrupt-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&temp);
     std::fs::create_dir_all(&temp).expect("a folder to work in");
     let (dir, _lock) = make_profile(&temp).expect("a profile");
@@ -708,7 +709,10 @@ fn an_interrupted_fresh_run_closes_its_browser_and_removes_its_profile() {
 
     assert_eq!(closed, ["ws://127.0.0.1:9/devtools/browser/x"]);
     let status = browser.wait().expect("it ended");
-    assert!(!status.success(), "it was ended, not left to finish: {status}");
+    assert!(
+        !status.success(),
+        "it was ended, not left to finish: {status}"
+    );
     assert!(!dir.exists(), "the profile is gone");
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -722,4 +726,50 @@ fn an_interrupted_attach_run_only_detaches() {
     let mut closed = Vec::new();
     Interrupted::Attached.clean_up(|endpoint| closed.push(endpoint.to_owned()));
     assert!(closed.is_empty(), "{closed:?}");
+}
+
+/// Reduced to its site, an address keeps its host and port and loses its
+/// path, query, fragment and any sign-in, and an address with no host keeps
+/// only its scheme, since a `data:` address is its own contents.
+#[test]
+fn an_address_reduced_to_its_site_keeps_only_the_host() {
+    use jev_pilot::browser::discover::site_of;
+    for (url, site) in [
+        ("https://github.com/owner/private-repo?tab=x", "github.com"),
+        (
+            "https://user:secret@mail.example.test:8443/inbox#m1",
+            "mail.example.test:8443",
+        ),
+        ("http://127.0.0.1:5173/", "127.0.0.1:5173"),
+        ("https://example.test", "example.test"),
+        ("file:///Users/someone/notes.html", "file:"),
+        ("data:text/html,<p>secret</p>", "data:"),
+        ("about:blank", "about:"),
+        ("chrome://settings/passwords", "settings"),
+        ("", ""),
+    ] {
+        assert_eq!(site_of(url), site, "{url}");
+    }
+}
+
+/// Listed by site, the tabs show their ids and sites, and none of their
+/// titles or paths; listed in full, they read as before.
+#[test]
+fn a_tab_listing_by_site_shows_no_titles_or_paths() {
+    use jev_pilot::browser::discover::tab_line;
+
+    let choice = TabChoice::None(tabs());
+    assert_eq!(
+        choice.listing(true),
+        "no tab matches --tab; the tabs are:\n  A1  mail.example.test\n  B2  github.com\n  C3  github.com"
+    );
+    assert_eq!(choice.listing(false), choice.to_string());
+    assert!(choice.listing(false).contains("Pull requests"));
+
+    let inbox = tab("A1", "Inbox", "https://mail.example.test/inbox");
+    assert_eq!(tab_line(&inbox, true), "A1  mail.example.test");
+    assert_eq!(
+        tab_line(&inbox, false),
+        "A1  Inbox  https://mail.example.test/inbox"
+    );
 }

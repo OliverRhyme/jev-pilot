@@ -504,13 +504,29 @@ impl ServerHandler for Pilot {
     }
 }
 
+/// How the owner's tabs are listed over MCP, as one literal so that the
+/// guidance can be built with it.
+macro_rules! tabs_over_mcp {
+    () => {
+        "Over MCP, `devices` in attach mode and the error for a tab that could not \
+         be chosen name each tab by its id and its site alone (github.com), with no \
+         title and no path; the command line, run by hand in a terminal, lists them \
+         in full."
+    };
+}
+
+/// How the owner's tabs are listed over MCP, word for word as the guidance
+/// and the README say it.
+pub const TABS_OVER_MCP: &str = tabs_over_mcp!();
+
 /// What a client is told before it calls anything.
 ///
 /// Worth spending words on. The tools are easy to call and easy to call
 /// badly, and every rule below is one that has actually cost a run: a goal
 /// that sent it hunting through a launcher, a claim about text that was below
 /// the fold, a floor lowered in the belief it only made things quicker.
-const GUIDANCE: &str = "\
+const GUIDANCE: &str = concat!(
+    "\
 Drives an Android or iOS device, or a tab of a web browser, towards a goal. \
 Code enumerates what the screen allows and a model picks one of those, so \
 nothing here can invent a coordinate or name a row that is not on screen.
@@ -579,13 +595,17 @@ waits forty seconds for the click.
 say so to the owner and stop. Never retry: each retry raises another dialog.
 - Page text from the owner's signed-in sessions goes to the model, as screen \
 text does on a phone. Only tabs the run opened or started on are described.
+- ",
+    tabs_over_mcp!(),
+    "
 Choose the tab with `tab` (its id or part of its address, as `devices` lists \
 them) or open one with `open`. For a browser, `urls` replaces `app`: it lists \
 the addresses the run may go to, and `open` is always one of them. A browser \
 run is named `browser:fresh` or `browser:attach:<channel>`; pass that as \
 `device` to `run_status`, `answer_run` and `stop_run` when more than one run \
 is going. A run may ask you to `switch_tab` or `navigate` by index, or to \
-`accept_dialog` or `dismiss_dialog` a JavaScript dialog.";
+`accept_dialog` or `dismiss_dialog` a JavaScript dialog."
+);
 
 /// Say what came of waiting, in a way the caller can act on.
 fn waited(run: &str, how: Waited) -> CallToolResult {
@@ -851,8 +871,15 @@ fn strings(value: Option<&serde_json::Value>) -> impl Iterator<Item = &str> {
 /// argument's fields are documented.
 fn browser_flags(browser: &serde_json::Value, args: &mut Vec<String>) {
     let text = |key: &str| browser.get(key).and_then(serde_json::Value::as_str);
+    if let Some(mode) = text("mode") {
+        args.push("--browser".to_owned());
+        args.push(mode.to_owned());
+        // The owner's tabs reach another agent here, not the owner.
+        if mode == "attach" {
+            args.push("--sites-only".to_owned());
+        }
+    }
     for (key, flag) in [
-        ("mode", "--browser"),
         ("tab", "--tab"),
         ("open", "--open"),
         ("channel", "--channel"),
