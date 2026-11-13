@@ -391,6 +391,12 @@ pub struct StepReport<'s> {
     /// means something quite different in the app the goal was about than on a
     /// launcher the run wandered onto.
     pub app: Option<&'s str>,
+    /// The address of the page, when the screen is one.
+    ///
+    /// Beside the origin in `app`, because two steps on one site are often two
+    /// different pages, and a transcript that says only the site cannot tell
+    /// a form that reset from the next one.
+    pub url: Option<&'s str>,
     /// What the model chose, if it was certain enough to act.
     pub chosen: Option<&'s Act>,
     /// How sure the model was about *what* to do.
@@ -991,6 +997,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             unavailable: snapshot.unavailable().map(ToOwned::to_owned).collect(),
             repeating: went.repeating,
             app: snapshot.app(),
+            url: snapshot.url(),
             chosen,
             operation_confidence: answers.operation.confidence,
             target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),
