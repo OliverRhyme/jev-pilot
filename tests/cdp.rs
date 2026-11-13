@@ -584,6 +584,7 @@ const SESSION: &str = "S1";
 /// The replies attaching to the sign-up tab gets.
 fn script_attach(script: &Script) {
     script
+        .on("Target.getTargets", signup::load("targets"))
         .on("Target.setDiscoverTargets", json!({}))
         .on("Target.attachToTarget", json!({"sessionId": SESSION}))
         .on("Page.enable", json!({}));
@@ -682,6 +683,7 @@ fn attaching_discovers_tabs_and_enables_page_on_a_flat_session() {
     assert_eq!(
         without_ids(script.sent()),
         [
+            json!({"method": "Target.getTargets", "params": {}}),
             json!({"method": "Target.setDiscoverTargets", "params": {"discover": true}}),
             json!({"method": "Target.attachToTarget", "params": {"targetId": signup::TARGET, "flatten": true}}),
             json!({"method": "Page.enable", "params": {}, "sessionId": SESSION}),
@@ -1410,4 +1412,83 @@ fn a_dialogs_nodes_follow_it_even_when_painted_later() {
     let names: Vec<&str> = read.nodes.iter().map(|n| &*n.name).collect();
     assert_eq!(names, ["Delete file", "Delete", "Behind"]);
     assert!(read.nodes[0].states.modal);
+}
+
+/// The owner's tabs are never the run's. A tab that was already open when the
+/// run attached stays the owner's even when the protocol reports the start
+/// tab as its opener, whether it is reported again as discovery starts or
+/// later as it changes.
+#[test]
+fn a_tab_open_before_attaching_is_never_adopted() {
+    const OWNERS: &str = "E8DD778F620BA08560C3270923315360";
+    let owners_tab = |method: &str| {
+        json!({
+            "method": method,
+            "params": {"targetInfo": {"targetId": OWNERS, "type": "page", "title": "Bank", "url": "https://bank.example.test/", "attached": false, "openerId": signup::TARGET, "canAccessOpener": false}},
+        })
+    };
+    let script = Script::new();
+    script.on("Target.getTargets", signup::load("targets"));
+    script.answer(
+        "Target.setDiscoverTargets",
+        Answer::EventsThen(
+            vec![owners_tab("Target.targetCreated")],
+            Box::new(Answer::Result(json!({}))),
+        ),
+    );
+    script.on("Target.attachToTarget", json!({"sessionId": SESSION}));
+    script.on("Page.enable", json!({}));
+    script_read(&script);
+    let mut engine =
+        CdpEngine::attach(script.clone(), &TabKey::new(signup::TARGET), false).expect("attaches");
+    engine.read().expect("reads");
+
+    script_press_email(
+        &script,
+        Answer::EventsThen(
+            vec![owners_tab("Target.targetInfoChanged")],
+            Box::new(Answer::Result(json!({}))),
+        ),
+    );
+    script_settle(&script, 3);
+    engine
+        .perform(&BrowserCommand::Press {
+            at: Point { x: 120, y: 19 },
+            node: email(),
+        })
+        .expect("performs");
+
+    assert_ne!(engine.outcome(), Some("opened a new tab: Bank"));
+    script_read(&script);
+    let read = engine.read().expect("reads");
+    assert!(
+        read.tabs.iter().all(|tab| tab.key.as_str() != OWNERS),
+        "the owner's tab is not the run's: {:?}",
+        read.tabs
+    );
+}
+
+/// A tab the run's own tab opens after attaching is the run's.
+#[test]
+fn a_tab_created_after_attaching_by_the_start_tab_is_adopted() {
+    let (script, mut engine) = engine_after_read();
+    script_press_email(
+        &script,
+        Answer::EventsThen(
+            vec![
+                json!({"method": "Target.targetCreated", "params": {"targetInfo": {"targetId": "T9", "type": "page", "title": "Receipt", "url": "https://example.test/receipt", "attached": false, "openerId": signup::TARGET}}}),
+            ],
+            Box::new(Answer::Result(json!({}))),
+        ),
+    );
+    script_settle(&script, 3);
+
+    engine
+        .perform(&BrowserCommand::Press {
+            at: Point { x: 120, y: 19 },
+            node: email(),
+        })
+        .expect("performs");
+
+    assert_eq!(engine.outcome(), Some("opened a new tab: Receipt"));
 }

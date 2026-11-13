@@ -267,6 +267,21 @@ impl<W: Wire> CdpEngine<W> {
             world: None,
             seen: Seen::default(),
         };
+        // Listed before discovery starts, because discovery reports every tab
+        // already open as if it had just been created, opener and all.
+        let open_already = engine.browser_call("Target.getTargets", json!({}))?;
+        for info in open_already
+            .get("targetInfos")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = info.get("targetId").and_then(Value::as_str)
+                && id != tab.as_str()
+            {
+                engine.owned.existed(id);
+            }
+        }
         engine.browser_call("Target.setDiscoverTargets", json!({"discover": true}))?;
         engine.owned.start_on(tab.as_str(), opened_by_run);
         engine.attach_session(tab.as_str())?;
@@ -449,7 +464,9 @@ impl<W: Wire> CdpEngine<W> {
                 }
             }
             "Page.loadEventFired" if self.ours(event) => self.seen.loaded = true,
-            "Target.targetCreated" | "Target.targetInfoChanged" => {
+            // Only a tab created while the run watches can be the run's; a
+            // change to a tab says nothing about who it belongs to.
+            "Target.targetCreated" => {
                 let info = p.get("targetInfo").cloned().unwrap_or_default();
                 let id = info
                     .get("targetId")
