@@ -37,7 +37,6 @@
    "frame": "f1",
    "role": "textbox",
    "name": "Card number",
-   "value": "",
    "states": {
     "focusable": true,
     "editable": true

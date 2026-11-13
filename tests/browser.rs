@@ -108,6 +108,10 @@ fn the_browser_set_has_no_phone_only_operations() {
         Operation::ScrollUp,
         Operation::ScrollDown,
         Operation::Back,
+        Operation::Navigate,
+        Operation::SwitchTab,
+        Operation::AcceptDialog,
+        Operation::DismissDialog,
         Operation::Wait,
         Operation::Done,
         Operation::Blocked,
@@ -271,7 +275,7 @@ fn fields_are_labelled_by_name_or_placeholder_and_say_what_they_hold() {
             ("Email".into(), Some("empty".into())),
             ("Full name".into(), Some("empty".into())),
             ("text field".into(), None),
-            ("Password".into(), Some("filled".into())),
+            ("Password".into(), Some("contents not shown".into())),
         ]
     );
     for (_, element) in snapshot.refs().take(4) {
@@ -293,14 +297,63 @@ fn a_password_value_is_never_read() {
     let all: String = snapshot.refs().map(|(_, e)| e.describe()).collect();
     assert!(!all.contains("hunter2"));
 
-    let mut dots = node("textbox", "Secret", 100.0);
-    dots.value = Some("••••••".into());
-    dots.states.editable = true;
-    let snapshot = Browser::default().snapshot_from(&read(vec![dots]));
+    // Should an engine ever pass a protected field's value on, it still does
+    // not reach the snapshot.
+    let mut leaked = node("textbox", "PIN", 100.0);
+    leaked.value = Some("2468".into());
+    leaked.protected = true;
+    leaked.states.editable = true;
+    let snapshot = Browser::default().snapshot_from(&read(vec![leaked]));
     assert_eq!(
         rows(&snapshot),
-        [("Secret".to_string(), Some("filled".to_string()))]
+        [("PIN".to_string(), Some("contents not shown".to_string()))]
     );
+}
+
+/// The engine says which fields are passwords. A field merely named like one
+/// is an ordinary field, whose value is its detail.
+#[test]
+fn only_a_protected_field_hides_its_contents() {
+    let mut hint = node("textbox", "Password hint", 100.0);
+    hint.value = Some("first pet".into());
+    hint.states.editable = true;
+    let mut secret = node("textbox", "Password", 200.0);
+    secret.protected = true;
+    secret.states.editable = true;
+    let snapshot = Browser::default().snapshot_from(&read(vec![hint, secret]));
+    assert_eq!(
+        rows(&snapshot),
+        [
+            ("Password hint".to_string(), Some("first pet".to_string())),
+            (
+                "Password".to_string(),
+                Some("contents not shown".to_string())
+            ),
+        ]
+    );
+}
+
+/// Chrome names an unlabelled field by its placeholder, and drops the
+/// placeholder of a labelled one; a description is never a placeholder, so a
+/// field with no name is a "text field" whatever it is described as.
+#[test]
+fn a_field_with_no_name_is_not_labelled_by_its_description() {
+    let mut described = node("textbox", "", 100.0);
+    described.description = Some("We never share it".into());
+    described.states.editable = true;
+    let snapshot = Browser::default().snapshot_from(&read(vec![described]));
+    assert_eq!(labels(&snapshot), ["text field"]);
+}
+
+/// A natively disabled button has no click listener the layout reports, but
+/// it is still a control the page shows and will not let anything use.
+#[test]
+fn a_disabled_button_that_is_not_clickable_is_unavailable() {
+    let mut submit = node("button", "Place order", 100.0);
+    submit.states.disabled = true;
+    let snapshot = Browser::default().snapshot_from(&read(vec![submit]));
+    assert!(snapshot.is_empty());
+    assert_eq!(unavailable(&snapshot), ["Place order"]);
 }
 
 #[test]
@@ -686,4 +739,81 @@ fn a_modal_with_too_many_rows_keeps_its_visible_ones_first() {
             .iter()
             .any(|n| n.contains("50 more rows"))
     );
+}
+
+// --- a real Chrome's page ---
+
+/// The recorded page's main frame, which is also its tab, and its iframe.
+const SIGNUP_MAIN: &str = "933B271DD0EC81D3402A478AE60B40E5";
+const SIGNUP_CHILD: &str = "4634BC906F07018102C158CE6AEB76E4";
+
+/// The sign-up page recorded from Chrome 153 under `tests/fixtures/cdp/`,
+/// translated by the DevTools engine's read, as a run would see it.
+fn recorded_signup() -> Snapshot {
+    use jev_pilot::browser::read::{Loaders, OwnedTabs, RawRead, translate};
+    let load = |name: &str| -> serde_json::Value {
+        let path = format!(
+            "{}/tests/fixtures/cdp/signup/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("fixture exists"))
+            .expect("fixture is JSON")
+    };
+    let raw = RawRead {
+        frame_tree: load("frame-tree"),
+        ax_trees: vec![
+            (SIGNUP_MAIN.into(), load("ax-0")),
+            (SIGNUP_CHILD.into(), load("ax-1")),
+        ],
+        snapshot: load("snapshot"),
+        layout_metrics: load("layout-metrics"),
+        targets: load("targets"),
+    };
+    let mut owned = OwnedTabs::default();
+    owned.start_on(SIGNUP_MAIN, true);
+    let page = translate(&raw, SIGNUP_MAIN, &owned, &mut Loaders::default()).expect("translates");
+    Browser::default().snapshot_from(&page)
+}
+
+/// Chrome reports each label around a field as a clickable node of its own,
+/// drawn under the field and not quite containing it. It is the field, seen
+/// from outside, so the field is offered once; a password field says its
+/// contents are not shown rather than that it is empty, since the read never
+/// carries them.
+#[test]
+fn a_recorded_page_offers_each_field_once() {
+    let snapshot = recorded_signup();
+
+    assert_eq!(
+        rows(&snapshot),
+        [
+            ("Send me news".to_string(), Some("checked".to_string())),
+            ("Pick the free plan".to_string(), None),
+            (
+                "Terms of service".to_string(),
+                Some("off screen".to_string())
+            ),
+            ("Email".to_string(), Some("empty".to_string())),
+            (
+                "Password".to_string(),
+                Some("contents not shown".to_string())
+            ),
+            (
+                "Country".to_string(),
+                Some("Philippines (options: Japan, Philippines, Spain)".to_string())
+            ),
+            ("Inside frame".to_string(), None),
+            ("Home".to_string(), None),
+            ("Help".to_string(), None),
+        ]
+    );
+    assert_eq!(notices(&snapshot), ["Frame text"]);
+    assert_eq!(unavailable(&snapshot), ["Create account"]);
+    for (handle, element) in snapshot.refs() {
+        assert!(
+            snapshot.tap_point(handle).is_ok(),
+            "{} can be tapped",
+            element.label
+        );
+    }
 }
