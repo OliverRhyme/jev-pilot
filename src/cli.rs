@@ -357,6 +357,25 @@ fn devices(mut args: impl Iterator<Item = String>) -> Result<Invocation, CliErro
     })
 }
 
+/// Whether a browser endpoint is a plain websocket on this machine.
+///
+/// The DevTools endpoint carries the page and everything typed into it, with
+/// no encryption, and a browser on another machine is not one a run should
+/// reach; so only `ws://` to 127.0.0.1, `localhost` or `[::1]` is accepted.
+#[must_use]
+pub fn is_local_endpoint(endpoint: &str) -> bool {
+    let Some(rest) = endpoint.strip_prefix("ws://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or_default()
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
 /// The browser flags, as they are met, checked against each other at the end.
 #[derive(Default)]
 struct BrowserFlags {
@@ -402,7 +421,7 @@ impl BrowserFlags {
             }
             "--endpoint" => {
                 let got = value(args, "--endpoint")?;
-                if !got.starts_with("ws://") {
+                if !is_local_endpoint(&got) {
                     return Err(CliError::BadValue {
                         flag: "--endpoint",
                         got,

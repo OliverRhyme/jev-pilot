@@ -559,3 +559,20 @@ fn stopping_a_run_clears_the_fresh_profile_it_left() {
     drop(held);
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+#[test]
+fn a_browser_endpoint_must_be_local() {
+    let refused = invocation(
+        "observe",
+        &json!({"browser": {"mode": "attach", "endpoint": "ws://10.0.0.5:9222/devtools/browser/x"}}),
+    )
+    .expect_err("refused");
+    assert!(refused.contains("endpoint"), "{refused}");
+    assert!(
+        invocation(
+            "observe",
+            &json!({"browser": {"mode": "attach", "endpoint": "ws://127.0.0.1:9222/devtools/browser/x"}}),
+        )
+        .is_ok()
+    );
+}

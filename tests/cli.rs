@@ -564,3 +564,55 @@ fn bad_browser_values_are_refused() {
         );
     }
 }
+
+/// The endpoint is a browser on this machine. One anywhere else would carry
+/// the page, and whatever is typed into it, across a network unencrypted.
+#[test]
+fn an_endpoint_must_be_a_local_websocket() {
+    for endpoint in [
+        "ws://127.0.0.1:9222/devtools/browser/x",
+        "ws://localhost:9222/devtools/browser/x",
+        "ws://[::1]:9222/devtools/browser/x",
+    ] {
+        assert!(
+            parse(
+                [
+                    "--browser",
+                    "attach",
+                    "--endpoint",
+                    endpoint,
+                    "Open the page"
+                ]
+                .map(str::to_owned)
+            )
+            .is_ok(),
+            "{endpoint} is local"
+        );
+    }
+    for endpoint in [
+        "ws://192.168.1.20:9222/devtools/browser/x",
+        "ws://example.test:9222/devtools/browser/x",
+        "ws://127.0.0.1.example.test:9222/devtools/browser/x",
+        "wss://127.0.0.1:9222/devtools/browser/x",
+    ] {
+        assert!(
+            matches!(
+                parse(
+                    [
+                        "--browser",
+                        "attach",
+                        "--endpoint",
+                        endpoint,
+                        "Open the page"
+                    ]
+                    .map(str::to_owned)
+                ),
+                Err(CliError::BadValue {
+                    flag: "--endpoint",
+                    ..
+                })
+            ),
+            "{endpoint} is refused"
+        );
+    }
+}

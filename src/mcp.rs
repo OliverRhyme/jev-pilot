@@ -744,6 +744,16 @@ pub fn invocation(tool: &str, arguments: &serde_json::Value) -> Result<Vec<Strin
             "name a device or a browser, not both: a run drives one thing at a time".to_owned(),
         );
     }
+    if let Some(endpoint) = browser
+        .and_then(|b| b.get("endpoint"))
+        .and_then(serde_json::Value::as_str)
+        && !crate::cli::is_local_endpoint(endpoint)
+    {
+        return Err(format!(
+            "the endpoint must be a ws:// address on this machine (127.0.0.1, localhost or \
+             [::1]), not {endpoint}"
+        ));
+    }
     let mut args = Vec::new();
     if let Some(device) = text("device") {
         args.push("--device".to_owned());
