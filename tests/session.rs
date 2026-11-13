@@ -219,8 +219,33 @@ fn only_chrome_or_chromium_counts_as_chrome() {
     assert!(is_chrome(&json!({"product": "Chrome/153.0.8010.12"})));
     assert!(is_chrome(&json!({"product": "HeadlessChrome/153.0.0.0"})));
     assert!(is_chrome(&json!({"product": "Chromium/140.0.1"})));
+    assert!(
+        is_chrome(&json!({"product": "Edg/142.0.3595.53"})),
+        "Edge is Chromium"
+    );
+    assert!(is_chrome(&json!({"product": "HeadlessEdg/142.0.3595.53"})));
     assert!(!is_chrome(&json!({"product": "Firefox/141.0"})));
     assert!(!is_chrome(&json!({})));
+}
+
+/// A browser this run started is not a stale endpoint, so its refusal says
+/// which binary to change rather than blaming a port file.
+#[test]
+fn a_fresh_browser_that_is_not_chrome_names_the_binary() {
+    use jev_pilot::browser::launch::LaunchError;
+
+    let message = LaunchError::NotChrome {
+        binary: PathBuf::from("/opt/odd/browser"),
+        product: "Firefox/141.0".into(),
+    }
+    .to_string();
+
+    assert!(
+        message.contains("/opt/odd/browser") && message.contains("Firefox/141.0"),
+        "{message}"
+    );
+    assert!(message.contains("--chrome"), "{message}");
+    assert!(!message.contains("DevToolsActivePort"), "{message}");
 }
 
 // --- choosing a tab ---

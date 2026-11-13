@@ -119,6 +119,13 @@ pub enum LaunchError {
     NotReady,
     /// The endpoint file it wrote could not be read.
     Endpoint(AttachError),
+    /// The browser started says it is not Chrome or Chromium.
+    NotChrome {
+        /// The binary that was started.
+        binary: PathBuf,
+        /// What it says it is.
+        product: Box<str>,
+    },
 }
 
 impl core::fmt::Display for LaunchError {
@@ -135,6 +142,12 @@ impl core::fmt::Display for LaunchError {
             Self::Exited(status) => write!(f, "the browser exited before it was ready ({status})"),
             Self::NotReady => f.write_str("the browser did not open its debugging port in time"),
             Self::Endpoint(e) => e.fmt(f),
+            Self::NotChrome { binary, product } => write!(
+                f,
+                "{} says it is {product}, not Chrome, Chromium or Edge, and nothing was typed; \
+                 name another browser with --chrome",
+                binary.display()
+            ),
         }
     }
 }

@@ -670,7 +670,7 @@ mod web {
     /// soon as the run starts and never retried; a retry would stack a second
     /// prompt on the first.
     fn connect(target: &BrowserTarget) -> Result<Connected, Error> {
-        let (socket, fresh) = match &target.mode {
+        let (socket, fresh, binary) = match &target.mode {
             BrowserMode::Attach {
                 channel,
                 endpoint,
@@ -689,7 +689,7 @@ mod web {
                 eprintln!("Click Allow in Chrome (Enter chooses Cancel)");
                 let socket = Socket::connect(&endpoint, Duration::from_secs(*allow_wait))
                     .map_err(AttachError::from)?;
-                (socket, None)
+                (socket, None, None)
             }
             BrowserMode::Fresh { chrome, headless } => {
                 let binary = find_chrome(
@@ -701,7 +701,7 @@ mod web {
                 .ok_or(LaunchError::NoBrowser)?;
                 let (fresh, port) = Fresh::start(&binary, *headless, FRESH_START)?;
                 let socket = Socket::connect(&port.endpoint(), CALL).map_err(AttachError::from)?;
-                (socket, Some(fresh))
+                (socket, Some(fresh), Some(binary))
             }
         };
         let mut connection = Connection::new(socket);
@@ -713,10 +713,19 @@ mod web {
                 .get("product")
                 .and_then(Value::as_str)
                 .unwrap_or("something unnamed");
-            return Err(AttachError::NotChrome {
-                product: product.into(),
-            }
-            .into());
+            // A browser this run started is not a stale endpoint; say which
+            // binary it was.
+            return Err(match binary {
+                Some(binary) => LaunchError::NotChrome {
+                    binary,
+                    product: product.into(),
+                }
+                .into(),
+                None => AttachError::NotChrome {
+                    product: product.into(),
+                }
+                .into(),
+            });
         }
         let targets = connection.call("Target.getTargets", json!({}), None, CALL)?;
         Ok(Connected {

@@ -182,7 +182,8 @@ pub fn read_active_port(dir: &Path) -> Result<ActivePort, AttachError> {
     ActivePort::parse(&text)
 }
 
-/// Whether a `Browser.getVersion` reply comes from Chrome or Chromium.
+/// Whether a `Browser.getVersion` reply comes from Chrome, Chromium, or a
+/// browser built on Chromium that speaks the same protocol (Edge).
 ///
 /// Checked before anything is typed: a stale file can point at a port some
 /// other program now holds.
@@ -192,9 +193,15 @@ pub fn is_chrome(version: &Value) -> bool {
         .get("product")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    ["Chrome/", "HeadlessChrome/", "Chromium/"]
-        .iter()
-        .any(|p| product.starts_with(p))
+    [
+        "Chrome/",
+        "HeadlessChrome/",
+        "Chromium/",
+        "Edg/",
+        "HeadlessEdg/",
+    ]
+    .iter()
+    .any(|p| product.starts_with(p))
 }
 
 /// Why a run could not attach to Chrome.
