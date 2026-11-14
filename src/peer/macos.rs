@@ -12,7 +12,7 @@ use security_framework::os::macos::code_signing::{
     Flags, GuestAttributes, SecCode, SecRequirement,
 };
 
-use super::{Code, Expected, Facts};
+use super::{Code, Expected, Facts, MacosPin};
 
 /// `errSecCSReqFailed`: the code is valid but does not satisfy the
 /// requirement. Any other failure means the check could not be made.
@@ -46,8 +46,8 @@ pub(super) fn facts(stream: &Stream, expected: &Expected) -> Facts {
         return facts;
     };
     facts.path = code.path(Flags::NONE).ok().and_then(|url| url.to_path());
-    if let Expected::Macos { requirement, .. } = expected {
-        facts.code = satisfies(&code, requirement);
+    if let Expected::Macos { pin, .. } = expected {
+        facts.code = satisfies(&code, pin);
     }
     facts
 }
@@ -61,15 +61,15 @@ fn guest(token: &[u32; 8]) -> Option<SecCode> {
     SecCode::copy_guest_with_attribues(None, &attributes, Flags::NONE).ok()
 }
 
-fn satisfies(code: &SecCode, requirement: &str) -> Option<Code> {
-    let parsed: SecRequirement = requirement.parse().ok()?;
+fn satisfies(code: &SecCode, pin: &MacosPin) -> Option<Code> {
+    let parsed: SecRequirement = pin.requirement().parse().ok()?;
     let satisfied = match code.check_validity(Flags::NONE, &parsed) {
         Ok(()) => true,
         Err(error) if error.code() == REQUIREMENT_FAILED => false,
         Err(_) => return None,
     };
     Some(Code::Requirement {
-        requirement: requirement.to_owned(),
+        pin: pin.clone(),
         satisfied,
     })
 }

@@ -89,6 +89,34 @@ pub fn set_not_dumpable() -> std::io::Result<()> {
     linux::set_not_dumpable()
 }
 
+/// Gives up the setgid install's group for good: sets the real, effective
+/// and saved gid to the real gid, then reads them back and fails unless all
+/// three are.
+///
+/// A setgid process's children inherit its effective gid, and the group is
+/// what the bridge trusts. jev-pilot starts other programs found on `PATH`
+/// (`adb`, a browser), so a program put first on `PATH` would otherwise run
+/// with the group and pass the bridge's check. Once this has returned, no
+/// program this process starts has it, and this process cannot take it back.
+///
+/// Who calls it:
+///
+/// - every mode, first thing in `main`, except the two below;
+/// - the bridge client (a run in extension mode), right after it connects:
+///   the host reads its credentials as they were at `connect`;
+/// - the bridge host keeps the group: the run reads the host's credentials
+///   as they were at `listen`, and only the group may append to the audit
+///   log. The host starts no other program.
+///
+/// # Errors
+///
+/// When the kernel refuses the change, or the group is still held after it.
+#[cfg(target_os = "linux")]
+#[cfg_attr(docsrs, doc(cfg(target_os = "linux")))]
+pub fn drop_install_group() -> std::io::Result<()> {
+    linux::drop_install_group()
+}
+
 /// The string form of the SID of the user this process runs as: what a
 /// Windows install pins, and what its pipe's security descriptor names.
 ///
@@ -160,11 +188,10 @@ pub struct Facts {
 #[non_exhaustive]
 pub enum Code {
     /// macOS: the Security framework checked the peer's running code against
-    /// `requirement`, and it was satisfied or not.
+    /// the requirement `pin` renders, and it was satisfied or not.
     Requirement {
-        /// The requirement the code was checked against, in the text form
-        /// `csreq` reads.
-        requirement: String,
+        /// The pin whose requirement the code was checked against.
+        pin: MacosPin,
         /// Whether the running code satisfied it.
         satisfied: bool,
     },
@@ -185,22 +212,25 @@ pub enum Code {
 #[serde(tag = "os", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Expected {
-    /// macOS: the uid, the installed copy, and its code requirement.
+    /// macOS: the uid, the installed copy, and what its code must satisfy.
     Macos {
         /// The owner's uid.
         uid: u32,
-        /// Where the installed copy lives.
+        /// Where the installed copy lives, canonicalized: the Security
+        /// framework reports the path of the running code with every link
+        /// resolved, and that is what it is compared with.
         path: PathBuf,
-        /// `cdhash H"…"` for an ad hoc signed copy, or the Developer ID form
-        /// `anchor apple generic and identifier "…" and certificate
-        /// leaf[subject.OU] = "…"`.
-        requirement: String,
+        /// The cdhash or Developer ID the code must satisfy.
+        pin: MacosPin,
     },
     /// Linux: the uid, the installed copy, and what vouches for it.
     Linux {
         /// The owner's uid.
         uid: u32,
-        /// Where the installed copy lives.
+        /// Where the installed copy lives, canonicalized: a development
+        /// peer's executable is read from `/proc/<pid>/exe`, which has every
+        /// link resolved. A setgid install's path is not compared, because
+        /// its executable cannot be read.
         path: PathBuf,
         /// The setgid group, or a development install's hash.
         pin: LinuxPin,
@@ -209,7 +239,9 @@ pub enum Expected {
     Windows {
         /// The string form of the owner's SID.
         sid: String,
-        /// Where the installed image lives, under Program Files.
+        /// Where the installed image lives, under Program Files, as
+        /// `std::fs::canonicalize` gives it (`\\?\C:\Program Files\…`).
+        /// The peer's image is compared by its final path, in that form.
         path: PathBuf,
         /// The image's hash, or its signer.
         pin: WindowsPin,
@@ -219,6 +251,197 @@ pub enum Expected {
         #[serde(skip)]
         session: Option<u32>,
     },
+}
+
+/// What the peer's code must satisfy on macOS.
+///
+/// It is rendered into a code requirement here, from validated parts, so no
+/// requirement text from outside is ever handed to the Security framework.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MacosPin {
+    /// The cdhash of an ad hoc signed copy, re-signed with the hardened
+    /// runtime at install. The cdhash covers the runtime flag, so pinning it
+    /// pins the hardened runtime too.
+    Cdhash(#[serde(with = "cdhash_hex")] [u8; 20]),
+    /// A release signed with a Developer ID certificate.
+    DeveloperId {
+        /// The code signing identifier.
+        identifier: SigningIdentifier,
+        /// The team the certificate was issued to.
+        team: TeamId,
+    },
+}
+
+impl MacosPin {
+    /// A cdhash pin from its 40 hex digits, as `codesign -d -vvv` prints it.
+    ///
+    /// # Errors
+    ///
+    /// When it is not 40 hex digits.
+    pub fn from_cdhash_hex(hex: &str) -> Result<Self, PinError> {
+        parse_hex(hex)
+            .map(MacosPin::Cdhash)
+            .ok_or(PinError("a cdhash is 40 hex digits"))
+    }
+
+    /// A Developer ID pin.
+    ///
+    /// # Errors
+    ///
+    /// When the identifier or the team is not of the form below.
+    pub fn developer_id(identifier: &str, team: &str) -> Result<Self, PinError> {
+        Ok(MacosPin::DeveloperId {
+            identifier: identifier.parse()?,
+            team: team.parse()?,
+        })
+    }
+
+    /// The code requirement, in the language `csreq` reads.
+    #[must_use]
+    pub fn requirement(&self) -> String {
+        match self {
+            MacosPin::Cdhash(cdhash) => format!(r#"cdhash H"{}""#, Hex(cdhash)),
+            MacosPin::DeveloperId { identifier, team } => format!(
+                r#"anchor apple generic and identifier "{}" and certificate leaf[subject.OU] = "{}""#,
+                identifier.0, team.0
+            ),
+        }
+    }
+}
+
+/// A code signing identifier in reverse-DNS form: letters, digits, `.` and
+/// `-`, so it can never close the quotes it is written in.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
+pub struct SigningIdentifier(String);
+
+impl SigningIdentifier {
+    /// The identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for SigningIdentifier {
+    type Err = PinError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let valid = !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+        if valid {
+            Ok(Self(s.to_owned()))
+        } else {
+            Err(PinError(
+                "a signing identifier is letters, digits, '.' and '-'",
+            ))
+        }
+    }
+}
+
+/// An Apple Developer team ID: ten upper-case letters and digits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
+pub struct TeamId(String);
+
+impl TeamId {
+    /// The team ID.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for TeamId {
+    type Err = PinError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let valid = s.len() == 10
+            && s.bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
+        if valid {
+            Ok(Self(s.to_owned()))
+        } else {
+            Err(PinError("a team ID is ten upper-case letters and digits"))
+        }
+    }
+}
+
+macro_rules! string_newtype {
+    ($($ty:ident),*) => {$(
+        impl From<$ty> for String {
+            fn from(value: $ty) -> Self {
+                value.0
+            }
+        }
+
+        impl TryFrom<String> for $ty {
+            type Error = PinError;
+
+            fn try_from(s: String) -> Result<Self, Self::Error> {
+                s.parse()
+            }
+        }
+    )*};
+}
+
+string_newtype!(SigningIdentifier, TeamId);
+
+/// A pin that is not of the form its kind requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinError(&'static str);
+
+impl fmt::Display for PinError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for PinError {}
+
+mod cdhash_hex {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub(super) fn serialize<S: Serializer>(
+        cdhash: &[u8; 20],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&super::Hex(cdhash))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<[u8; 20], D::Error> {
+        let hex = String::deserialize(deserializer)?;
+        super::parse_hex(&hex).ok_or_else(|| D::Error::custom("a cdhash is 40 hex digits"))
+    }
+}
+
+/// Bytes written as lowercase hex.
+struct Hex<'a, const N: usize>(&'a [u8; N]);
+
+impl<const N: usize> fmt::Display for Hex<'_, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
+    }
+}
+
+/// `N` bytes from exactly `2 * N` hex digits, in either case.
+fn parse_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
+    let s = s.as_bytes();
+    if s.len() != 2 * N {
+        return None;
+    }
+    let mut bytes = [0u8; N];
+    let (pairs, _) = s.as_chunks::<2>();
+    for (byte, pair) in bytes.iter_mut().zip(pairs) {
+        let pair = std::str::from_utf8(pair).ok()?;
+        *byte = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(bytes)
 }
 
 /// What vouches for the program on Linux.
@@ -242,6 +465,11 @@ pub enum WindowsPin {
     /// The SHA-256 of the installed image, for an unsigned build.
     Sha256(Sha256Digest),
     /// The Authenticode leaf signer's subject, for a signed release.
+    ///
+    /// Pin only what `authenticode_signer` reported for the installed image
+    /// (in the jev-pilot-os crate): the subject is compared as text, in the
+    /// form that function writes. A signer names a publisher, not one
+    /// program, so [`decide`] checks the installed path before it.
     Signer(String),
 }
 
@@ -283,7 +511,7 @@ impl Sha256Digest {
 
 impl fmt::Display for Sha256Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
+        Hex(&self.0).fmt(f)
     }
 }
 
@@ -309,17 +537,7 @@ impl FromStr for Sha256Digest {
     type Err = DigestError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.as_bytes();
-        if s.len() != 64 {
-            return Err(DigestError);
-        }
-        let mut bytes = [0u8; 32];
-        let (pairs, _) = s.as_chunks::<2>();
-        for (byte, pair) in bytes.iter_mut().zip(pairs) {
-            let pair = std::str::from_utf8(pair).map_err(|_| DigestError)?;
-            *byte = u8::from_str_radix(pair, 16).map_err(|_| DigestError)?;
-        }
-        Ok(Self(bytes))
+        parse_hex(s).map(Self).ok_or(DigestError)
     }
 }
 
@@ -442,8 +660,10 @@ impl fmt::Display for Verdict {
 ///
 /// The checks run in a fixed order, and the first that fails is the one
 /// named: the process, then the user, then the session (Windows), then the
-/// executable, then the code. A fact a check needs and the OS did not give is
-/// a refusal.
+/// executable, then the code. The executable's path comes before the code
+/// because a Developer ID or Authenticode signer vouches for a publisher,
+/// not for the installed copy. A fact a check needs and the OS did not give
+/// is a refusal.
 #[must_use]
 pub fn decide(facts: &Facts, expected: &Expected) -> Verdict {
     match run_checks(facts, expected) {
@@ -452,8 +672,8 @@ pub fn decide(facts: &Facts, expected: &Expected) -> Verdict {
     }
 }
 
-/// Decides again on facts read after the first frame, and requires that they
-/// describe the same process as the facts read before it.
+/// Decides on the facts read before the first frame and again on those read
+/// after it, and requires that both describe the same process.
 ///
 /// On macOS the kernel names the peer by whichever process last used its
 /// socket, at the moment it is asked. A program could connect and write, then
@@ -464,6 +684,7 @@ pub fn decide(facts: &Facts, expected: &Expected) -> Verdict {
 #[must_use]
 pub fn recheck(first: &Facts, again: &Facts, expected: &Expected) -> Verdict {
     let same = || -> Result<(), Refusal> {
+        run_checks(first, expected)?;
         run_checks(again, expected)?;
         if let Expected::Macos { .. } = expected {
             same_fact(first.token, again.token, Check::Token)?;
@@ -479,18 +700,14 @@ pub fn recheck(first: &Facts, again: &Facts, expected: &Expected) -> Verdict {
 fn run_checks(facts: &Facts, expected: &Expected) -> Result<(), Refusal> {
     present(facts.pid.as_ref(), Check::Pid)?;
     match expected {
-        Expected::Macos {
-            uid,
-            path,
-            requirement,
-        } => {
+        Expected::Macos { uid, path, pin } => {
             equal(facts.uid.as_ref(), uid, Check::Uid)?;
             equal(facts.path.as_ref(), path, Check::Path)?;
             match present(facts.code.as_ref(), Check::Requirement)? {
                 Code::Requirement {
-                    requirement: checked,
+                    pin: checked,
                     satisfied: true,
-                } if checked == requirement => Ok(()),
+                } if checked == pin => Ok(()),
                 Code::Requirement { .. } => Err(mismatch(Check::Requirement)),
                 _ => Err(missing(Check::Requirement)),
             }

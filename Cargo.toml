@@ -35,7 +35,7 @@ interprocess = { version = "2.4.8", optional = true }
 sha2 = { version = "0.11.1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", optional = true, default-features = false, features = ["socket", "poll"] }
+nix = { version = "0.31.3", optional = true, default-features = false, features = ["socket", "poll", "user"] }
 rustix = { version = "1.1.6", optional = true, default-features = false, features = ["std", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -87,11 +87,11 @@ extension = [
 name = "jev-pilot"
 path = "src/main.rs"
 
-# Released as prebuilt binaries even though it is never published to
-# crates.io; without this, `publish = false` hides it from `dist`.
 [workspace]
 members = [".", "jev-pilot-os"]
 
+# Released as prebuilt binaries even though it is never published to
+# crates.io; without this, `publish = false` hides it from `dist`.
 [package.metadata.dist]
 dist = true
 

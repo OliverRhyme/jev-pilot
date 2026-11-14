@@ -13,5 +13,6 @@ mod windows;
 
 #[cfg(windows)]
 pub use windows::{
-    Process, Signer, authenticode_signer, current_session, current_user_sid, process_image,
+    Process, Signer, authenticode_signer, current_session, current_user_sid, final_path,
+    process_image,
 };
