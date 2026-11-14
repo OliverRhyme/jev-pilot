@@ -487,21 +487,36 @@ impl Diagnostics {
     /// Note `what`, stamped with the time. Best effort: a note that cannot
     /// be written is dropped.
     pub fn note(&self, what: &str) {
-        let full = std::fs::metadata(&self.file).is_ok_and(|m| m.len() >= self.limit);
+        let _ = self.try_note(what);
+    }
+
+    /// Opened without following a link and never truncated on opening;
+    /// written only when it is a regular file of this user's with one name,
+    /// and emptied through the open file when full. The host's group stays
+    /// out of it: it is the owner's file.
+    fn try_note(&self, what: &str) -> io::Result<()> {
         let mut options = OpenOptions::new();
-        options.create(true);
-        if full {
-            options.write(true).truncate(true);
-        } else {
-            options.append(true);
-        }
+        options.create(true).append(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
+            options.custom_flags(nix::libc::O_NOFOLLOW).mode(0o600);
         }
-        if let Ok(mut file) = options.open(&self.file) {
-            let _ = writeln!(file, "{} {what}", utc(SystemTime::now()));
+        let mut file = options.open(&self.file)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(io::Error::other("not a regular file"));
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if meta.uid() != nix::unistd::getuid().as_raw() || meta.nlink() != 1 {
+                return Err(io::Error::other("not this user's own file"));
+            }
+        }
+        if meta.len() >= self.limit {
+            file.set_len(0)?;
+        }
+        writeln!(file, "{} {what}", utc(SystemTime::now()))
     }
 }

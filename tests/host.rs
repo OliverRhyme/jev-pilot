@@ -1472,3 +1472,28 @@ fn watchdog() {
         });
     });
 }
+
+/// The diagnostics file is written only when it is the owner's own regular
+/// file with one name: a link or a second name planted in its place leaves
+/// what it points at untouched.
+#[cfg(unix)]
+#[test]
+fn the_diagnostics_file_is_never_reached_through_a_link() {
+    use jev_pilot::browser::host::Diagnostics;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-diaglink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let precious = dir.join("precious");
+    std::fs::write(&precious, "x".repeat(500)).unwrap();
+
+    let link = dir.join("host.log");
+    std::os::unix::fs::symlink(&precious, &link).unwrap();
+    Diagnostics::new(link.clone(), 100).note("through a link");
+    assert_eq!(std::fs::read_to_string(&precious).unwrap(), "x".repeat(500));
+
+    std::fs::remove_file(&link).unwrap();
+    std::fs::hard_link(&precious, &link).unwrap();
+    Diagnostics::new(link, 100).note("through a second name");
+    assert_eq!(std::fs::read_to_string(&precious).unwrap(), "x".repeat(500));
+    let _ = std::fs::remove_dir_all(&dir);
+}
