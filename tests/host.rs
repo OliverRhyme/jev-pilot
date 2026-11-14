@@ -852,6 +852,44 @@ mod run_side {
         );
     }
 
+    /// Facts that pass, but name another process the second time they are
+    /// gathered: on macOS, whoever used the socket last.
+    pub(crate) struct Changing(pub(crate) std::sync::atomic::AtomicU32);
+
+    impl PeerCheck for Changing {
+        fn facts(&self, stream: &Stream, expected: &Expected) -> Facts {
+            let seen = self.0.fetch_add(1, Ordering::SeqCst);
+            let mut facts = Vouched.facts(stream, expected);
+            facts.token = Some([seen; 8]);
+            facts
+        }
+    }
+
+    /// The run checks the host again after reading its nonce: a host that
+    /// handed the socket to another process by then is sent nothing.
+    #[test]
+    fn a_run_checks_the_host_again_before_answering_its_nonce() {
+        let place = place();
+        let listener = listen(&place);
+        let host = std::thread::spawn(move || {
+            let mut run = listener.accept().expect("accepts");
+            run.write_all(&frame(&json!({"type": "nonce", "nonce": "cd".repeat(32)})))
+                .expect("writes");
+            let mut heard = Vec::new();
+            let _ = run.read_to_end(&mut heard);
+            heard
+        });
+        let check = Changing(AtomicU32::new(0));
+        let error = connect_run(&place, &expected(), &check, "x", &[], &Parent::default())
+            .expect_err("refused");
+        assert_eq!(
+            error.to_string(),
+            "something other than the installed jev-pilot answered on the bridge (audit token: \
+             not the expected value); nothing was sent"
+        );
+        assert_eq!(host.join().expect("the host thread"), Vec::<u8>::new());
+    }
+
     /// No host listening is the extension not running.
     #[test]
     fn no_host_is_chrome_not_running_with_the_extension() {
