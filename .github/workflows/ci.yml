@@ -12,6 +12,7 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,6 +35,7 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -44,6 +46,8 @@ jobs:
 
   # Released for all three, so tested on all three: a file name, a path or a
   # process detail that differs by platform shows up here and not in a release.
+  # The suite takes a few minutes; a test that hangs fails the job at 20
+  # rather than holding it for GitHub's six hours.
   test:
     name: test (${{ matrix.os }})
     strategy:
@@ -51,6 +55,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
