@@ -1999,7 +1999,7 @@ fn the_quiet_watch_is_a_fixed_script_given_its_numbers() {
     assert_eq!(watch["arguments"], json!([{"value": 100}, {"value": 3000}]));
     assert_eq!(watch["executionContextId"], 41);
     assert_eq!(watch["awaitPromise"], true);
-    assert!(script.params_of("Runtime.evaluate").is_empty());
+    assert_eq!(script.params_of("Runtime.evaluate"), Vec::<Value>::new());
 }
 
 /// A read samples how long the page has been quiet with a fixed script too.
@@ -2015,7 +2015,7 @@ fn a_read_samples_the_quiet_with_a_fixed_script() {
             .any(|c| c["functionDeclaration"] == input::QUIET_NOW && c["arguments"] == json!([])),
         "{calls:?}"
     );
-    assert!(script.params_of("Runtime.evaluate").is_empty());
+    assert_eq!(script.params_of("Runtime.evaluate"), Vec::<Value>::new());
 }
 
 /// One list holds every script the engine can send a page, for the
@@ -2097,27 +2097,24 @@ mod through_the_extension {
             ));
         }
 
-        fn heard(&mut self, frame: Value) {
-            match frame["type"].as_str() {
-                Some("echo") => {
-                    self.log
-                        .borrow_mut()
-                        .push(json!({"from": "run", "to": "host", "frame": frame}));
-                    self.log.borrow_mut().push(json!({"from": "host", "to": "extension", "frame": {
-                        "type": "run_started", "pid": 4242, "goal": frame["goal"], "sites": frame["sites"],
-                    }}));
-                    let mut ready = self.hello.clone();
-                    ready["type"] = "ready".into();
-                    ready["host_version"] = "0.2.0".into();
-                    self.tell_run(&ready, "host");
-                }
-                _ => {
-                    self.log
-                        .borrow_mut()
-                        .push(json!({"from": "run", "to": "extension", "frame": frame}));
-                    for answer in (self.answer)(&frame) {
-                        self.tell_run(&answer, "extension");
-                    }
+        fn heard(&mut self, frame: &Value) {
+            if frame["type"] == "echo" {
+                self.log
+                    .borrow_mut()
+                    .push(json!({"from": "run", "to": "host", "frame": frame}));
+                self.log.borrow_mut().push(json!({"from": "host", "to": "extension", "frame": {
+                    "type": "run_started", "pid": 4242, "goal": frame["goal"], "sites": frame["sites"],
+                }}));
+                let mut ready = self.hello.clone();
+                ready["type"] = "ready".into();
+                ready["host_version"] = "0.2.0".into();
+                self.tell_run(&ready, "host");
+            } else {
+                self.log
+                    .borrow_mut()
+                    .push(json!({"from": "run", "to": "extension", "frame": frame}));
+                for answer in (self.answer)(frame) {
+                    self.tell_run(&answer, "extension");
                 }
             }
         }
@@ -2146,7 +2143,7 @@ mod through_the_extension {
                 };
                 let used = self.from_run.len() - reader.len();
                 self.from_run.drain(..used);
-                self.heard(serde_json::from_slice(&frame).expect("the run writes JSON"));
+                self.heard(&serde_json::from_slice(&frame).expect("the run writes JSON"));
             }
             Ok(buf.len())
         }

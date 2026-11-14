@@ -340,9 +340,14 @@ fn the_checks_own_hash_and_decoder_give_known_answers() {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }
 
+#[allow(clippy::cast_possible_truncation)] // each value is masked to its byte
 fn base64_decode(text: &str) -> Vec<u8> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut bits = 0u32;
@@ -361,6 +366,12 @@ fn base64_decode(text: &str) -> Vec<u8> {
     out
 }
 
+// The algorithm's own constants and names, as FIPS 180-4 writes them.
+#[allow(
+    clippy::unreadable_literal,
+    clippy::many_single_char_names,
+    clippy::cast_possible_truncation
+)]
 fn sha256(message: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -641,7 +652,7 @@ fn a_channel_that_does_not_open_with_a_nonce_is_not_the_host() {
         "something other than the installed jev-pilot answered on the bridge (it did not open \
          with a nonce); nothing was sent"
     );
-    assert!(written_by(&sent).is_empty());
+    assert_eq!(written_by(&sent), Vec::<serde_json::Value>::new());
 }
 
 // --- the translator: what the engine sends, and what comes back ---
@@ -729,7 +740,7 @@ fn discovery_is_acknowledged_without_asking() {
     wire.send(r#"{"id":4,"method":"Target.setDiscoverTargets","params":{"discover":true}}"#)
         .expect("sends");
     assert_eq!(received(&mut wire), json!({"id": 4, "result": {}}));
-    assert!(written_by(&sent).is_empty());
+    assert_eq!(written_by(&sent), Vec::<serde_json::Value>::new());
 }
 
 /// A new tab is opened by the extension, in its own profile, and named by
@@ -773,7 +784,7 @@ fn an_attached_tab_is_driven_under_a_made_up_session() {
         .as_str()
         .expect("a session id")
         .to_owned();
-    assert!(!session.is_empty());
+    assert_ne!(session, "");
 
     wire.send(&format!(
         r#"{{"id":3,"method":"Page.getFrameTree","params":{{}},"sessionId":"{session}"}}"#
@@ -856,7 +867,7 @@ fn closing_the_browser_and_other_browser_wide_calls_are_refused_locally() {
             format!("{method} is not available through the jev-pilot extension")
         );
     }
-    assert!(written_by(&sent).is_empty());
+    assert_eq!(written_by(&sent), Vec::<serde_json::Value>::new());
 }
 
 /// A target the extension never listed has no tab to reach, and the call
@@ -870,7 +881,7 @@ fn an_unknown_target_is_refused_locally() {
     .expect("sends");
     let refused = received(&mut wire);
     assert_eq!(refused["error"]["message"], "No target with given id found");
-    assert!(written_by(&sent).is_empty());
+    assert_eq!(written_by(&sent), Vec::<serde_json::Value>::new());
 }
 
 /// Attach to tab 7 (T7) as the first two requests, and give back the

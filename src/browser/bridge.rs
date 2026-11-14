@@ -412,9 +412,12 @@ impl Nonce {
     /// The frame the host opens the channel with.
     #[must_use]
     pub fn message(&self) -> Message {
-        Message::Nonce {
-            nonce: self.0.iter().map(|b| format!("{b:02x}")).collect(),
+        use core::fmt::Write as _;
+        let mut nonce = String::with_capacity(64);
+        for byte in self.0 {
+            let _ = write!(nonce, "{byte:02x}");
         }
+        Message::Nonce { nonce }
     }
 
     /// A run's answer to the host's first frame, when it is a nonce: the

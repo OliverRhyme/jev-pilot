@@ -1,7 +1,7 @@
 //! Driving tabs through Chrome's jev-pilot extension instead of Chrome's own
 //! websocket.
 //!
-//! [`ExtensionWire`] is a [`Wire`](crate::browser::transport::Wire) over the
+//! [`ExtensionWire`] is a [`Wire`] over the
 //! local channel to the jev-pilot host, so the engine keeps believing it holds
 //! one browser-level DevTools connection with flattened sessions. An
 //! extension's debugger reaches one tab per attachment and may not use the
@@ -312,7 +312,7 @@ impl Translator {
                 };
                 let key = Value::from(id);
                 match outcome {
-                    Outcome::Result(result) => vec![self.answer(&key, &pending, result)],
+                    Outcome::Result(result) => vec![self.answer(&key, &pending, &result)],
                     Outcome::Error(error) => {
                         let session = match &pending {
                             Pending::Send(session) => Some(session.as_str()),
@@ -366,7 +366,7 @@ impl Translator {
     }
 
     /// The DevTools reply to a request the extension carried out.
-    fn answer(&mut self, id: &Value, pending: &Pending, result: Value) -> String {
+    fn answer(&mut self, id: &Value, pending: &Pending, result: &Value) -> String {
         match pending {
             Pending::Tabs => {
                 let tabs: Vec<TabInfo> = result
