@@ -1,0 +1,261 @@
+{
+ "id": 11,
+ "result": {
+  "nodes": [
+   {
+    "nodeId": "5",
+    "ignored": true,
+    "ignoredReasons": [
+     {
+      "name": "uninteresting",
+      "value": {
+       "type": "boolean",
+       "value": true
+      }
+     }
+    ],
+    "role": {
+     "type": "role",
+     "value": "none"
+    },
+    "chromeRole": {
+     "type": "internalRole",
+     "value": 0
+    },
+    "parentId": "10",
+    "childIds": [
+     "12"
+    ],
+    "backendDOMNodeId": 5
+   },
+   {
+    "nodeId": "10",
+    "ignored": false,
+    "role": {
+     "type": "role",
+     "value": "button"
+    },
+    "chromeRole": {
+     "type": "internalRole",
+     "value": 9
+    },
+    "name": {
+     "type": "computedString",
+     "value": "Unstar this repository",
+     "sources": [
+      {
+       "type": "relatedElement",
+       "attribute": "aria-labelledby"
+      },
+      {
+       "type": "attribute",
+       "value": {
+        "type": "computedString",
+        "value": "Unstar this repository"
+       },
+       "attribute": "aria-label",
+       "attributeValue": {
+        "type": "string",
+        "value": "Unstar this repository"
+       }
+      },
+      {
+       "type": "relatedElement",
+       "superseded": true,
+       "nativeSource": "label"
+      },
+      {
+       "type": "contents",
+       "value": {
+        "type": "computedString",
+        "value": "Starred 2"
+       },
+       "superseded": true
+      },
+      {
+       "type": "attribute",
+       "attribute": "title",
+       "superseded": true
+      }
+     ]
+    },
+    "properties": [
+     {
+      "name": "invalid",
+      "value": {
+       "type": "token",
+       "value": "false"
+      }
+     },
+     {
+      "name": "focusable",
+      "value": {
+       "type": "booleanOrUndefined",
+       "value": true
+      }
+     }
+    ],
+    "parentId": "9",
+    "childIds": [
+     "5",
+     "12",
+     "13",
+     "14"
+    ],
+    "backendDOMNodeId": 10
+   },
+   {
+    "nodeId": "9",
+    "ignored": false,
+    "role": {
+     "type": "role",
+     "value": "generic"
+    },
+    "chromeRole": {
+     "type": "internalRole",
+     "value": 88
+    },
+    "name": {
+     "type": "computedString",
+     "value": "",
+     "sources": [
+      {
+       "type": "relatedElement",
+       "attribute": "aria-labelledby"
+      },
+      {
+       "type": "attribute",
+       "attribute": "aria-label"
+      }
+     ]
+    },
+    "properties": [],
+    "parentId": "8",
+    "childIds": [
+     "10"
+    ],
+    "backendDOMNodeId": 9
+   },
+   {
+    "nodeId": "8",
+    "ignored": true,
+    "ignoredReasons": [
+     {
+      "name": "uninteresting",
+      "value": {
+       "type": "boolean",
+       "value": true
+      }
+     }
+    ],
+    "role": {
+     "type": "role",
+     "value": "none"
+    },
+    "chromeRole": {
+     "type": "internalRole",
+     "value": 0
+    },
+    "parentId": "4",
+    "childIds": [
+     "9"
+    ],
+    "backendDOMNodeId": 8
+   },
+   {
+    "nodeId": "4",
+    "ignored": true,
+    "ignoredReasons": [
+     {
+      "name": "uninteresting",
+      "value": {
+       "type": "boolean",
+       "value": true
+      }
+     }
+    ],
+    "role": {
+     "type": "role",
+     "value": "none"
+    },
+    "chromeRole": {
+     "type": "internalRole",
+     "value": 0
+    },
+    "parentId": "2",
+    "childIds": [
+     "8"
+    ],
+    "backendDOMNodeId": 4
+   },
+   {
+    "nodeId": "2",
+    "ignored": false,
+    "role": {
+     "type": "internalRole",
+     "value": "RootWebArea"
+    },
+    "chromeRole": {
+     "type": "internalRole",
+     "value": 144
+    },
+    "name": {
+     "type": "computedString",
+     "value": "Repo",
+     "sources": [
+      {
+       "type": "relatedElement",
+       "attribute": "aria-labelledby"
+      },
+      {
+       "type": "attribute",
+       "attribute": "aria-label"
+      },
+      {
+       "type": "attribute",
+       "attribute": "aria-label",
+       "superseded": true
+      },
+      {
+       "type": "relatedElement",
+       "value": {
+        "type": "computedString",
+        "value": "Repo"
+       },
+       "nativeSource": "title"
+      }
+     ]
+    },
+    "properties": [
+     {
+      "name": "focusable",
+      "value": {
+       "type": "booleanOrUndefined",
+       "value": true
+      }
+     },
+     {
+      "name": "focused",
+      "value": {
+       "type": "booleanOrUndefined",
+       "value": true
+      }
+     },
+     {
+      "name": "url",
+      "value": {
+       "type": "string",
+       "value": "http://127.0.0.1:64285/repo"
+      }
+     }
+    ],
+    "childIds": [
+     "4"
+    ],
+    "backendDOMNodeId": 2,
+    "frameId": "C7B29BFD6E608C42F80D58F9D393F67B"
+   }
+  ]
+ },
+ "sessionId": "E33095F94A465535FB56161BD465D358"
+}
