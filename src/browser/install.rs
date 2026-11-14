@@ -1198,19 +1198,30 @@ pub fn cdhash_in(report: &str) -> Option<crate::peer::MacosPin> {
         .and_then(|hex| crate::peer::MacosPin::from_cdhash_hex(hex.trim()).ok())
 }
 
-/// Whether an elevated install runs as the account signed in, so that what
-/// it pins and the hosts it finds are that account's, not another
+/// A Windows account: its SID, and its name for saying so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    /// Its SID's string form.
+    pub sid: String,
+    /// `DOMAIN\name`.
+    pub name: String,
+}
+
+/// Whether an elevated install runs as the account signed in, by SID, so
+/// that what it pins and the hosts it finds are that account's, not another
 /// administrator's who elevated it over the owner's shoulder.
 ///
 /// # Errors
 /// What to say when it does not.
-pub fn elevated_as_signed_in(elevated: &str, signed_in: &str) -> Result<(), String> {
-    if elevated.eq_ignore_ascii_case(signed_in) {
+pub fn elevated_as_signed_in(elevated: &Account, signed_in: &Account) -> Result<(), String> {
+    if elevated.sid.eq_ignore_ascii_case(&signed_in.sid) {
         Ok(())
     } else {
         Err(format!(
-            "this runs elevated as {elevated}, not as {signed_in} who is signed in: sign in as an \
-             administrator yourself and run the install from there, so the bridge is pinned to you"
+            "this runs elevated as {} ({}), not as {} ({}) who is signed in: sign in as an \
+             administrator yourself and run the install from there, so the bridge is pinned to \
+             you",
+            elevated.name, elevated.sid, signed_in.name, signed_in.sid
         ))
     }
 }
@@ -1222,9 +1233,26 @@ pub fn elevated_as_signed_in(elevated: &str, signed_in: &str) -> Result<(), Stri
 /// What to say when it does not, or why it cannot be told.
 #[cfg(windows)]
 pub fn check_elevated_account() -> Result<(), String> {
-    let elevated = jev_pilot_os::current_account().map_err(|e| e.to_string())?;
-    let signed_in = jev_pilot_os::session_account().map_err(|e| e.to_string())?;
+    let text = |e: io::Error| e.to_string();
+    let elevated = Account {
+        sid: jev_pilot_os::current_user_sid().map_err(text)?,
+        name: jev_pilot_os::current_account().map_err(text)?,
+    };
+    let signed_in = Account {
+        sid: jev_pilot_os::session_user_sid().map_err(text)?,
+        name: jev_pilot_os::session_account().map_err(text)?,
+    };
     elevated_as_signed_in(&elevated, &signed_in)
+}
+
+/// Whether the machine already registers a host of this name under `key`
+/// (Windows). Only a key Windows says is not found is absent.
+///
+/// # Errors
+/// When it cannot be told.
+#[cfg(windows)]
+pub fn machine_has_host(key: &str, name: &str) -> io::Result<bool> {
+    jev_pilot_os::machine_key_exists(&format!(r"{key}\{name}"))
 }
 
 /// The `jev-pilot` group's name.

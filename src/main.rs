@@ -1485,12 +1485,14 @@ mod bridge {
                 }
             }
             // One the machine already has under that name is a vendor's.
+            // Anything but "not found" counts as there, so nothing of a
+            // vendor's is written over.
+            #[cfg(windows)]
             let at_machine_level = |host: &install::RegistryHost| {
-                std::process::Command::new(&reg)
-                    .args(["query", &format!(r"HKLM\{}\{}", host.key, host.name)])
-                    .output()
-                    .is_ok_and(|o| o.status.success())
+                !matches!(install::machine_has_host(&host.key, &host.name), Ok(false))
             };
+            #[cfg(not(windows))]
+            let at_machine_level = |_: &install::RegistryHost| true;
             return Ok(UserHosts::Registry(install::registry_hosts_to_copy(
                 found,
                 &at_machine_level,

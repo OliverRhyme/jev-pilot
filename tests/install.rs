@@ -1570,11 +1570,20 @@ fn the_policy_is_read_for_its_value_not_its_presence() {
 /// hosts: it is refused.
 #[test]
 fn an_install_elevated_as_another_account_is_refused() {
-    use jev_pilot::browser::install::elevated_as_signed_in;
-    assert_eq!(elevated_as_signed_in(r"PC\owner", r"pc\OWNER"), Ok(()));
+    use jev_pilot::browser::install::{Account, elevated_as_signed_in};
+    let account = |sid: &str, name: &str| Account {
+        sid: sid.into(),
+        name: name.into(),
+    };
+    let owner = account("S-1-5-21-1-2-3-1001", r"PC\owner");
+    // By SID: a name says nothing a renamed or look-alike account cannot.
     assert_eq!(
-        elevated_as_signed_in(r"PC\admin", r"PC\owner"),
-        Err(r"this runs elevated as PC\admin, not as PC\owner who is signed in: sign in as an administrator yourself and run the install from there, so the bridge is pinned to you".to_owned())
+        elevated_as_signed_in(&owner, &account("S-1-5-21-1-2-3-1001", r"PC\renamed")),
+        Ok(())
+    );
+    assert_eq!(
+        elevated_as_signed_in(&account("S-1-5-21-1-2-3-500", r"PC\owner"), &owner),
+        Err(r"this runs elevated as PC\owner (S-1-5-21-1-2-3-500), not as PC\owner (S-1-5-21-1-2-3-1001) who is signed in: sign in as an administrator yourself and run the install from there, so the bridge is pinned to you".to_owned())
     );
 }
 
