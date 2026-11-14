@@ -1033,43 +1033,107 @@ mod browser_parent {
         );
     }
 
-    fn root(ino: u64) -> FileFacts {
+    /// A root folder or file that only root can change.
+    fn root(is_file: bool) -> FileFacts {
         FileFacts {
             uid: 0,
             mode: 0o755,
             is_link: false,
-            dev: 1,
-            ino,
+            is_file,
         }
     }
 
     /// A tree with Chrome's install, and Chromium's, which is not served.
     fn tree(path: &Path) -> Option<FileFacts> {
         match path.to_str()? {
-            "/" => Some(root(2)),
-            "/opt" => Some(root(3)),
-            "/opt/google" => Some(root(4)),
-            "/opt/google/chrome" => Some(root(5)),
-            "/opt/google/chrome/chrome" => Some(root(42)),
-            "/usr/lib/chromium/chromium" => Some(root(43)),
+            "/" | "/opt" | "/opt/google" | "/opt/google/chrome" | "/usr" | "/usr/lib"
+            | "/usr/lib/chromium" => Some(root(false)),
+            "/opt/google/chrome/chrome" | "/usr/lib/chromium/chromium" => Some(root(true)),
             _ => None,
         }
     }
 
-    /// On Linux the browser is Google Chrome: the file the parent runs is,
-    /// by device and inode, one of Chrome's installs, a root file no one
-    /// else can write under folders only root can change. Chromium, Edge
-    /// and Brave load any unpacked extension they are told to, so a fake
-    /// with jev-pilot's ID is easy there.
+    /// The parent's executable, opened through `/proc/<pid>/exe`: a file
+    /// only root can change.
+    fn opened() -> FileFacts {
+        root(true)
+    }
+
+    /// On Linux the browser is Google Chrome: the parent runs, by the
+    /// kernel's name for it, one of Chrome's installs, the file it runs is
+    /// root's and no one else can write it, and the folders above the
+    /// install are root's alone. Chromium, Edge and Brave load any unpacked
+    /// extension they are told to, so a fake with jev-pilot's ID is easy
+    /// there.
     #[test]
-    fn the_linux_browser_is_google_chrome_by_its_file() {
+    fn the_linux_browser_is_google_chrome_by_its_install() {
+        let chrome = Path::new("/opt/google/chrome/chrome");
         assert_eq!(
-            linux_browser((1, 42), &tree),
-            Ok(std::path::PathBuf::from("/opt/google/chrome/chrome"))
+            linux_browser(chrome, opened(), &tree),
+            Ok(chrome.to_path_buf())
         );
-        assert!(linux_browser((1, 43), &tree).is_err(), "Chromium");
-        assert!(linux_browser((1, 99), &tree).is_err(), "anything else");
-        assert!(linux_browser((2, 42), &tree).is_err(), "another device");
+        let chromium = Path::new("/usr/lib/chromium/chromium");
+        assert!(
+            linux_browser(chromium, opened(), &tree).is_err(),
+            "Chromium"
+        );
+        let elsewhere = Path::new("/home/owner/opt/google/chrome/chrome");
+        assert!(linux_browser(elsewhere, opened(), &tree).is_err(), "a copy");
+        let longer = Path::new("/opt/google/chrome/chrome-sandbox");
+        assert!(
+            linux_browser(longer, opened(), &tree).is_err(),
+            "a neighbour"
+        );
+    }
+
+    /// A package upgrade replaces Chrome's file while Chrome runs, and the
+    /// kernel then names the file it runs with " (deleted)" after the path.
+    /// That Chrome is still served.
+    #[test]
+    fn a_chrome_running_a_file_an_upgrade_replaced_is_still_chrome() {
+        let deleted = Path::new("/opt/google/chrome/chrome (deleted)");
+        assert_eq!(
+            linux_browser(deleted, opened(), &tree),
+            Ok(Path::new("/opt/google/chrome/chrome").to_path_buf())
+        );
+        let twice = Path::new("/opt/google/chrome/chrome (deleted) (deleted)");
+        assert!(linux_browser(twice, opened(), &tree).is_err());
+    }
+
+    /// The file the parent runs must be a regular file of root's that no
+    /// one else can write, whatever its name says.
+    #[test]
+    fn the_file_the_parent_runs_is_roots_alone() {
+        let chrome = Path::new("/opt/google/chrome/chrome");
+        let owned = FileFacts {
+            uid: 1000,
+            ..opened()
+        };
+        assert!(linux_browser(chrome, owned, &tree).is_err(), "the owner's");
+        let writable = FileFacts {
+            mode: 0o775,
+            ..opened()
+        };
+        assert!(linux_browser(chrome, writable, &tree).is_err(), "group");
+        let open = FileFacts {
+            mode: 0o757,
+            ..opened()
+        };
+        assert!(linux_browser(chrome, open, &tree).is_err(), "others");
+        let not_a_file = FileFacts {
+            is_file: false,
+            ..opened()
+        };
+        assert!(
+            linux_browser(chrome, not_a_file, &tree).is_err(),
+            "a folder"
+        );
+    }
+
+    /// The install's folders must be root's alone, and not links.
+    #[test]
+    fn the_folders_above_chrome_are_roots_alone() {
+        let chrome = Path::new("/opt/google/chrome/chrome");
         let owned = |path: &Path| {
             let mut facts = tree(path)?;
             if path == Path::new("/opt/google/chrome") {
@@ -1077,15 +1141,15 @@ mod browser_parent {
             }
             Some(facts)
         };
-        assert!(linux_browser((1, 42), &owned).is_err());
+        assert!(linux_browser(chrome, opened(), &owned).is_err());
         let writable = |path: &Path| {
             let mut facts = tree(path)?;
-            if path == Path::new("/opt/google/chrome/chrome") {
+            if path == Path::new("/opt") {
                 facts.mode = 0o777;
             }
             Some(facts)
         };
-        assert!(linux_browser((1, 42), &writable).is_err());
+        assert!(linux_browser(chrome, opened(), &writable).is_err());
         let linked = |path: &Path| {
             let mut facts = tree(path)?;
             if path == Path::new("/opt/google") {
@@ -1093,7 +1157,14 @@ mod browser_parent {
             }
             Some(facts)
         };
-        assert!(linux_browser((1, 42), &linked).is_err());
+        assert!(linux_browser(chrome, opened(), &linked).is_err());
+        let gone = |path: &Path| {
+            if path == Path::new("/opt/google/chrome") {
+                return None;
+            }
+            tree(path)
+        };
+        assert!(linux_browser(chrome, opened(), &gone).is_err());
     }
 
     /// macOS names each process's pid version, and the version its parent
@@ -1107,6 +1178,19 @@ mod browser_parent {
             jev_pilot_os::pid_versions(std::os::unix::process::parent_id()).expect("its parent");
         assert_eq!(parent.version, mine.parent_at_start);
         assert_ne!(mine.version, mine.parent_at_start);
+    }
+
+    /// The pid version read from the kernel's private process record is the
+    /// one the documented audit token carries, so that record is still laid
+    /// out as the host reads it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_private_pid_version_is_the_audit_tokens() {
+        let mine = jev_pilot_os::pid_versions(std::process::id()).expect("this process");
+        assert_eq!(
+            mine.version,
+            jev_pilot_os::own_pid_version().expect("this process's audit token")
+        );
     }
 
     /// The test harness was started by cargo, not a browser: its parent is
