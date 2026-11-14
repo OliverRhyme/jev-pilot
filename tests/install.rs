@@ -1000,3 +1000,24 @@ fn a_development_install_with_no_browser_says_so() {
         ))
     );
 }
+
+/// Installing again does the same, in place: the same steps, a policy that
+/// keeps the owner's sites, a profile with the same UUIDs.
+#[test]
+fn installing_again_plans_the_same_install() {
+    for os in [Os::MacOs, Os::Linux, Os::Windows] {
+        let layout = Layout::protected(os, &env(WINDOWS));
+        let hosts = UserHosts::Files(vec![]);
+        assert_eq!(
+            plan(os, InstallKind::Protected, &layout, Path::new(EXE), &hosts),
+            plan(os, InstallKind::Protected, &layout, Path::new(EXE), &hosts),
+            "{os:?}"
+        );
+    }
+    let once = policy_for_install(None, InstallKind::Protected);
+    let edited = with_site(&once, "https://github.com", true);
+    assert_eq!(
+        policy_for_install(Some(edited.clone()), InstallKind::Protected),
+        edited
+    );
+}
