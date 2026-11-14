@@ -3,6 +3,31 @@
 
 use std::io::{self, Read};
 
+/// The name Chrome looks the host up by, in its native messaging manifest.
+pub const HOST_NAME: &str = "dev.jevpilot.bridge";
+
+/// The version of this protocol. Both ends say which they speak.
+pub const PROTOCOL: u32 = 1;
+
+/// The extension's ID, which the host manifest allows and nothing else.
+///
+/// Chrome derives an unpacked extension's ID from the public key in its
+/// manifest, so the key below pins it wherever the folder is loaded from.
+pub const EXTENSION_ID: &str = "eckgjcpdiehapkphgcflmcikippoegcp";
+
+/// The public key in the extension's manifest (`key`), as base64 DER. Only
+/// the public half exists: Chrome needs nothing more to derive the ID from
+/// an unpacked folder, and the private half was never kept.
+pub const EXTENSION_KEY: &str = concat!(
+    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwvv4+qZfjTcyMjkiAwty",
+    "71pf796lx5WteLL8kNlgOYq7lK5tJB59p5Eoy/p106DUVCD9/jTjiCUi6cHCFQnl",
+    "9tPQyK2yrvDz21+H9lNbvs/kWTK5SrePfra3MrktmFOEQ8/QpqaG7oz1KtPIwwHc",
+    "Q6slt3TUJcm9zPydWP5yPrQNM0o8GeeZUlLIPAFbEr1LACn9pYrYag2WgVhGIOxh",
+    "iYnWqGNBc75I4eb0VZM3Kj2XK6PX37GahjONhj8TGVMgPOJUj+EedeOan/acTfZS",
+    "3qsnGcVrQwSuggd+cLfbTyid8JwoWYeyln4pmj+J/cXRfehEI0fRyPVHzH+Dw59J",
+    "EQIDAQAB",
+);
+
 /// The largest message that may go to Chrome. Chrome closes the channel on a
 /// larger one.
 pub const TO_CHROME_LIMIT: usize = 1 << 20;
@@ -130,3 +155,278 @@ impl core::fmt::Display for FrameError {
 }
 
 impl core::error::Error for FrameError {}
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// A Chrome tab, by the extension's own id for it.
+pub type TabId = i64;
+
+/// One message on the bridge, told apart by its `type`.
+///
+/// The run and the extension speak through the host, which reads only the
+/// messages meant for it and passes the rest on unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Message {
+    /// Host to run, before anything else: a fresh nonce to echo.
+    Nonce {
+        /// 32 random bytes, as 64 hex digits.
+        nonce: String,
+    },
+    /// Run to host, its first frame: the nonce it was given.
+    Echo {
+        /// The nonce, as received.
+        nonce: String,
+    },
+    /// Extension to host, on connecting.
+    Hello(Hello),
+    /// Extension to host, when what it said in its hello changes.
+    Status(Hello),
+    /// Host to run: the bridge is the run's.
+    Ready {
+        /// What the extension said, as of now.
+        #[serde(flatten)]
+        hello: Hello,
+        /// The host's own version.
+        host_version: String,
+    },
+    /// Host to run: another run holds the bridge.
+    Busy {
+        /// That run's process id.
+        pid: u32,
+        /// The start of its goal.
+        goal: String,
+    },
+    /// Host to run: no extension is connected.
+    Absent,
+    /// Host to run: the run failed the host's check of who it is.
+    Refused {
+        /// Which check failed.
+        check: String,
+    },
+    /// Run to extension: one operation.
+    Request {
+        /// Echoed in the reply.
+        id: u64,
+        /// What to do.
+        #[serde(flatten)]
+        op: Op,
+    },
+    /// Extension to run: how a request went.
+    Reply {
+        /// The request's id.
+        id: u64,
+        /// Its result, or why there is none.
+        #[serde(flatten)]
+        outcome: Outcome,
+    },
+    /// Extension to run: a DevTools event from a held tab.
+    Cdp {
+        /// The tab it came from.
+        tab: TabId,
+        /// The child session, for an event from one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        /// The event's method.
+        method: String,
+        /// The event's params.
+        #[serde(default)]
+        params: Value,
+    },
+    /// Extension to run: a tab was opened while the run was connected.
+    TabCreated(TabInfo),
+    /// Extension to run: a tab was closed.
+    TabRemoved {
+        /// The tab.
+        tab: TabId,
+    },
+    /// Extension to run: Chrome let go of a held tab.
+    Detached {
+        /// The tab.
+        tab: TabId,
+        /// Chrome's reason, or the extension's own (`left_allowed_sites`).
+        reason: String,
+        /// Where the tab went, when it left the allowed sites.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+    },
+    /// Host to extension: a run took the bridge.
+    RunStarted {
+        /// Its process id.
+        pid: u32,
+        /// Its goal.
+        goal: String,
+        /// The sites it may go to.
+        sites: Vec<String>,
+    },
+    /// Host to extension: the run has gone; let go of every tab it held.
+    Release,
+    /// Host to extension: the files on disk are newer than what is running.
+    Reload,
+}
+
+/// What the extension says about itself and its browser.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Hello {
+    /// The bridge protocol it speaks.
+    pub protocol: u32,
+    /// Its own version.
+    pub extension_version: String,
+    /// The browser's product, as `Browser.getVersion` gives it.
+    pub product: String,
+    /// Whether the owner has paused it.
+    pub paused: bool,
+    /// The policy it loaded, as it loaded it.
+    pub policy: Value,
+}
+
+/// An operation a run asks of the extension, told apart by its `op`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Op {
+    /// List every tab.
+    Tabs,
+    /// Open a tab on `url`, in the "jev-pilot" group.
+    Create {
+        /// Where.
+        url: String,
+    },
+    /// Take hold of a tab with the debugger.
+    Attach {
+        /// Which.
+        tab: TabId,
+    },
+    /// Let go of a tab.
+    Detach {
+        /// Which.
+        tab: TabId,
+    },
+    /// Bring a tab to the front.
+    Activate {
+        /// Which.
+        tab: TabId,
+    },
+    /// Send a DevTools command to a held tab.
+    Send {
+        /// Which.
+        tab: TabId,
+        /// A child session of the tab, for a command meant for one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        /// The command.
+        method: String,
+        /// Its params.
+        #[serde(default)]
+        params: Value,
+    },
+}
+
+/// A reply's result, or why there is none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// What the operation gave.
+    Result(Value),
+    /// Why it was not done.
+    Error(BridgeError),
+}
+
+/// Why the extension did not carry out a request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BridgeError {
+    /// Which kind of refusal or failure.
+    pub code: ErrorCode,
+    /// In words.
+    pub message: String,
+}
+
+/// The kinds of refusal and failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ErrorCode {
+    /// A DevTools method the engine does not use.
+    RefusedMethod,
+    /// A page script that is not one of the engine's own.
+    RefusedScript,
+    /// A site not on the allowed list.
+    RefusedSite,
+    /// A page extensions may not drive.
+    RefusedPage,
+    /// A tab the run may not take.
+    RefusedTab,
+    /// The owner paused the extension.
+    Paused,
+    /// No such tab.
+    NoTab,
+    /// Chrome would not attach.
+    AttachFailed,
+    /// Chrome's own error, in its words.
+    Chrome,
+}
+
+/// A tab as the extension lists it, and as it reports one opening.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabInfo {
+    /// The extension's id for it.
+    pub tab: TabId,
+    /// Its DevTools target id, which is the run's key for it.
+    pub target: String,
+    /// Where it is.
+    pub url: String,
+    /// Its title.
+    pub title: String,
+    /// The tab that opened it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opener: Option<TabId>,
+}
+
+/// The host's challenge on the local channel: 32 random bytes the run must
+/// echo in its first frame, before the host reads anything else from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nonce([u8; 32]);
+
+impl Nonce {
+    /// A nonce from the operating system's entropy source.
+    ///
+    /// # Panics
+    /// Panics when the system has no entropy to give, as no safe nonce can
+    /// then be made.
+    #[must_use]
+    pub fn fresh() -> Self {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).expect("the system's entropy source answers");
+        Self(bytes)
+    }
+
+    /// The frame the host opens the channel with.
+    #[must_use]
+    pub fn message(&self) -> Message {
+        Message::Nonce {
+            nonce: self.0.iter().map(|b| format!("{b:02x}")).collect(),
+        }
+    }
+
+    /// A run's answer to the host's first frame, when it is a nonce.
+    #[must_use]
+    pub fn echoing(first: &Message) -> Option<Message> {
+        match first {
+            Message::Nonce { nonce } => Some(Message::Echo {
+                nonce: nonce.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Whether `answer` is this nonce, echoed.
+    #[must_use]
+    pub fn is_echoed_by(&self, answer: &Message) -> bool {
+        let Message::Nonce { nonce: ours } = self.message() else {
+            return false;
+        };
+        matches!(answer, Message::Echo { nonce } if *nonce == ours)
+    }
+}
