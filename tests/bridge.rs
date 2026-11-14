@@ -473,3 +473,492 @@ fn a_wrong_or_missing_echo_fails_the_handshake() {
         "only a nonce is echoed"
     );
 }
+
+// --- connecting a run ---
+
+use jev_pilot::browser::extension::ExtensionWire;
+use std::io::{Read, Write};
+
+/// One end of the local channel: what the host has to say, in order, and
+/// what the run wrote.
+struct Channel {
+    from_host: std::io::Cursor<Vec<u8>>,
+    to_host: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+}
+
+impl Channel {
+    fn new(frames: &[serde_json::Value]) -> Self {
+        let mut bytes = Vec::new();
+        for frame in frames {
+            bytes.extend(bridge::encode(
+                frame.to_string().as_bytes(),
+                ByteOrder::Little,
+            ));
+        }
+        Self {
+            from_host: std::io::Cursor::new(bytes),
+            to_host: std::rc::Rc::default(),
+        }
+    }
+
+    /// Every frame the run wrote, as JSON.
+    fn written(&self) -> Vec<serde_json::Value> {
+        let bytes = self.to_host.borrow().clone();
+        let mut reader = &bytes[..];
+        let mut frames = Vec::new();
+        while let Some(frame) = bridge::decode(&mut reader, ByteOrder::Little).expect("frames") {
+            frames.push(serde_json::from_slice(&frame).expect("JSON"));
+        }
+        frames
+    }
+
+    fn handle(&self) -> std::rc::Rc<std::cell::RefCell<Vec<u8>>> {
+        std::rc::Rc::clone(&self.to_host)
+    }
+}
+
+impl Read for Channel {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.from_host.read(buf)
+    }
+}
+
+impl Write for Channel {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.to_host.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn nonce_frame() -> serde_json::Value {
+    json!({"type": "nonce", "nonce": "ab".repeat(32)})
+}
+
+fn ready_frame() -> serde_json::Value {
+    json!({
+        "type": "ready", "protocol": 1, "extension_version": "0.2.0",
+        "product": "Chrome/158.0.7400.12", "paused": false,
+        "policy": {"sites": [], "owner_tabs": "group"}, "host_version": "0.2.0",
+    })
+}
+
+fn written_by(channel: &std::rc::Rc<std::cell::RefCell<Vec<u8>>>) -> Vec<serde_json::Value> {
+    Channel {
+        from_host: std::io::Cursor::new(Vec::new()),
+        to_host: std::rc::Rc::clone(channel),
+    }
+    .written()
+}
+
+/// A run echoes the host's nonce before anything else, and is connected once
+/// the host says the bridge is ready.
+#[test]
+fn a_run_echoes_the_nonce_and_is_connected_when_ready() {
+    let channel = Channel::new(&[nonce_frame(), ready_frame()]);
+    let sent = channel.handle();
+
+    let wire = ExtensionWire::connect(channel).expect("connects");
+
+    assert_eq!(
+        written_by(&sent),
+        [json!({"type": "echo", "nonce": "ab".repeat(32)})]
+    );
+    assert_eq!(wire.hello().product, "Chrome/158.0.7400.12");
+}
+
+/// Each way the host can turn a run away is said in one line that names the
+/// fix.
+#[test]
+fn a_run_turned_away_says_why() {
+    let refusal = |answer: serde_json::Value| {
+        ExtensionWire::connect(Channel::new(&[nonce_frame(), answer]))
+            .err()
+            .expect("turned away")
+            .to_string()
+    };
+    assert_eq!(
+        refusal(json!({"type": "busy", "pid": 4242, "goal": "Star the repository"})),
+        "another run (pid 4242, 'Star the repository') is using Chrome: stop it first"
+    );
+    assert_eq!(
+        refusal(json!({"type": "absent"})),
+        "Chrome is not running with the jev-pilot extension: open Chrome; if it is open, check \
+         the extension is on in chrome://extensions with Developer mode on (`jev-pilot extension \
+         status` says more)"
+    );
+    assert_eq!(
+        refusal(json!({"type": "refused", "check": "the code signature"})),
+        "the bridge only serves the installed jev-pilot (the code signature failed)"
+    );
+    let mut paused = ready_frame();
+    paused["paused"] = true.into();
+    assert_eq!(
+        refusal(paused),
+        "jev-pilot is paused in Chrome: resume it from the extension's toolbar button"
+    );
+    let mut old = ready_frame();
+    old["protocol"] = 0.into();
+    old["extension_version"] = "0.1.0".into();
+    assert_eq!(
+        refusal(old),
+        format!(
+            "the extension in Chrome is 0.1.0, this jev-pilot needs {}: run the install again",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+}
+
+/// A channel that does not open with a nonce is not the host, and the run
+/// sends it nothing.
+#[test]
+fn a_channel_that_does_not_open_with_a_nonce_is_not_the_host() {
+    let channel = Channel::new(&[ready_frame()]);
+    let sent = channel.handle();
+    let error = ExtensionWire::connect(channel).err().expect("refused");
+    assert_eq!(
+        error.to_string(),
+        "something other than the installed jev-pilot answered on the bridge (it did not open \
+         with a nonce); nothing was sent"
+    );
+    assert!(written_by(&sent).is_empty());
+}
+
+// --- the translator: what the engine sends, and what comes back ---
+
+use jev_pilot::browser::transport::Wire;
+use std::time::Duration;
+
+const WAIT: Duration = Duration::from_millis(50);
+
+/// A wire connected through a host that then sends `frames`, in order, as
+/// the extension's answers; and the frames the run wrote after connecting.
+fn wire_with(
+    frames: &[serde_json::Value],
+) -> (
+    ExtensionWire<Channel>,
+    std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+) {
+    let mut all = vec![nonce_frame(), ready_frame()];
+    all.extend_from_slice(frames);
+    let channel = Channel::new(&all);
+    let sent = channel.handle();
+    let wire = ExtensionWire::connect(channel).expect("connects");
+    sent.borrow_mut().clear();
+    (wire, sent)
+}
+
+fn received(wire: &mut ExtensionWire<Channel>) -> serde_json::Value {
+    let text = wire
+        .receive(WAIT)
+        .expect("the wire is up")
+        .expect("something arrived");
+    serde_json::from_str(&text).expect("DevTools JSON")
+}
+
+/// The squatter check asks the browser what it is; the answer comes from the
+/// extension's hello, and nothing is sent for it.
+#[test]
+fn the_browser_version_is_answered_from_the_hello() {
+    let (mut wire, sent) = wire_with(&[]);
+    wire.send(r#"{"id":1,"method":"Browser.getVersion","params":{}}"#)
+        .expect("sends");
+    let reply = received(&mut wire);
+    assert_eq!(reply["id"], 1);
+    assert_eq!(reply["result"]["product"], "Chrome/158.0.7400.12");
+    assert!(
+        written_by(&sent).is_empty(),
+        "nothing went to the extension"
+    );
+}
+
+fn tabs_reply(id: u64) -> serde_json::Value {
+    json!({"type": "reply", "id": id, "result": {"tabs": [
+        {"tab": 7, "target": "T7", "url": "https://example.test/", "title": "Example"},
+        {"tab": 8, "target": "T8", "url": "https://example.test/next", "title": "Next", "opener": 7},
+    ]}})
+}
+
+/// The browser's targets are the extension's tabs, each a page, with the
+/// tab that opened it named by its target id.
+#[test]
+fn the_targets_are_the_extensions_tabs() {
+    let (mut wire, sent) = wire_with(&[tabs_reply(3)]);
+    wire.send(r#"{"id":3,"method":"Target.getTargets","params":{}}"#)
+        .expect("sends");
+
+    assert_eq!(
+        written_by(&sent),
+        [json!({"type": "request", "id": 3, "op": "tabs"})]
+    );
+    assert_eq!(
+        received(&mut wire),
+        json!({"id": 3, "result": {"targetInfos": [
+            {"targetId": "T7", "type": "page", "title": "Example", "url": "https://example.test/", "attached": false, "canAccessOpener": false},
+            {"targetId": "T8", "type": "page", "title": "Next", "url": "https://example.test/next", "attached": false, "canAccessOpener": false, "openerId": "T7"},
+        ]}})
+    );
+}
+
+/// Discovery cannot be switched on through an extension; the extension
+/// reports tabs opening and closing of its own accord, so the switch is
+/// acknowledged where it is sent.
+#[test]
+fn discovery_is_acknowledged_without_asking() {
+    let (mut wire, sent) = wire_with(&[]);
+    wire.send(r#"{"id":4,"method":"Target.setDiscoverTargets","params":{"discover":true}}"#)
+        .expect("sends");
+    assert_eq!(received(&mut wire), json!({"id": 4, "result": {}}));
+    assert!(written_by(&sent).is_empty());
+}
+
+/// A new tab is opened by the extension, in its own profile, and named by
+/// its target id.
+#[test]
+fn creating_a_target_opens_a_tab() {
+    let (mut wire, sent) =
+        wire_with(&[json!({"type": "reply", "id": 5, "result": {"tab": 9, "target": "T9"}})]);
+    wire.send(r#"{"id":5,"method":"Target.createTarget","params":{"url":"about:blank"}}"#)
+        .expect("sends");
+    assert_eq!(
+        written_by(&sent),
+        [json!({"type": "request", "id": 5, "op": "create", "url": "about:blank"})]
+    );
+    assert_eq!(
+        received(&mut wire),
+        json!({"id": 5, "result": {"targetId": "T9"}})
+    );
+}
+
+/// Attaching takes hold of the tab with the extension's debugger, and the
+/// engine gets a session id made up for it; commands under that session go
+/// to the tab, and the tab's replies and events come back under it.
+#[test]
+fn an_attached_tab_is_driven_under_a_made_up_session() {
+    let (mut wire, sent) = wire_with(&[
+        tabs_reply(1),
+        json!({"type": "reply", "id": 2, "result": {}}),
+        json!({"type": "cdp", "tab": 7, "method": "Page.frameNavigated", "params": {"frame": {"id": "F"}}}),
+        json!({"type": "reply", "id": 3, "result": {"frameTree": {"frame": {"id": "F"}}}}),
+    ]);
+    wire.send(r#"{"id":1,"method":"Target.getTargets","params":{}}"#)
+        .expect("sends");
+    received(&mut wire);
+    wire.send(
+        r#"{"id":2,"method":"Target.attachToTarget","params":{"targetId":"T7","flatten":true}}"#,
+    )
+    .expect("sends");
+    let attached = received(&mut wire);
+    let session = attached["result"]["sessionId"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    assert!(!session.is_empty());
+
+    wire.send(&format!(
+        r#"{{"id":3,"method":"Page.getFrameTree","params":{{}},"sessionId":"{session}"}}"#
+    ))
+    .expect("sends");
+
+    assert_eq!(
+        written_by(&sent)[1..],
+        [
+            json!({"type": "request", "id": 2, "op": "attach", "tab": 7}),
+            json!({"type": "request", "id": 3, "op": "send", "tab": 7, "method": "Page.getFrameTree", "params": {}}),
+        ]
+    );
+    assert_eq!(
+        received(&mut wire),
+        json!({"method": "Page.frameNavigated", "params": {"frame": {"id": "F"}}, "sessionId": session})
+    );
+    assert_eq!(
+        received(&mut wire),
+        json!({"id": 3, "result": {"frameTree": {"frame": {"id": "F"}}}, "sessionId": session})
+    );
+}
+
+/// Letting go of a session lets go of its tab, and bringing a target to the
+/// front brings its tab.
+#[test]
+fn detaching_and_activating_reach_the_tab() {
+    let (mut wire, sent) = wire_with(&[
+        tabs_reply(1),
+        json!({"type": "reply", "id": 2, "result": {}}),
+        json!({"type": "reply", "id": 3, "result": {}}),
+        json!({"type": "reply", "id": 4, "result": {}}),
+    ]);
+    wire.send(r#"{"id":1,"method":"Target.getTargets","params":{}}"#)
+        .expect("sends");
+    received(&mut wire);
+    wire.send(
+        r#"{"id":2,"method":"Target.attachToTarget","params":{"targetId":"T8","flatten":true}}"#,
+    )
+    .expect("sends");
+    let session = received(&mut wire)["result"]["sessionId"].clone();
+    wire.send(
+        &json!({"id": 3, "method": "Target.activateTarget", "params": {"targetId": "T8"}})
+            .to_string(),
+    )
+    .expect("sends");
+    assert_eq!(received(&mut wire), json!({"id": 3, "result": {}}));
+    wire.send(
+        &json!({"id": 4, "method": "Target.detachFromTarget", "params": {"sessionId": session}})
+            .to_string(),
+    )
+    .expect("sends");
+    assert_eq!(received(&mut wire), json!({"id": 4, "result": {}}));
+
+    assert_eq!(
+        written_by(&sent)[2..],
+        [
+            json!({"type": "request", "id": 3, "op": "activate", "tab": 8}),
+            json!({"type": "request", "id": 4, "op": "detach", "tab": 8}),
+        ]
+    );
+}
+
+/// The extension cannot close the browser, and nothing browser-wide is
+/// passed to it: such a call is refused where it is sent.
+#[test]
+fn closing_the_browser_and_other_browser_wide_calls_are_refused_locally() {
+    let (mut wire, sent) = wire_with(&[]);
+    for (id, method) in [
+        (6, "Browser.close"),
+        (7, "Storage.clearCookies"),
+        (8, "Target.closeTarget"),
+    ] {
+        wire.send(&json!({"id": id, "method": method, "params": {}}).to_string())
+            .expect("sends");
+        let refused = received(&mut wire);
+        assert_eq!(refused["id"], id);
+        assert_eq!(
+            refused["error"]["message"],
+            format!("{method} is not available through the jev-pilot extension")
+        );
+    }
+    assert!(written_by(&sent).is_empty());
+}
+
+/// A target the extension never listed has no tab to reach, and the call
+/// fails at once rather than going to some other tab.
+#[test]
+fn an_unknown_target_is_refused_locally() {
+    let (mut wire, sent) = wire_with(&[]);
+    wire.send(
+        r#"{"id":2,"method":"Target.attachToTarget","params":{"targetId":"NOPE","flatten":true}}"#,
+    )
+    .expect("sends");
+    let refused = received(&mut wire);
+    assert_eq!(refused["error"]["message"], "No target with given id found");
+    assert!(written_by(&sent).is_empty());
+}
+
+/// Attach to tab 7 (T7) as the first two requests, and give back the
+/// session the engine was handed.
+fn attached(frames: &[serde_json::Value]) -> (ExtensionWire<Channel>, String) {
+    let mut all = vec![
+        tabs_reply(1),
+        json!({"type": "reply", "id": 2, "result": {}}),
+    ];
+    all.extend_from_slice(frames);
+    let (mut wire, _) = wire_with(&all);
+    wire.send(r#"{"id":1,"method":"Target.getTargets","params":{}}"#)
+        .expect("sends");
+    received(&mut wire);
+    wire.send(
+        r#"{"id":2,"method":"Target.attachToTarget","params":{"targetId":"T7","flatten":true}}"#,
+    )
+    .expect("sends");
+    let session = received(&mut wire)["result"]["sessionId"]
+        .as_str()
+        .expect("a session")
+        .to_owned();
+    (wire, session)
+}
+
+/// A tab opened by a held tab is reported as a target created with that tab
+/// as its opener, so the engine's rule makes it the run's; a tab closed is a
+/// target destroyed.
+#[test]
+fn tabs_coming_and_going_are_targets_created_and_destroyed() {
+    let (mut wire, _) = attached(&[
+        json!({"type": "tab_created", "tab": 10, "target": "T10", "opener": 7, "url": "https://example.test/receipt", "title": "Receipt"}),
+        json!({"type": "tab_removed", "tab": 10}),
+    ]);
+    assert_eq!(
+        received(&mut wire),
+        json!({"method": "Target.targetCreated", "params": {"targetInfo": {
+            "targetId": "T10", "type": "page", "title": "Receipt", "url": "https://example.test/receipt",
+            "attached": false, "canAccessOpener": false, "openerId": "T7",
+        }}})
+    );
+    assert_eq!(
+        received(&mut wire),
+        json!({"method": "Target.targetDestroyed", "params": {"targetId": "T10"}})
+    );
+}
+
+/// When Chrome lets go of a held tab, the engine hears that its session was
+/// detached, and why.
+#[test]
+fn a_tab_let_go_is_its_session_detached_with_the_reason() {
+    let (mut wire, session) =
+        attached(&[json!({"type": "detached", "tab": 7, "reason": "canceled_by_user"})]);
+    assert_eq!(
+        received(&mut wire),
+        json!({"method": "Target.detachedFromTarget", "params": {
+            "sessionId": session, "targetId": "T7", "reason": "canceled_by_user",
+        }})
+    );
+
+    let (mut wire, session) = attached(&[
+        json!({"type": "detached", "tab": 7, "reason": "left_allowed_sites", "url": "https://elsewhere.test/"}),
+    ]);
+    assert_eq!(
+        received(&mut wire),
+        json!({"method": "Target.detachedFromTarget", "params": {
+            "sessionId": session, "targetId": "T7", "reason": "left_allowed_sites",
+            "url": "https://elsewhere.test/",
+        }})
+    );
+}
+
+/// Each refusal reaches the engine as an error on the call it refused, with
+/// the extension's words and its code; a command's refusal comes back under
+/// its session.
+#[test]
+fn each_refusal_is_an_error_on_the_call_with_its_code() {
+    let codes = [
+        "refused_method",
+        "refused_script",
+        "refused_site",
+        "refused_page",
+        "refused_tab",
+        "paused",
+        "no_tab",
+        "attach_failed",
+        "chrome",
+    ];
+    let frames: Vec<serde_json::Value> = codes
+        .iter()
+        .zip(3u64..)
+        .map(|(code, id)| json!({"type": "reply", "id": id, "error": {"code": code, "message": format!("why {code}")}}))
+        .collect();
+    let (mut wire, session) = attached(&frames);
+    for (code, id) in codes.iter().zip(3u64..) {
+        wire.send(
+            &json!({"id": id, "method": "Page.navigate", "params": {"url": "https://elsewhere.test/"}, "sessionId": session})
+                .to_string(),
+        )
+        .expect("sends");
+        assert_eq!(
+            received(&mut wire),
+            json!({"id": id, "sessionId": session, "error": {
+                "code": -32000, "message": format!("why {code}"), "data": code,
+            }}),
+            "{code}"
+        );
+    }
+}

@@ -8,6 +8,7 @@ pub mod cdp;
 pub mod device;
 pub mod discover;
 pub mod engine;
+pub mod extension;
 pub mod input;
 pub mod launch;
 pub mod read;
