@@ -14,7 +14,7 @@ use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
 use interprocess::local_socket::{Listener, ListenerOptions, Stream};
 
 use super::channel::Place;
-use super::{Input, Output, Relay, RunId, Started, utc};
+use super::{Input, Output, Relay, RunId, Started, Throttle, utc};
 use crate::browser::bridge::{self, ByteOrder, FrameError, Message, Nonce};
 use crate::peer::{Expected, PeerCheck, Verdict, decide, recheck};
 
@@ -130,6 +130,7 @@ pub fn serve(
     let mut relay = Relay::new(&config.version, config.extension_on_disk);
     let mut runs: HashMap<RunId, Arc<Stream>> = HashMap::new();
     let mut pending: VecDeque<Input> = VecDeque::new();
+    let mut throttle = Throttle::default();
     'serving: for event in heard {
         match event {
             Event::Joined(run, stream) => {
@@ -167,11 +168,13 @@ pub fn serve(
                         }
                     }
                     Output::Audit(audit) => {
-                        let _ = append_audit(
-                            &config.audit_dir,
-                            &audit.line(&utc(SystemTime::now())),
-                            AUDIT_LIMIT,
-                        );
+                        for audit in throttle.admit(audit, std::time::Instant::now()) {
+                            let _ = append_audit(
+                                &config.audit_dir,
+                                &audit.line(&utc(SystemTime::now())),
+                                AUDIT_LIMIT,
+                            );
+                        }
                     }
                     Output::Exit => break 'serving,
                 }

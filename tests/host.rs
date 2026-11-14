@@ -1497,3 +1497,68 @@ fn the_diagnostics_file_is_never_reached_through_a_link() {
     assert_eq!(std::fs::read_to_string(&precious).unwrap(), "x".repeat(500));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A loop of refused connections cannot rotate the audit log away: at most
+/// one refusal a minute is written, and the next one written says how many
+/// were left out.
+#[test]
+fn refusals_are_written_at_most_once_a_minute() {
+    use jev_pilot::browser::host::Throttle;
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let refusal = |n: u32| Audit::Refused {
+        pid: Some(n),
+        check: "uid: not the expected value".into(),
+    };
+    let mut throttle = Throttle::default();
+    assert_eq!(throttle.admit(refusal(1), start), [refusal(1)]);
+    for n in 2..=100 {
+        assert_eq!(
+            throttle.admit(refusal(n), start + Duration::from_secs(u64::from(n) % 50)),
+            []
+        );
+    }
+    // Other events always pass.
+    let ended = Audit::RunEnded {
+        pid: 7,
+        how: "closed".into(),
+    };
+    assert_eq!(throttle.admit(ended.clone(), start), [ended]);
+    assert_eq!(
+        throttle.admit(refusal(101), start + Duration::from_secs(61)),
+        [Audit::NotWritten { refusals: 99 }, refusal(101)]
+    );
+    assert_eq!(
+        Audit::NotWritten { refusals: 99 }.line("2026-11-15T09:30:00Z"),
+        "{\"event\":\"refusals_not_written\",\"refusals\":99,\"time\":\"2026-11-15T09:30:00Z\"}\n"
+    );
+}
+
+/// Each refused host start is a process of its own: one within a minute of
+/// the last refused start in the log is not written again.
+#[test]
+fn a_refused_host_start_is_not_written_twice_in_a_minute() {
+    use jev_pilot::browser::host::{refused_start_lately, utc};
+    use std::time::{Duration, SystemTime};
+    let now = SystemTime::UNIX_EPOCH + Duration::from_mins(29_912_300);
+    let at = |ago: u64| utc(now - Duration::from_secs(ago));
+    let refused = |ago: u64| {
+        format!(
+            "{{\"browser\":\"refused\",\"event\":\"host_started\",\"parent_pid\":7,\"time\":\"{}\",\"why\":\"x\"}}\n",
+            at(ago)
+        )
+    };
+    let accepted = format!(
+        "{{\"browser\":\"accepted\",\"event\":\"host_started\",\"parent_pid\":7,\"time\":\"{}\"}}\n",
+        at(5)
+    );
+    assert!(refused_start_lately(&refused(30), now));
+    assert!(!refused_start_lately(&refused(90), now));
+    assert!(!refused_start_lately(&accepted, now));
+    assert!(refused_start_lately(
+        &format!("{}{}", refused(30), accepted),
+        now
+    ));
+    assert!(!refused_start_lately("", now));
+    assert!(!refused_start_lately("not json\n", now));
+}

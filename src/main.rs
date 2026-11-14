@@ -1214,7 +1214,9 @@ mod bridge {
     /// could otherwise start it on pipes of its own and pose as the
     /// extension.
     pub fn host() -> Result<(), Error> {
-        use jev_pilot::browser::host::{AUDIT_LIMIT, Audit, append_audit, utc};
+        use jev_pilot::browser::host::{
+            AUDIT_LIMIT, Audit, append_audit, refused_start_lately, utc,
+        };
         let found = installed()?;
         let parent = jev_pilot::peer::browser::browser_parent();
         let started = Audit::HostStarted {
@@ -1222,11 +1224,17 @@ mod bridge {
             parent_exe: parent.exe.as_ref().map(|e| e.display().to_string()),
             refused: parent.verdict.clone().err(),
         };
-        append_audit(
-            &found.layout.audit_log,
-            &started.line(&utc(std::time::SystemTime::now())),
-            AUDIT_LIMIT,
-        )?;
+        // A refused start within a minute of the last is not written again,
+        // so a loop of them cannot rotate the log away.
+        let now = std::time::SystemTime::now();
+        let tail = log_tail(&found.layout.audit_log.join("audit.log"));
+        if parent.verdict.is_ok() || !refused_start_lately(&tail, now) {
+            append_audit(
+                &found.layout.audit_log,
+                &started.line(&utc(now)),
+                AUDIT_LIMIT,
+            )?;
+        }
         if let Err(why) = parent.verdict {
             return Err(format!(
                 "the host serves only a browser, and what started it ({}) is not one: {why}",
@@ -1261,6 +1269,19 @@ mod bridge {
         };
         serve(config, std::io::stdin(), std::io::stdout().lock())?;
         Ok(())
+    }
+
+    /// The last few lines of a log, for what was written lately.
+    fn log_tail(log: &Path) -> String {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let Ok(mut file) = std::fs::File::open(log) else {
+            return String::new();
+        };
+        let length = file.metadata().map_or(0, |m| m.len());
+        let _ = file.seek(SeekFrom::Start(length.saturating_sub(8 << 10)));
+        let mut tail = String::new();
+        let _ = file.read_to_string(&mut tail);
+        tail
     }
 
     /// How large the host's diagnostics may grow before they start again.
