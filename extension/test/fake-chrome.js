@@ -163,6 +163,7 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
     },
     webNavigation: {
       onCreatedNavigationTarget: event("webNavigation.onCreatedNavigationTarget"),
+      onCommitted: event("webNavigation.onCommitted"),
     },
     storage: {
       local: {

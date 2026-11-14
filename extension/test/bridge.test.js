@@ -10,13 +10,13 @@ import { fakeChrome, settle } from "./fake-chrome.js";
 const SCRIPTS = JSON.parse(readFileSync(new URL("../scripts.json", import.meta.url), "utf8"));
 const UA = "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/158.0.0.0 Safari/537.36";
 
-function bridged({ policy = { sites: [], owner_tabs: "group" }, timers = [] } = {}) {
+function bridged({ policy = { sites: [], owner_tabs: "group" }, timers = [], loadPolicy } = {}) {
   const fake = fakeChrome();
   const posted = [];
   const bridge = createBridge({
     chrome: fake.chrome,
     post: (m) => posted.push(m),
-    loadPolicy: async () => policy,
+    loadPolicy: loadPolicy ?? (async () => policy),
     scripts: SCRIPTS,
     userAgent: UA,
     setTimer: (fn, ms) => timers.push({ fn, ms }),
@@ -167,4 +167,94 @@ test("the bridge says what run it serves and which tabs it holds, for the popup"
   });
   await bridge.receive({ type: "release" });
   assert.deepEqual(bridge.state(), { running: false, goal: "", sites: [], tabs: [] });
+});
+
+/** A policy that is read only when the test lets it be. */
+function slowPolicy(policy) {
+  const waiting = [];
+  return {
+    loadPolicy: () => new Promise((resolve) => waiting.push(() => resolve(policy))),
+    release: () => {
+      for (const go of waiting.splice(0)) {
+        go();
+      }
+    },
+  };
+}
+
+test("a command sent while a navigation off the sites is checked is not carried out", async () => {
+  const policy = { sites: ["https://github.com"], owner_tabs: "group" };
+  const slow = slowPolicy(policy);
+  const { fake, bridge, posted } = bridged({ loadPolicy: slow.loadPolicy });
+  await bridge.receive(started);
+  const attaching = attachedTo(fake, bridge, 7);
+  await settle();
+  slow.release();
+  await attaching;
+  posted.length = 0;
+  fake.state.tabs.get(7).url = "https://elsewhere.test/x";
+  const navigated = fake.emit("debugger.onEvent", { tabId: 7 }, "Page.frameNavigated", {
+    frame: { id: "F", url: "https://elsewhere.test/x" },
+  });
+  const sent = bridge.receive({
+    type: "request",
+    id: 2,
+    op: "send",
+    tab: 7,
+    method: "DOMSnapshot.captureSnapshot",
+    params: {},
+  });
+  for (let i = 0; i < 5; i += 1) {
+    await settle();
+    slow.release();
+  }
+  await Promise.all([navigated, sent]);
+  assert.equal(
+    fake.calls.some(([call, , method]) => call === "debugger.sendCommand" && method === "DOMSnapshot.captureSnapshot"),
+    false,
+  );
+  assert.deepEqual(posted.map((m) => m.type), ["detached", "reply"]);
+  assert.equal(posted[0].reason, "left_allowed_sites");
+  assert.equal(posted[1].error.code, "no_tab");
+});
+
+test("each command checks where its tab is now, and lets go of a tab off the sites", async () => {
+  const { fake, bridge, posted } = bridged({ policy: { sites: ["https://github.com"], owner_tabs: "group" } });
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  posted.length = 0;
+  fake.state.tabs.get(7).url = "https://elsewhere.test/x";
+  await bridge.receive({ type: "request", id: 3, op: "send", tab: 7, method: "Page.getFrameTree", params: {} });
+  await settle();
+  assert.equal(fake.calls.some(([call]) => call === "debugger.sendCommand"), false);
+  assert.deepEqual(posted[0], {
+    type: "detached",
+    tab: 7,
+    reason: "left_allowed_sites",
+    url: "https://elsewhere.test/x",
+  });
+  assert.equal(posted[1].error.code, "no_tab");
+  assert.ok(fake.calls.some(([call, d]) => call === "debugger.detach" && d.tabId === 7));
+});
+
+test("a committed navigation off the sites lets go of the tab, whatever DevTools says", async () => {
+  const { fake, bridge, posted } = bridged({ policy: { sites: ["https://github.com"], owner_tabs: "group" } });
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  posted.length = 0;
+  await fake.emit("webNavigation.onCommitted", { tabId: 7, frameId: 3, url: "https://ads.test/" });
+  await fake.emit("webNavigation.onCommitted", { tabId: 9, frameId: 0, url: "https://ads.test/" });
+  await settle();
+  assert.deepEqual(posted, [], "a frame, or a tab the run does not hold, is not the run's business");
+  await fake.emit("webNavigation.onCommitted", { tabId: 7, frameId: 0, url: "https://elsewhere.test/x" });
+  await settle();
+  const alone = [...posted];
+  await fake.emit("debugger.onEvent", { tabId: 7 }, "Page.frameNavigated", {
+    frame: { id: "F", url: "https://elsewhere.test/x" },
+  });
+  await settle();
+  assert.deepEqual(alone, posted, "said once");
+  assert.deepEqual(posted, [
+    { type: "detached", tab: 7, reason: "left_allowed_sites", url: "https://elsewhere.test/x" },
+  ]);
 });

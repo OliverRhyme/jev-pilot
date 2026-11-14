@@ -30,6 +30,12 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
   const held = new Set();
   /** Tabs opened with no opener yet, waiting to hear what opened them. */
   const unclaimed = new Map();
+  /**
+   * For a held tab whose page has just changed, the check of where it went.
+   * Set before anything is awaited, so that no command or event for the tab
+   * passes until the check has said whether the run may still have it.
+   */
+  const checks = new Map();
   let running = false;
   /** The run being served: its goal and its sites. */
   let run = { goal: "", sites: [] };
@@ -73,6 +79,37 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
       return await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
     } catch {
       return chrome.windows.create({ focused: true });
+    }
+  };
+
+  /**
+   * Check that a held tab arriving at `url` is still on the allowed sites,
+   * and let go of it, telling the run, when it is not. Checks of one tab run
+   * in turn, and whatever waits on the tab waits for the last of them.
+   */
+  const checkArrival = (tabId, url) => {
+    const check = (checks.get(tabId) ?? Promise.resolve()).then(async () => {
+      if (!held.has(tabId) || !leftAllowedSites(url, await loadPolicy())) {
+        return;
+      }
+      if (held.delete(tabId)) {
+        await chrome.debugger.detach({ tabId }).catch(() => {});
+        post(protocol.detached(tabId, "left_allowed_sites", url));
+      }
+    });
+    checks.set(tabId, check);
+    check.finally(() => {
+      if (checks.get(tabId) === check) {
+        checks.delete(tabId);
+      }
+    });
+    return check;
+  };
+
+  /** Wait for any check of where `tabId` went. */
+  const settled = async (tabId) => {
+    while (checks.has(tabId)) {
+      await checks.get(tabId).catch(() => {});
     }
   };
 
@@ -145,9 +182,19 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
         return;
       }
     }
-    if (request.op === "send" && !held.has(request.tab)) {
-      post(protocol.refused(request.id, refusal("no_tab", `the run does not hold tab ${request.tab}`)));
-      return;
+    if (request.op === "send") {
+      await settled(request.tab);
+      // Where the tab is now, whatever DevTools has or has not said yet.
+      if (held.has(request.tab)) {
+        const now = await chrome.tabs.get(request.tab).catch(() => undefined);
+        if (now?.url) {
+          await checkArrival(request.tab, now.url);
+        }
+      }
+      if (!held.has(request.tab)) {
+        post(protocol.refused(request.id, refusal("no_tab", `the run does not hold tab ${request.tab}`)));
+        return;
+      }
     }
     const refused = requestRefusal(request, {
       policy: await loadPolicy(),
@@ -240,15 +287,21 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
       }
       const frame = params?.frame;
       if (method === "Page.frameNavigated" && frame && frame.parentId === undefined) {
-        const policy = await loadPolicy();
-        if (leftAllowedSites(frame.url, policy)) {
-          held.delete(source.tabId);
-          await chrome.debugger.detach({ tabId: source.tabId }).catch(() => {});
-          post(protocol.detached(source.tabId, "left_allowed_sites", frame.url));
-          return;
-        }
+        checkArrival(source.tabId, frame.url);
+      }
+      // Nothing from a tab passes while where it went is being checked.
+      await settled(source.tabId);
+      if (!held.has(source.tabId)) {
+        return;
       }
       post(protocol.cdp(source.tabId, source.sessionId, method, params));
+    },
+
+    /** A tab's page changed, as Chrome's navigation events say it. */
+    async committed({ tabId, frameId, url }) {
+      if (frameId === 0 && held.has(tabId)) {
+        await checkArrival(tabId, url);
+      }
     },
 
     /** Chrome let go of an attached tab. */
@@ -311,5 +364,6 @@ export function listen(chrome, bridge) {
   chrome.tabs.onCreated.addListener((tab) => bridge.tabCreated(tab));
   chrome.tabs.onRemoved.addListener((tabId) => bridge.tabRemoved(tabId));
   chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => bridge.navigationTarget(details));
+  chrome.webNavigation.onCommitted.addListener((details) => bridge.committed(details));
   chrome.storage.onChanged.addListener((changes, area) => bridge.storageChanged(changes, area));
 }
