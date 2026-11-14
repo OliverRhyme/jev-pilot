@@ -352,6 +352,21 @@ fn the_launch_arguments_are_the_fresh_profile_flags() {
     assert_eq!(headless.last().map(String::as_str), Some("about:blank"));
 }
 
+/// Headless Chrome opens an 800 by 600 window, and sites serve that their
+/// narrow layout: GitHub folds its search into a menu. A headless browser is
+/// given a laptop's window instead; a visible one keeps the size Chrome
+/// chooses for the screen.
+#[test]
+fn a_headless_browser_opens_at_a_laptops_size() {
+    let profile = Path::new("/tmp/jev-pilot-fresh-1234");
+    assert!(launch_args(profile, true).contains(&"--window-size=1280,800".to_owned()));
+    assert!(
+        !launch_args(profile, false)
+            .iter()
+            .any(|arg| arg.starts_with("--window-size"))
+    );
+}
+
 /// `--chrome` wins, then `JEV_PILOT_CHROME`, then the usual places.
 #[test]
 fn the_browser_binary_is_chosen_in_order() {
