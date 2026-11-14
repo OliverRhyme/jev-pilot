@@ -785,7 +785,7 @@ mod web {
 
     /// A connection to a browser that has proved to be Chrome, with its tabs.
     struct Connected {
-        socket: AnyWire,
+        wire: AnyWire,
         tabs: Vec<PageTab>,
         fresh: Started,
     }
@@ -795,8 +795,8 @@ mod web {
     /// In attach mode the handshake raises Chrome's prompt, so it is made as
     /// soon as the run starts and never retried; a retry would stack a second
     /// prompt on the first.
-    fn connect(target: &BrowserTarget, goal: &str) -> Result<Connected, Error> {
-        let (socket, fresh, binary) = match &target.mode {
+    fn connect(target: &BrowserTarget, goal: Option<&str>) -> Result<Connected, Error> {
+        let (wire, fresh, binary) = match &target.mode {
             BrowserMode::Attach {
                 channel,
                 endpoint,
@@ -834,10 +834,14 @@ mod web {
             }
             BrowserMode::Extension { .. } => {
                 undo_on_interrupt(Interrupted::Attached);
-                (super::bridge::connect(target, goal)?, Started(None), None)
+                (
+                    super::bridge::connect(target, goal.unwrap_or_default())?,
+                    Started(None),
+                    None,
+                )
             }
         };
-        let mut connection = Connection::new(socket);
+        let mut connection = Connection::new(wire);
         // Nothing is typed into a browser until it has said it is Chrome: a
         // stale port file can name a port another program now holds.
         let version = connection.call("Browser.getVersion", json!({}), None, CALL)?;
@@ -862,7 +866,7 @@ mod web {
         }
         let targets = connection.call("Target.getTargets", json!({}), None, CALL)?;
         Ok(Connected {
-            socket: connection.into_wire(),
+            wire: connection.into_wire(),
             tabs: page_tabs(&targets),
             fresh,
         })
@@ -919,17 +923,13 @@ mod web {
     /// A fresh browser starts on one blank tab the run owns, and `--open`
     /// loads its address there; in attach mode `--open` opens a new tab, so
     /// none of the owner's is touched.
-    fn session(target: &BrowserTarget, goal: &str) -> Result<Session, Error> {
-        let Connected {
-            socket,
-            tabs,
-            fresh,
-        } = connect(target, goal)?;
+    fn session(target: &BrowserTarget, goal: Option<&str>) -> Result<Session, Error> {
+        let Connected { wire, tabs, fresh } = connect(target, goal)?;
         let engine = match (&target.open, fresh.is_some()) {
-            (Some(url), false) => CdpEngine::open(socket, url)?,
+            (Some(url), false) => CdpEngine::open(wire, url)?,
             (open, true) if target.tab.is_none() => {
                 let tab = choose_tab(&tabs, None).map_err(unchosen(target))?;
-                let mut engine = CdpEngine::attach(socket, &tab.key, true)?;
+                let mut engine = CdpEngine::attach(wire, &tab.key, true)?;
                 if let Some(url) = open {
                     engine.perform(&BrowserCommand::Navigate(url.clone()))?;
                 }
@@ -937,7 +937,7 @@ mod web {
             }
             _ => {
                 let tab = choose_tab(&tabs, target.tab.as_deref()).map_err(unchosen(target))?;
-                CdpEngine::attach(socket, &tab.key, fresh.is_some())?
+                CdpEngine::attach(wire, &tab.key, fresh.is_some())?
             }
         };
         Ok(Session {
@@ -948,11 +948,7 @@ mod web {
 
     /// `devices --browser …`: the browser's tabs, with their ids.
     pub fn list_tabs(target: &BrowserTarget) -> Result<(), Error> {
-        let Connected {
-            socket,
-            tabs,
-            fresh,
-        } = connect(target, "")?;
+        let Connected { wire, tabs, fresh } = connect(target, None)?;
         if tabs.is_empty() {
             println!("no tabs open");
         }
@@ -960,7 +956,7 @@ mod web {
             println!("{}", tab_line(tab, sites_only(target)));
         }
         if fresh.is_some() {
-            let _ = Connection::new(socket).send("Browser.close", json!({}), None);
+            let _ = Connection::new(wire).send("Browser.close", json!({}), None);
         }
         drop(fresh);
         Ok(())
@@ -968,7 +964,7 @@ mod web {
 
     /// `observe --browser …`: what the next step would be offered on the tab.
     pub fn observe(target: &BrowserTarget) -> Result<(), Error> {
-        let mut session = session(target, "")?;
+        let mut session = session(target, None)?;
         let started = std::time::Instant::now();
         let screen = session.observe()?;
         println!("read by : DevTools Protocol");
@@ -983,7 +979,7 @@ mod web {
         // Read before Chrome is asked, so a missing key costs the owner no
         // click.
         let key = ApiKey::from_env()?;
-        let mut session = session(target, &plan.goal)?;
+        let mut session = session(target, Some(&plan.goal))?;
         println!(
             "browser: {}",
             match &target.mode {

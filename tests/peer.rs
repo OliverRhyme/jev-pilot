@@ -201,7 +201,7 @@ fn linux_facts() -> Facts {
 fn linux_dev_expected() -> Expected {
     Expected::Linux {
         uid: UID,
-        path: PathBuf::from("/home/oliver/.jev-pilot/bin/jev-pilot"),
+        path: PathBuf::from("/home/owner/.jev-pilot/bin/jev-pilot"),
         pin: LinuxPin::DevelopmentSha256(digest(7)),
     }
 }
@@ -211,7 +211,7 @@ fn linux_dev_facts(hash: Sha256Digest) -> Facts {
         uid: Some(UID),
         pid: Some(PID),
         egid: Some(USER_GROUP),
-        path: Some(PathBuf::from("/home/oliver/.jev-pilot/bin/jev-pilot")),
+        path: Some(PathBuf::from("/home/owner/.jev-pilot/bin/jev-pilot")),
         code: Some(Code::ImageSha256(hash)),
         ..Facts::default()
     }
@@ -402,7 +402,7 @@ fn windows_refuses_another_session() {
 fn windows_refuses_a_path_outside_program_files() {
     let facts = Facts {
         path: Some(PathBuf::from(
-            r"C:\Users\oliver\AppData\Local\Temp\jev-pilot.exe",
+            r"C:\Users\owner\AppData\Local\Temp\jev-pilot.exe",
         )),
         ..windows_facts(Code::ImageSha256(digest(1)))
     };
@@ -439,7 +439,7 @@ fn windows_checks_the_path_before_the_signer() {
     // Another program from the same publisher, signed with the same
     // certificate, is still not the installed copy.
     let facts = Facts {
-        path: Some(PathBuf::from(r"C:\Users\oliver\Downloads\other.exe")),
+        path: Some(PathBuf::from(r"C:\Users\owner\Downloads\other.exe")),
         ..windows_facts(Code::Signer {
             subject: SIGNER.to_owned(),
         })

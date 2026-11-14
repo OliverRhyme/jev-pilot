@@ -613,7 +613,7 @@ mod channel {
     };
     use std::path::{Path, PathBuf};
 
-    const HOME: &str = "/home/oliver";
+    const HOME: &str = "/home/owner";
 
     fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |name| {
@@ -628,10 +628,10 @@ mod channel {
         assert_eq!(
             socket_dir(
                 Os::MacOs,
-                Path::new("/Users/oliver"),
+                Path::new("/Users/owner"),
                 &env(&[("TMPDIR", "/var/x")])
             ),
-            PathBuf::from("/Users/oliver/Library/Application Support/jev-pilot/run")
+            PathBuf::from("/Users/owner/Library/Application Support/jev-pilot/run")
         );
         assert_eq!(
             socket_dir(
@@ -643,7 +643,7 @@ mod channel {
         );
         assert_eq!(
             socket_dir(Os::Linux, Path::new(HOME), &env(&[])),
-            PathBuf::from("/home/oliver/.local/state/jev-pilot/run")
+            PathBuf::from("/home/owner/.local/state/jev-pilot/run")
         );
         // A relative runtime directory is not one to trust.
         assert_eq!(
@@ -652,7 +652,7 @@ mod channel {
                 Path::new(HOME),
                 &env(&[("XDG_RUNTIME_DIR", "run")])
             ),
-            PathBuf::from("/home/oliver/.local/state/jev-pilot/run")
+            PathBuf::from("/home/owner/.local/state/jev-pilot/run")
         );
         assert_eq!(
             socket_path(Path::new("/run/user/1000/jev-pilot")),

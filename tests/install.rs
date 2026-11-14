@@ -32,7 +32,7 @@ fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 
 const WINDOWS: &[(&str, &str)] = &[
     ("ProgramFiles", r"C:\Program Files"),
     ("ProgramData", r"C:\ProgramData"),
-    ("LOCALAPPDATA", r"C:\Users\oliver\AppData\Local"),
+    ("LOCALAPPDATA", r"C:\Users\owner\AppData\Local"),
 ];
 
 /// Everything a same-user program could rewrite to pass the checks lives
@@ -88,32 +88,32 @@ fn a_protected_install_puts_everything_where_only_an_administrator_writes() {
 /// A development install is the owner's own, in the owner's home.
 #[test]
 fn a_development_install_lives_in_the_owners_home() {
-    let mac = Layout::development(Os::MacOs, Path::new("/Users/oliver"), &env(&[]));
+    let mac = Layout::development(Os::MacOs, Path::new("/Users/owner"), &env(&[]));
     assert_eq!(
         mac.binary,
-        PathBuf::from("/Users/oliver/Library/Application Support/jev-pilot/dev/jev-pilot")
+        PathBuf::from("/Users/owner/Library/Application Support/jev-pilot/dev/jev-pilot")
     );
     assert_eq!(
         mac.install_json,
-        PathBuf::from("/Users/oliver/Library/Application Support/jev-pilot/dev/install.json")
+        PathBuf::from("/Users/owner/Library/Application Support/jev-pilot/dev/install.json")
     );
     assert_eq!(
         mac.audit_log,
-        PathBuf::from("/Users/oliver/Library/Application Support/jev-pilot/dev/log")
+        PathBuf::from("/Users/owner/Library/Application Support/jev-pilot/dev/log")
     );
-    let linux = Layout::development(Os::Linux, Path::new("/home/oliver"), &env(&[]));
+    let linux = Layout::development(Os::Linux, Path::new("/home/owner"), &env(&[]));
     assert_eq!(
         linux.extension,
-        PathBuf::from("/home/oliver/.local/share/jev-pilot/dev/extension")
+        PathBuf::from("/home/owner/.local/share/jev-pilot/dev/extension")
     );
-    let windows = Layout::development(Os::Windows, Path::new(r"C:\Users\oliver"), &env(WINDOWS));
+    let windows = Layout::development(Os::Windows, Path::new(r"C:\Users\owner"), &env(WINDOWS));
     assert_eq!(
         windows.binary,
-        PathBuf::from(r"C:\Users\oliver\AppData\Local\jev-pilot\dev\jev-pilot.exe")
+        PathBuf::from(r"C:\Users\owner\AppData\Local\jev-pilot\dev\jev-pilot.exe")
     );
     assert_eq!(
         windows.host_manifest,
-        PathBuf::from(r"C:\Users\oliver\AppData\Local\jev-pilot\dev\dev.jevpilot.bridge.json")
+        PathBuf::from(r"C:\Users\owner\AppData\Local\jev-pilot\dev\dev.jevpilot.bridge.json")
     );
 }
 
@@ -150,7 +150,7 @@ fn install_json_records_what_to_expect_and_what_to_put_back() {
         version: "0.4.0".into(),
         kind: InstallKind::Protected,
         expected: mac_expected(),
-        moved_hosts: vec!["/Users/oliver/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.anthropic.claude_browser_extension.json".into()],
+        moved_hosts: vec!["/Users/owner/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.anthropic.claude_browser_extension.json".into()],
     };
     let json = serde_json::to_value(&record).expect("JSON");
     assert_eq!(
@@ -165,7 +165,7 @@ fn install_json_records_what_to_expect_and_what_to_put_back() {
                 "path": "/usr/local/libexec/jev-pilot/jev-pilot",
                 "pin": {"cdhash": "32".repeat(20)},
             },
-            "moved_hosts": ["/Users/oliver/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.anthropic.claude_browser_extension.json"],
+            "moved_hosts": ["/Users/owner/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.anthropic.claude_browser_extension.json"],
         })
     );
     assert_eq!(
@@ -323,7 +323,7 @@ fn each_user_level_folder_maps_to_the_system_folder_its_browser_reads() {
             user.display()
         );
     }
-    let linux = user_host_dirs(Os::Linux, Path::new("/home/o"));
+    let linux = user_host_dirs(Os::Linux, Path::new("/home/owner"));
     for (user, system) in [
         ("google-chrome", CHROME_LINUX),
         ("google-chrome-beta", CHROME_LINUX),
@@ -333,14 +333,17 @@ fn each_user_level_folder_maps_to_the_system_folder_its_browser_reads() {
         ("microsoft-edge", "/etc/opt/edge/native-messaging-hosts"),
         ("BraveSoftware/Brave-Browser", CHROME_LINUX),
     ] {
-        let user = PathBuf::from(format!("/home/o/.config/{user}/NativeMessagingHosts"));
+        let user = PathBuf::from(format!("/home/owner/.config/{user}/NativeMessagingHosts"));
         assert!(
             linux.contains(&(user.clone(), PathBuf::from(system))),
             "{} -> {system}",
             user.display()
         );
     }
-    assert_eq!(user_host_dirs(Os::Windows, Path::new(r"C:\Users\o")), []);
+    assert_eq!(
+        user_host_dirs(Os::Windows, Path::new(r"C:\Users\owner")),
+        []
+    );
 }
 
 /// A user-level host other than jev-pilot's is copied to its browser's
@@ -348,8 +351,9 @@ fn each_user_level_folder_maps_to_the_system_folder_its_browser_reads() {
 /// user-level hosts does not turn it off.
 #[test]
 fn user_level_hosts_are_copied_to_system_level_once() {
-    let user =
-        PathBuf::from("/Users/o/Library/Application Support/Google/Chrome/NativeMessagingHosts");
+    let user = PathBuf::from(
+        "/Users/owner/Library/Application Support/Google/Chrome/NativeMessagingHosts",
+    );
     let found = [
         (
             user.join("com.anthropic.claude_browser_extension.json"),
@@ -449,7 +453,7 @@ fn reg_exe_is_given_fixed_argument_vectors() {
 fn the_user_level_hosts_in_the_registry_are_read_from_reg_query() {
     let output = "\r\n\
 HKEY_CURRENT_USER\\SOFTWARE\\Google\\Chrome\\NativeMessagingHosts\\com.anthropic.claude_browser_extension\r\n\
-    (Default)    REG_SZ    C:\\Users\\o\\AppData\\Roaming\\Claude\\host.json\r\n\
+    (Default)    REG_SZ    C:\\Users\\owner\\AppData\\Roaming\\Claude\\host.json\r\n\
 \r\n\
 HKEY_CURRENT_USER\\SOFTWARE\\Google\\Chrome\\NativeMessagingHosts\\dev.jevpilot.bridge\r\n\
     (Default)    REG_SZ    C:\\x.json\r\n\
@@ -460,7 +464,7 @@ HKEY_CURRENT_USER\\SOFTWARE\\Google\\Chrome\\NativeMessagingHosts\\com.example.e
         reg_hosts_in(output),
         [(
             "com.anthropic.claude_browser_extension".to_owned(),
-            PathBuf::from(r"C:\Users\o\AppData\Roaming\Claude\host.json")
+            PathBuf::from(r"C:\Users\owner\AppData\Roaming\Claude\host.json")
         )]
     );
 }
@@ -506,7 +510,7 @@ fn macos_turns_off_user_level_hosts_with_a_configuration_profile() {
 
 use jev_pilot::browser::install::{Existing, Owner, RegistryHost, Step, UserHosts, plan};
 
-const EXE: &str = "/Users/o/.jev-pilot/bin/jev-pilot";
+const EXE: &str = "/Users/owner/.jev-pilot/bin/jev-pilot";
 
 fn files_written(steps: &[Step]) -> Vec<PathBuf> {
     steps
@@ -525,12 +529,12 @@ fn files_written(steps: &[Step]) -> Vec<PathBuf> {
 fn a_protected_linux_install_plan() {
     let layout = Layout::protected(Os::Linux, &folders());
     let user =
-        PathBuf::from("/home/o/.config/google-chrome/NativeMessagingHosts/com.example.x.json");
+        PathBuf::from("/home/owner/.config/google-chrome/NativeMessagingHosts/com.example.x.json");
     let steps = plan(
         Os::Linux,
         InstallKind::Protected,
         &layout,
-        Path::new("/home/o/.jev-pilot/bin/jev-pilot"),
+        Path::new("/home/owner/.jev-pilot/bin/jev-pilot"),
         &UserHosts::Files(vec![HostCopy {
             from: user.clone(),
             to: PathBuf::from(CHROME_LINUX).join("com.example.x.json"),
@@ -548,7 +552,7 @@ fn a_protected_linux_install_plan() {
         .iter()
         .position(|s| {
             *s == Step::CopyBinary {
-                from: "/home/o/.jev-pilot/bin/jev-pilot".into(),
+                from: "/home/owner/.jev-pilot/bin/jev-pilot".into(),
                 to: binary.clone(),
             }
         })
@@ -681,7 +685,7 @@ fn a_protected_windows_install_plan() {
         Os::Windows,
         InstallKind::Protected,
         &layout,
-        Path::new(r"C:\Users\o\.jev-pilot\bin\jev-pilot.exe"),
+        Path::new(r"C:\Users\owner\.jev-pilot\bin\jev-pilot.exe"),
         &UserHosts::Registry(vec![RegistryHost {
             key: r"SOFTWARE\Google\Chrome\NativeMessagingHosts".into(),
             name: "com.example.x".into(),
@@ -735,15 +739,15 @@ fn a_protected_windows_install_plan() {
 /// registered at user level for the owner's browsers.
 #[test]
 fn a_development_install_plan() {
-    let layout = Layout::development(Os::Linux, Path::new("/home/o"), &env(&[]));
+    let layout = Layout::development(Os::Linux, Path::new("/home/owner"), &env(&[]));
     let user_dirs = vec![PathBuf::from(
-        "/home/o/.config/google-chrome/NativeMessagingHosts",
+        "/home/owner/.config/google-chrome/NativeMessagingHosts",
     )];
     let steps = plan(
         Os::Linux,
         InstallKind::Development,
         &layout,
-        Path::new("/home/o/.jev-pilot/bin/jev-pilot"),
+        Path::new("/home/owner/.jev-pilot/bin/jev-pilot"),
         &UserHosts::Register(user_dirs),
         &Existing::default(),
     );
@@ -764,11 +768,11 @@ fn a_development_install_plan() {
         }
     }
     assert!(files_written(&steps).contains(&PathBuf::from(
-        "/home/o/.config/google-chrome/NativeMessagingHosts/dev.jevpilot.bridge.json"
+        "/home/owner/.config/google-chrome/NativeMessagingHosts/dev.jevpilot.bridge.json"
     )));
     assert!(!files_written(&steps).iter().any(|p| p.starts_with("/etc")));
     assert!(steps.contains(&Step::WritePolicy {
-        path: "/home/o/.local/share/jev-pilot/dev/extension/policy.json".into(),
+        path: "/home/owner/.local/share/jev-pilot/dev/extension/policy.json".into(),
         kind: InstallKind::Development,
     }));
 }
@@ -978,7 +982,7 @@ fn a_run_that_finds_another_version_installed_says_so() {
 /// nowhere, and says so.
 #[test]
 fn a_development_install_with_no_browser_says_so() {
-    let layout = Layout::development(Os::MacOs, Path::new("/Users/o"), &env(&[]));
+    let layout = Layout::development(Os::MacOs, Path::new("/Users/owner"), &env(&[]));
     let steps = plan(
         Os::MacOs,
         InstallKind::Development,
