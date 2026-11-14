@@ -775,17 +775,22 @@ fn leaf_subject(state: HANDLE) -> Option<String> {
     String::from_utf16(&buffer).ok()
 }
 
-/// Ends a connection on a named pipe now, from any thread: the server's end
-/// (`server`) forces the client's end closed, and on either end every read
-/// or write waiting on `pipe` gives up with an error.
+/// Ends a connection on a named pipe now, from any thread: every read or
+/// write waiting on `pipe` gives up with an error, and with `disconnect`
+/// (the server's end only) the client's end is forced closed too.
+///
+/// Disconnecting throws away whatever the client has not read yet, so it
+/// is for a client that has stopped reading; one that has been sent its
+/// last words is let go of without it, and reads them before it sees the
+/// pipe close.
 ///
 /// Named pipes take no read or write timeouts, so this is how a wait on one
 /// is cut short. It cancels only what is waiting when it is called; the
 /// caller asks again until whatever it is cutting short has stopped.
 #[allow(unsafe_code)]
-pub fn hang_up_pipe(pipe: BorrowedHandle<'_>, server: bool) {
+pub fn hang_up_pipe(pipe: BorrowedHandle<'_>, disconnect: bool) {
     let raw = pipe.as_raw_handle();
-    if server {
+    if disconnect {
         // SAFETY: `raw` is a pipe handle borrowed for this call. A pipe
         // already disconnected says so, which is no matter here.
         unsafe { DisconnectNamedPipe(raw) };

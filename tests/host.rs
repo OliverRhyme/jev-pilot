@@ -843,6 +843,25 @@ mod run_side {
         });
     }
 
+    /// A run that lets go is seen to close by the host, its reader and all.
+    #[test]
+    fn a_run_that_lets_go_is_seen_to_close() {
+        super::bounded("a_run_that_lets_go_is_seen_to_close", || {
+            let place = place();
+            let listener = listen(&place);
+            let host = std::thread::spawn(move || {
+                let mut run = listener.accept().expect("accepts");
+                let mut heard = Vec::new();
+                let _ = run.read_to_end(&mut heard);
+                heard
+            });
+            let stream = Stream::connect(place.name().expect("a name")).expect("connects");
+            let (run, _pacer) = RunStream::new(stream);
+            drop(run);
+            assert_eq!(host.join().expect("the host thread"), Vec::<u8>::new());
+        });
+    }
+
     /// Facts that pass against `expected`, whatever the stream.
     pub(crate) struct Vouched;
 
@@ -939,8 +958,10 @@ mod run_side {
         super::bounded("a_run_sends_nothing_to_a_host_that_fails_its_check", || {
             let place = place();
             let listener = listen(&place);
+            let (accepted, took) = std::sync::mpsc::channel();
             let squatter = std::thread::spawn(move || {
                 let mut run = listener.accept().expect("accepts");
+                let _ = accepted.send(());
                 let mut heard = Vec::new();
                 let _ = run.read_to_end(&mut heard);
                 heard
@@ -952,6 +973,12 @@ mod run_side {
                 "something other than the installed jev-pilot answered on the bridge (process id: \
              not reported by the OS); nothing was sent"
             );
+            // A Windows pipe skips a client gone before it was accepted, so
+            // the squatter may still be waiting: a second client, kept until
+            // it is taken, lets it finish, having heard nothing either way.
+            let nudge = Stream::connect(place.name().expect("a name")).expect("connects");
+            took.recv().expect("the squatter took a connection");
+            drop(nudge);
             assert_eq!(
                 squatter.join().expect("the squatter thread"),
                 Vec::<u8>::new()
@@ -1285,6 +1312,52 @@ mod serving {
         });
     }
 
+    /// Nor one without the lock or the count of skipped starts the install
+    /// makes beside the log: each is named, as the log is.
+    #[test]
+    fn a_host_without_its_audit_lock_or_count_does_not_serve() {
+        super::bounded(
+            "a_host_without_its_audit_lock_or_count_does_not_serve",
+            || {
+                for missing in ["audit.lock", "audit.skipped"] {
+                    let place = place();
+                    let (stdin, _writer) = std::io::pipe().unwrap();
+                    let audit = std::env::temp_dir().join(format!(
+                        "jev-pilot-without-{missing}-{}",
+                        std::process::id()
+                    ));
+                    let _ = std::fs::remove_dir_all(&audit);
+                    super::audit_files(&audit);
+                    std::fs::remove_file(audit.join(missing)).unwrap();
+                    let config = Serve {
+                        place: place.clone(),
+                        expected: expected(),
+                        check: Arc::new(Vouched),
+                        audit_dir: audit.clone(),
+                        version: "0.4.0".into(),
+                        extension_on_disk: None,
+                        installed_version: Box::new(|| None),
+                        diagnostics: None,
+                        echo_wait: Duration::from_millis(300),
+                    };
+                    let error = serve(config, stdin, Out::default()).expect_err("refused");
+                    assert_eq!(
+                        error.to_string(),
+                        format!(
+                            "the audit log {} is missing: run the install again",
+                            audit.join(missing).display()
+                        )
+                    );
+                    assert!(
+                        Stream::connect(place.name().unwrap()).is_err(),
+                        "nothing listens"
+                    );
+                    let _ = std::fs::remove_dir_all(&audit);
+                }
+            },
+        );
+    }
+
     /// A run that stops reading does not hold the host up: after a while
     /// it is taken as gone, and the host still leaves with Chrome.
     #[test]
@@ -1615,6 +1688,10 @@ fn audit_files(dir: &std::path::Path) {
 /// The owner may read the audit log, and so may lock it: the host locks a
 /// file of its own instead, which the owner cannot open, so an owner who
 /// holds the log locked does not stall the host.
+///
+/// Not on Windows, which has no setgid: there the audit log is the owner's
+/// to write anyway, and a lock on a file there is binding on writes.
+#[cfg(unix)]
 #[test]
 fn a_lock_held_on_the_audit_log_does_not_stall_the_host() {
     use jev_pilot::browser::host::append_audit;
@@ -1634,6 +1711,53 @@ fn a_lock_held_on_the_audit_log_does_not_stall_the_host() {
         "written while the log is locked"
     );
     drop(held);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A host that holds the lock and never lets go (one stopped by a signal,
+/// say) does not stall the others: after about two seconds they write
+/// anyway, without rotating, and say the lock was not taken.
+#[test]
+fn a_lock_never_let_go_does_not_stall_the_host() {
+    use jev_pilot::browser::host::{append_audit, audit_host_start};
+    let dir = std::env::temp_dir().join(format!("jev-pilot-stuck-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    audit_files(&dir);
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join("audit.lock"))
+        .unwrap();
+    held.lock().unwrap();
+    let (done, finished) = std::sync::mpsc::channel();
+    let at = dir.clone();
+    std::thread::spawn(move || {
+        let appended = append_audit(&at, "{\"event\":\"x\"}\n", 1000).is_ok();
+        let started = Audit::HostStarted {
+            parent_pid: Some(7),
+            parent_exe: None,
+            refused: None,
+        };
+        let audited = audit_host_start(&at, &started, std::time::SystemTime::now()).is_ok();
+        let _ = done.send(appended && audited);
+    });
+    assert_eq!(
+        finished.recv_timeout(std::time::Duration::from_secs(10)),
+        Ok(true),
+        "written while the lock is held"
+    );
+    drop(held);
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(dir.join("audit.log"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["event"], "x");
+    assert_eq!(lines[1]["event"], "host_started");
+    for line in &lines {
+        assert_eq!(line["lock"], "not taken", "{line}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

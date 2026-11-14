@@ -95,16 +95,7 @@ pub fn serve(
     stdin: impl Read + Send + 'static,
     mut stdout: impl Write,
 ) -> io::Result<()> {
-    let log = config.audit_dir.join("audit.log");
-    if !log.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "the audit log {} is missing: run the install again",
-                log.display()
-            ),
-        ));
-    }
+    audit_files_there(&config.audit_dir)?;
     if another_serves(&config) {
         send_to_chrome(&mut stdout, &Message::Elsewhere)?;
         return Ok(());
@@ -163,7 +154,7 @@ pub fn serve(
                     }
                     Output::Close { run } => {
                         if let Some(stream) = runs.remove(&run) {
-                            hang_up(&stream);
+                            let_go(&stream);
                         }
                     }
                     Output::Audit(audit) => {
@@ -190,7 +181,7 @@ pub fn serve(
     }
     stop.store(true, Ordering::SeqCst);
     for stream in runs.values() {
-        hang_up(stream);
+        let_go(stream);
     }
     // Wake the accepting thread, so it sees the stop and lets go of the
     // listener.
@@ -199,6 +190,24 @@ pub fn serve(
     }
     if let Place::Socket(path) = &config.place {
         let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+/// Whether the audit log's files are in `dir`: the install makes them, and
+/// the host never does.
+fn audit_files_there(dir: &Path) -> io::Result<()> {
+    for name in ["audit.log", "audit.lock", "audit.skipped"] {
+        let file = dir.join(name);
+        if !file.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "the audit log {} is missing: run the install again",
+                    file.display()
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -474,10 +483,17 @@ fn send_watched(watch: &SendWatch, stream: &Arc<Stream>, message: &Message) -> b
     sent.is_ok()
 }
 
-/// End a connection now, so its reader sees it close, and a write waiting
-/// on it gives up.
+/// End a connection to a run that has stopped reading, now: its reader
+/// sees it close, a write waiting on it gives up, and what the run has not
+/// read is lost.
 fn hang_up(stream: &Stream) {
     super::channel::hang_up(stream, true);
+}
+
+/// End a connection to a run that has been sent its last words, so its
+/// reader sees it close and the run still reads them.
+fn let_go(stream: &Stream) {
+    super::channel::hang_up(stream, false);
 }
 
 /// Cuts a write to a run short when it has waited too long: one thread,
@@ -618,18 +634,55 @@ impl EchoTimer {
 /// # Errors
 /// When a file is missing or cannot be written.
 pub fn append_audit(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
-    let _lock = lock_audit(dir)?;
-    append_locked(dir, line, limit)
+    match lock_audit(dir)? {
+        Some(_lock) => append_locked(dir, line, limit),
+        None => append_unlocked(dir, line),
+    }
 }
 
-/// The hosts' lock on `dir`'s audit log, let go when the file closes.
-fn lock_audit(dir: &Path) -> io::Result<File> {
+/// How long a host tries for the lock before it writes without it.
+const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// The hosts' lock on `dir`'s audit log, let go when the file closes, or
+/// `None` when another host has held it for [`LOCK_WAIT`]: one stopped by a
+/// signal may hold it for ever, and must not stall the others.
+fn lock_audit(dir: &Path) -> io::Result<Option<File>> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
         .open(dir.join("audit.lock"))?;
-    lock.lock()?;
-    Ok(lock)
+    let started = std::time::Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(Some(lock)),
+            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < LOCK_WAIT => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
+}
+
+/// Append `line` without the lock: never rotating, since another host may
+/// be, and saying in the line that the lock was not taken.
+fn append_unlocked(dir: &Path, line: &str) -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).open(dir.join("audit.log"))?;
+    file.seek(io::SeekFrom::End(0))?;
+    file.write_all(unlocked(line).as_bytes())
+}
+
+/// `line`, an event in JSON, marked as written without the lock.
+fn unlocked(line: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(serde_json::Value::Object(mut event)) => {
+            event.insert("lock".into(), "not taken".into());
+            let mut line = serde_json::Value::Object(event).to_string();
+            line.push('\n');
+            line
+        }
+        _ => line.to_owned(),
+    }
 }
 
 /// Append `line`, rotating first when full, under the lock.
@@ -661,7 +714,10 @@ fn append_locked(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
 /// # Errors
 /// When a file is missing or cannot be written.
 pub fn audit_host_start(dir: &Path, started: &Audit, now: SystemTime) -> io::Result<()> {
-    let _lock = lock_audit(dir)?;
+    // Without the lock, the count cannot be kept: the start is written.
+    let Some(_lock) = lock_audit(dir)? else {
+        return append_unlocked(dir, &started.line(&utc(now)));
+    };
     let mut skipped = OpenOptions::new()
         .read(true)
         .write(true)

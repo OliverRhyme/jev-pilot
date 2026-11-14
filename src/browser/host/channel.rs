@@ -216,22 +216,27 @@ const HANDSHAKE_WAIT: Duration = Duration::from_secs(10);
 
 /// End a connection now, from any thread, so that a read or write waiting
 /// on it gives up: the socket is shut down, or on Windows, where a named
-/// pipe takes no timeouts, the host's end (`server`) forces the run's
-/// closed and every wait on the pipe is cancelled.
+/// pipe takes no timeouts, every wait on the pipe is cancelled.
+///
+/// With `discard_unread`, the host's end of a pipe also forces the run's
+/// closed, throwing away what the run has not read: for a run that has
+/// stopped reading. A run sent its last words (refused, ended) is hung up
+/// on without it, and reads them before it sees the close; a socket keeps
+/// them for the run either way.
 ///
 /// This, not a socket timeout, is what cuts a wait short on every system.
-pub fn hang_up(stream: &Stream, server: bool) {
+pub fn hang_up(stream: &Stream, discard_unread: bool) {
     #[cfg(unix)]
     {
         let Stream::UdSocket(socket) = stream;
         let _ = socket.inner().shutdown(std::net::Shutdown::Both);
-        let _ = server;
+        let _ = discard_unread;
     }
     #[cfg(windows)]
     {
         use std::os::windows::io::AsHandle as _;
         let Stream::NamedPipe(pipe) = stream;
-        jev_pilot_os::hang_up_pipe(pipe.as_handle(), server);
+        jev_pilot_os::hang_up_pipe(pipe.as_handle(), discard_unread);
     }
 }
 
@@ -408,24 +413,34 @@ impl Read for RunStream {
 impl Drop for RunStream {
     /// Let go of the channel, and stop the reader: a pipe's wait is
     /// cancelled only while it waits, so the run asks until the reader has
-    /// gone.
+    /// gone, and the pipe is let go of with it. A reader still there after
+    /// a second is left to a thread that keeps asking, rather than to hold
+    /// the pipe for good.
     fn drop(&mut self) {
         self.closing.store(true, Ordering::SeqCst);
         let Some(reader) = self.reader.take() else {
             return;
         };
+        // Frames still coming are not wanted: a reader waiting to hand one
+        // over gives up.
+        let (_, nothing) = mpsc::sync_channel(0);
+        drop(std::mem::replace(&mut self.frames, nothing));
         for _ in 0..200 {
             hang_up(&self.stream, false);
-            // Frames still coming are not wanted.
-            while self.frames.try_recv().is_ok() {}
             if reader.is_finished() {
-                break;
+                let _ = reader.join();
+                return;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        if reader.is_finished() {
+        let stream = self.stream.clone();
+        std::thread::spawn(move || {
+            while !reader.is_finished() {
+                hang_up(&stream, false);
+                std::thread::sleep(Duration::from_millis(50));
+            }
             let _ = reader.join();
-        }
+        });
     }
 }
 
