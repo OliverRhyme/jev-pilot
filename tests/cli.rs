@@ -834,3 +834,13 @@ fn chrome_starts_the_host_with_the_extensions_origin() {
         format!("jev-pilot serves only its own extension, not {other}")
     );
 }
+
+/// Ctrl-C in a run on the owner's Chrome lets go of it and closes nothing,
+/// and says so.
+#[test]
+fn ctrl_c_on_the_owners_chrome_says_it_let_go() {
+    assert_eq!(
+        jev_pilot::cli::LET_GO,
+        "interrupted: let go of Chrome, and closed nothing"
+    );
+}

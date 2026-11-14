@@ -1464,3 +1464,29 @@ fn a_protected_install_says_chrome_will_be_managed_before_it_starts() {
          Your own hosts are copied to system level first, so they keep working."
     );
 }
+
+/// A run through a development install says so in its header.
+#[test]
+fn a_run_through_a_development_install_says_so_in_its_header() {
+    use jev_pilot::browser::install::run_header;
+    assert_eq!(
+        run_header(InstallKind::Development).as_deref(),
+        Some("bridge : development install: not protected against other programs running as you")
+    );
+    assert_eq!(run_header(InstallKind::Protected), None);
+}
+
+/// A run started from a copy other than the installed one says when the
+/// versions differ, and goes on with the installed copy.
+#[test]
+fn a_run_handed_to_an_installed_copy_of_another_version_says_so() {
+    use jev_pilot::browser::install::handing_over;
+    assert_eq!(
+        handing_over("0.5.0", "0.4.0").as_deref(),
+        Some(
+            "jev-pilot: this jev-pilot is 0.5.0, the installed one is 0.4.0: run the install \
+             again; the run goes on with the installed copy"
+        )
+    );
+    assert_eq!(handing_over("0.4.0", "0.4.0"), None);
+}

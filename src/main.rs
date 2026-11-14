@@ -686,7 +686,7 @@ mod web {
                         );
                     }
                     Some(Interrupted::Attached) => {
-                        eprintln!("\ninterrupted: let go of Chrome, and closed nothing");
+                        eprintln!("\n{}", jev_pilot::cli::LET_GO);
                     }
                     None => {}
                 }
@@ -994,8 +994,8 @@ mod web {
                     "Chrome, through the jev-pilot extension".to_owned(),
             }
         );
-        if let Some(label) = super::bridge::development_label(target) {
-            println!("bridge : {label}");
+        if let Some(header) = super::bridge::development_header(target) {
+            println!("{header}");
         }
         if let Some(tab) = session.describe_tab() {
             println!("tab    : {tab}");
@@ -1137,9 +1137,9 @@ mod bridge {
             return Ok(());
         }
         if let Some(differs) =
-            install::version_differs(env!("CARGO_PKG_VERSION"), &found.record.version)
+            install::handing_over(env!("CARGO_PKG_VERSION"), &found.record.version)
         {
-            eprintln!("jev-pilot: {differs}; going on with the installed copy");
+            eprintln!("{differs}");
         }
         let mut command = std::process::Command::new(installed);
         command.args(std::env::args_os().skip(1));
@@ -1156,10 +1156,11 @@ mod bridge {
     }
 
     /// The label a development install carries in a run's header.
-    pub fn development_label(target: &BrowserTarget) -> Option<&'static str> {
-        let through = matches!(target.mode, BrowserMode::Extension { .. });
-        (through && installed().is_ok_and(|f| f.record.kind == InstallKind::Development))
-            .then_some(UNPROTECTED)
+    pub fn development_header(target: &BrowserTarget) -> Option<String> {
+        if !matches!(target.mode, BrowserMode::Extension { .. }) {
+            return None;
+        }
+        install::run_header(installed().ok()?.record.kind)
     }
 
     /// Where the channel is on this system.
@@ -1644,7 +1645,7 @@ mod bridge {
     }
 
     #[cfg(feature = "browser")]
-    pub fn development_label(_: &jev_pilot::cli::BrowserTarget) -> Option<&'static str> {
+    pub fn development_header(_: &jev_pilot::cli::BrowserTarget) -> Option<String> {
         None
     }
 }

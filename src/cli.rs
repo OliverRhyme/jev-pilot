@@ -119,6 +119,10 @@ pub enum OwnerTabs {
     Never,
 }
 
+/// What Ctrl-C says in a run on the owner's own Chrome, through the
+/// extension or attached: it lets go of every tab and closes nothing.
+pub const LET_GO: &str = "interrupted: let go of Chrome, and closed nothing";
+
 /// How many steps a run takes before giving up, unless told otherwise.
 pub const DEFAULT_STEPS: u32 = 15;
 

@@ -1798,6 +1798,21 @@ pub const PROFILE_NOT_APPROVED: &str = "Chrome still accepts user-level native h
 /// What is said when Chrome's policy has gone, on Linux or Windows.
 pub const POLICY_MISSING: &str = "Chrome's policy for jev-pilot is missing: run the install again";
 
+/// The line a run's header carries for an install of `kind`: a
+/// development install says it is not protected.
+#[must_use]
+pub fn run_header(kind: InstallKind) -> Option<String> {
+    (kind == InstallKind::Development).then(|| format!("bridge : {UNPROTECTED}"))
+}
+
+/// What a run started from another copy says as it hands over to the
+/// installed one, when their versions differ.
+#[must_use]
+pub fn handing_over(this: &str, installed: &str) -> Option<String> {
+    version_differs(this, installed)
+        .map(|differs| format!("jev-pilot: {differs}; the run goes on with the installed copy"))
+}
+
 /// What is said when this binary and the installed one differ.
 #[must_use]
 pub fn version_differs(this: &str, installed: &str) -> Option<String> {
