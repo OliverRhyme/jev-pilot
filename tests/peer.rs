@@ -572,3 +572,204 @@ fn a_digest_reads_hex_in_either_case_and_writes_lowercase() {
     assert!("ab".repeat(31).parse::<Sha256Digest>().is_err());
     assert!("zz".repeat(32).parse::<Sha256Digest>().is_err());
 }
+
+// ---- gathering facts about this test process, over a channel to itself ----
+
+mod gather {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
+    use jev_pilot::peer::{Expected, Native, PeerCheck, Verdict, decide, recheck};
+
+    /// A connected pair of this process's own: (the listener's end, the
+    /// connecting end).
+    fn pair() -> (Stream, Stream) {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let unique = format!("jev-pilot-peer-{}-{n}", std::process::id());
+
+        #[cfg(unix)]
+        let path = std::env::temp_dir().join(format!("{unique}.sock"));
+        #[cfg(unix)]
+        let name = || {
+            use interprocess::local_socket::GenericFilePath;
+            path.as_path().to_fs_name::<GenericFilePath>().unwrap()
+        };
+        #[cfg(windows)]
+        let name = || {
+            use interprocess::local_socket::GenericNamespaced;
+            unique.as_str().to_ns_name::<GenericNamespaced>().unwrap()
+        };
+
+        let listener = ListenerOptions::new().name(name()).create_sync().unwrap();
+        let client = Stream::connect(name()).unwrap();
+        let server = listener.accept().unwrap();
+        (server, client)
+    }
+
+    fn own_pid() -> u32 {
+        std::process::id()
+    }
+
+    fn own_exe() -> std::path::PathBuf {
+        std::env::current_exe().unwrap().canonicalize().unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn own_cdhash() -> String {
+        let out = std::process::Command::new("codesign")
+            .args(["-d", "-vvv"])
+            .arg(own_exe())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stderr);
+        text.lines()
+            .find_map(|line| line.strip_prefix("CDHash="))
+            .unwrap_or_else(|| panic!("no CDHash in: {text}"))
+            .to_owned()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mac_expected(requirement: String) -> Expected {
+        Expected::Macos {
+            uid: rustix::process::geteuid().as_raw(),
+            path: own_exe(),
+            requirement,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_gathers_this_process_from_either_end() {
+        let (server, client) = pair();
+        let expected = mac_expected(format!(r#"cdhash H"{}""#, own_cdhash()));
+        for end in [&server, &client] {
+            let facts = Native.facts(end, &expected);
+            assert_eq!(facts.uid, Some(rustix::process::geteuid().as_raw()));
+            assert_eq!(facts.pid, Some(own_pid()));
+            assert!(facts.token.is_some());
+            assert_eq!(decide(&facts, &expected), Verdict::Accept, "{facts:?}");
+            let again = Native.facts(end, &expected);
+            assert_eq!(recheck(&facts, &again, &expected), Verdict::Accept);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_refuses_this_process_against_another_cdhash() {
+        use jev_pilot::peer::{Check, Reason};
+        let (server, _client) = pair();
+        let expected = mac_expected(format!(r#"cdhash H"{}""#, "0".repeat(40)));
+        let facts = Native.facts(&server, &expected);
+        assert_eq!(
+            decide(&facts, &expected),
+            Verdict::refuse(Check::Requirement, Reason::Mismatch)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_gathers_this_process_from_either_end() {
+        use jev_pilot::peer::LinuxPin;
+        let (server, client) = pair();
+        let uid = rustix::process::geteuid().as_raw();
+        let egid = rustix::process::getegid().as_raw();
+        let expected = Expected::Linux {
+            uid,
+            path: own_exe(),
+            pin: LinuxPin::Group(egid),
+        };
+        for end in [&server, &client] {
+            let facts = Native.facts(end, &expected);
+            assert_eq!(facts.uid, Some(uid));
+            assert_eq!(facts.egid, Some(egid));
+            assert_eq!(facts.pid, Some(own_pid()));
+            assert_eq!(decide(&facts, &expected), Verdict::Accept, "{facts:?}");
+            let again = Native.facts(end, &expected);
+            assert_eq!(recheck(&facts, &again, &expected), Verdict::Accept);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_hashes_a_development_peers_executable() {
+        use jev_pilot::peer::{LinuxPin, Sha256Digest};
+        use sha2::{Digest, Sha256};
+        let (server, _client) = pair();
+        let hash: [u8; 32] = Sha256::digest(std::fs::read(own_exe()).unwrap()).into();
+        let expected = Expected::Linux {
+            uid: rustix::process::geteuid().as_raw(),
+            path: own_exe(),
+            pin: LinuxPin::DevelopmentSha256(Sha256Digest::from_bytes(hash)),
+        };
+        let facts = Native.facts(&server, &expected);
+        assert_eq!(facts.path, Some(own_exe()));
+        assert_eq!(decide(&facts, &expected), Verdict::Accept, "{facts:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_development_process_can_make_itself_not_dumpable() {
+        use rustix::process::{DumpableBehavior, dumpable_behavior};
+        const CHILD: &str = "JEV_PILOT_PEER_TEST_NOT_DUMPABLE";
+        // It changes the whole process, so it runs in a child of its own.
+        if std::env::var_os(CHILD).is_some() {
+            jev_pilot::peer::set_not_dumpable().unwrap();
+            assert_eq!(dumpable_behavior().unwrap(), DumpableBehavior::NotDumpable);
+            return;
+        }
+        assert_eq!(dumpable_behavior().unwrap(), DumpableBehavior::Dumpable);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "gather::a_development_process_can_make_itself_not_dumpable",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_gathers_this_process_from_either_end() {
+        use jev_pilot::peer::{Sha256Digest, WindowsPin, own_session, own_sid};
+        use sha2::{Digest, Sha256};
+        let (server, client) = pair();
+        let hash: [u8; 32] = Sha256::digest(std::fs::read(own_exe()).unwrap()).into();
+        let expected = Expected::Windows {
+            sid: own_sid().unwrap(),
+            path: std::env::current_exe().unwrap(),
+            pin: WindowsPin::Sha256(Sha256Digest::from_bytes(hash)),
+            session: None,
+        }
+        .with_session(Some(own_session().unwrap()));
+        for end in [&server, &client] {
+            let facts = Native.facts(end, &expected);
+            assert_eq!(facts.pid, Some(own_pid()));
+            assert_eq!(decide(&facts, &expected), Verdict::Accept, "{facts:?}");
+            let again = Native.facts(end, &expected);
+            assert_eq!(recheck(&facts, &again, &expected), Verdict::Accept);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_finds_no_signer_on_an_unsigned_image() {
+        use jev_pilot::peer::{Check, Reason, WindowsPin, own_session, own_sid};
+        let (server, _client) = pair();
+        let expected = Expected::Windows {
+            sid: own_sid().unwrap(),
+            path: std::env::current_exe().unwrap(),
+            pin: WindowsPin::Signer("CN=Anyone".to_owned()),
+            session: None,
+        }
+        .with_session(Some(own_session().unwrap()));
+        let facts = Native.facts(&server, &expected);
+        assert_eq!(facts.code, None);
+        assert_eq!(
+            decide(&facts, &expected),
+            Verdict::refuse(Check::Signer, Reason::Missing)
+        );
+    }
+}

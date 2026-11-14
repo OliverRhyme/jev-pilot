@@ -18,6 +18,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
     "Win32_Security_WinTrust",
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
@@ -33,5 +35,4 @@ unsafe_op_in_unsafe_fn = "deny"
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 undocumented_unsafe_blocks = "deny"
-multiple_unsafe_ops_per_block = "deny"
 doc_markdown = "allow"

@@ -21,7 +21,113 @@ use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(windows)]
+mod windows;
+
+use interprocess::local_socket::Stream;
 use serde::{Deserialize, Serialize};
+
+/// Asks the OS about the program at the other end of a connected channel.
+///
+/// It works in either direction: the host asks about the run that
+/// connected, and the run asks about the host it connected to, which is what
+/// defeats a program that took the socket's path or the pipe's name first.
+pub trait PeerCheck {
+    /// What the OS reports about the peer of `stream`. `expected` says which
+    /// code identity to ask for: the requirement to check on macOS, or
+    /// whether to hash the image or read its signer.
+    fn facts(&self, stream: &Stream, expected: &Expected) -> Facts;
+
+    /// Gathers the facts and [`decide`]s on them.
+    fn check(&self, stream: &Stream, expected: &Expected) -> Verdict {
+        decide(&self.facts(stream, expected), expected)
+    }
+}
+
+/// The [`PeerCheck`] of the OS this was built for.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Native;
+
+impl PeerCheck for Native {
+    fn facts(&self, stream: &Stream, expected: &Expected) -> Facts {
+        #[cfg(target_os = "macos")]
+        return macos::facts(stream, expected);
+        #[cfg(target_os = "linux")]
+        return linux::facts(stream, expected);
+        #[cfg(windows)]
+        return windows::facts(stream, expected);
+        // An OS this module has no rules for reports nothing, so every check
+        // refuses.
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        {
+            let _ = (stream, expected);
+            Facts::default()
+        }
+    }
+}
+
+/// Makes this process not dumpable (`PR_SET_DUMPABLE` 0), so another program
+/// running as the same user can neither ptrace it nor read its memory or
+/// open its executable through `/proc`.
+///
+/// A setgid install is not dumpable from exec; a development install calls
+/// this first thing in `main`, which leaves a short window after exec. Note
+/// the consequence for the other end: the same user then cannot open this
+/// process's `/proc/<pid>/exe` either, so a development install that calls
+/// this cannot have its executable hashed by its peer.
+///
+/// # Errors
+///
+/// When the kernel refuses the `prctl`.
+#[cfg(target_os = "linux")]
+#[cfg_attr(docsrs, doc(cfg(target_os = "linux")))]
+pub fn set_not_dumpable() -> std::io::Result<()> {
+    linux::set_not_dumpable()
+}
+
+/// The string form of the SID of the user this process runs as: what a
+/// Windows install pins, and what its pipe's security descriptor names.
+///
+/// # Errors
+///
+/// When this process's token cannot be read.
+#[cfg(windows)]
+#[cfg_attr(docsrs, doc(cfg(windows)))]
+pub fn own_sid() -> std::io::Result<String> {
+    jev_pilot_os::current_user_sid()
+}
+
+/// The logon session this process runs in, which a Windows peer must share:
+/// see [`Expected::with_session`].
+///
+/// # Errors
+///
+/// When Windows cannot report it.
+#[cfg(windows)]
+#[cfg_attr(docsrs, doc(cfg(windows)))]
+pub fn own_session() -> std::io::Result<u32> {
+    jev_pilot_os::current_session()
+}
+
+/// The SHA-256 of everything `file` holds from where it is.
+#[cfg(any(target_os = "linux", windows))]
+fn sha256_file(mut file: std::fs::File) -> std::io::Result<Sha256Digest> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buffer)? {
+            0 => break,
+            n => hasher.update(&buffer[..n]),
+        }
+    }
+    Ok(Sha256Digest(hasher.finalize().into()))
+}
 
 /// What the OS reported about the program at the other end of a channel.
 ///
