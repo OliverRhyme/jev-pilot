@@ -547,6 +547,16 @@ folder, and prints what it changed. Native messaging hosts you already had at
 user level (Claude in Chrome's, for example) are copied to system level first,
 so they keep working, and `uninstall` puts them back.
 
+The host is registered with each of those browsers, but it serves only a
+browser it can identify as the one that started it (see
+[How the bridge is protected](#how-the-bridge-is-protected)):
+
+| | Served |
+| --- | --- |
+| macOS | Google Chrome, any channel, and Chrome for Testing. Not Chromium, Edge or Brave. |
+| Linux | Google Chrome, any channel, from `/opt/google/`; Chromium from `/usr/lib/chromium/` or `/usr/lib/chromium-browser/`; Edge from `/opt/microsoft/msedge/`; Brave from `/opt/brave.com/brave/`. Not a Snap or Flatpak browser. |
+| Windows | Google Chrome, signed by Google, under Program Files. Not Edge or Brave. |
+
 | | macOS | Linux | Windows |
 | --- | --- | --- | --- |
 | jev-pilot (also the host) | `/usr/local/libexec/jev-pilot/jev-pilot`, setgid `jev-pilot`, re-signed with the hardened runtime | `/usr/local/libexec/jev-pilot/jev-pilot`, setgid `jev-pilot` | `%ProgramFiles%\jev-pilot\jev-pilot.exe` |
@@ -664,6 +674,15 @@ bridge is built so that only the installed jev-pilot can use it. Five layers:
 4. **Per-run limits.** The policy above, enforced by the extension.
 5. **The audit log, and what you see.** Every run is written down, and every
    run raises a notification, Chrome's debugging bar and the tab group.
+
+The host also checks the program that started it, and serves nothing unless
+that is a browser. On macOS the check is Chrome's own code signature (Google's
+Developer ID, Chrome for Testing included). On Linux it is a known browser
+install, root-owned under folders only root can change, read through /proc. On
+Windows it is System32's cmd.exe, started by a browser under Program Files
+signed by Google. Each start is written to the audit log with the parent and the
+verdict. Without this, a program running as you could start the genuine host on
+pipes of its own and pose as the extension.
 
 The two refusals mean different things. "something other than the installed
 jev-pilot answered on the bridge (…); nothing was sent" is the run refusing the
