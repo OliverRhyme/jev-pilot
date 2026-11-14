@@ -295,9 +295,13 @@ impl<W: Wire> CdpEngine<W> {
     /// session.
     pub fn open(wire: W, url: &str) -> Result<Self, EngineError> {
         let mut connection = Connection::new(wire);
+        // Made blank and then sent to its address, so its load is waited for
+        // as any navigation's is. Created straight at the address, the tab
+        // was read before it had committed its navigation: no address, and
+        // no rows.
         let created = connection.call(
             "Target.createTarget",
-            json!({"url": url}),
+            json!({"url": "about:blank"}),
             None,
             Timeouts::default().call,
         )?;
@@ -307,7 +311,9 @@ impl<W: Wire> CdpEngine<W> {
             .unwrap_or_default()
             .to_owned();
         let wire = connection.into_wire();
-        Self::attach(wire, &TabKey::new(target), true)
+        let mut engine = Self::attach(wire, &TabKey::new(target), true)?;
+        engine.perform(&BrowserCommand::Navigate(url.into()))?;
+        Ok(engine)
     }
 
     /// The wire underneath.

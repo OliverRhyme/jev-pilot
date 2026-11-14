@@ -1294,6 +1294,55 @@ fn navigate_loads_the_address_and_reports_where_it_went() {
     );
 }
 
+/// A tab opened for the run is made blank and then sent to its address the
+/// way `navigate` sends one, so nothing is read until the page has loaded.
+/// Created straight at its address, the tab was read before it had committed
+/// its navigation: no address and no rows, on GitHub in attach mode.
+#[test]
+fn an_opened_tab_is_read_only_after_its_page_has_loaded() {
+    let script = Script::new();
+    script.on("Target.createTarget", json!({"targetId": signup::TARGET}));
+    script_attach(&script);
+    script.answer(
+        "Page.navigate",
+        Answer::EventsThen(
+            vec![json!({"method": "Page.frameNavigated", "params": {"frame": {"id": signup::MAIN_FRAME, "loaderId": "L2", "url": "https://example.test/signup"}}, "sessionId": SESSION})],
+            Box::new(Answer::ThenEvents(
+                Box::new(Answer::Result(json!({"frameId": signup::MAIN_FRAME, "loaderId": "L2"}))),
+                vec![json!({"method": "Page.loadEventFired", "params": {"timestamp": 1.0}, "sessionId": SESSION})],
+            )),
+        ),
+    );
+    script.on(
+        "Page.createIsolatedWorld",
+        json!({"executionContextId": 42}),
+    );
+    script_settle(&script, 0);
+    script_read(&script);
+
+    let mut engine = CdpEngine::open(script.clone(), "https://example.test/signup").expect("opens");
+    engine.read().expect("reads");
+
+    assert_eq!(
+        script.params_of("Target.createTarget"),
+        [json!({"url": "about:blank"})]
+    );
+    assert_eq!(
+        script.params_of("Page.navigate"),
+        [json!({"url": "https://example.test/signup"})]
+    );
+    let order = script.order();
+    let loaded = order
+        .iter()
+        .position(|e| e == "received Page.loadEventFired")
+        .expect("the load is seen");
+    let first_read = order
+        .iter()
+        .position(|e| e == "sent Accessibility.getFullAXTree")
+        .expect("the page is read");
+    assert!(loaded < first_read, "read before its load: {order:?}");
+}
+
 /// A tab opened by an owned tab is owned too, and can then be switched to:
 /// activated, attached with Page enabled, and driven from then on.
 #[test]
