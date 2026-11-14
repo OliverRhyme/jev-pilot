@@ -284,17 +284,13 @@ use jev_pilot::browser::install::{
 const CHROME_MAC: &str = "/Library/Google/Chrome/NativeMessagingHosts";
 const CHROME_LINUX: &str = "/etc/opt/chrome/native-messaging-hosts";
 
-/// Chrome's channels share one system folder, and Brave reads Chrome's.
+/// The host is registered only for the browsers it serves: on Linux each
+/// known install, whose channels share a folder (and Brave reads Chrome's);
+/// on macOS and Windows Chrome alone, which is all the host's check of its
+/// parent accepts there.
 #[test]
-fn the_host_is_registered_in_each_browser_familys_system_folder() {
-    assert_eq!(
-        system_host_dirs(Os::MacOs),
-        [
-            PathBuf::from(CHROME_MAC),
-            "/Library/Application Support/Chromium/NativeMessagingHosts".into(),
-            "/Library/Microsoft/Edge/NativeMessagingHosts".into(),
-        ]
-    );
+fn the_host_is_registered_for_the_browsers_it_serves() {
+    assert_eq!(system_host_dirs(Os::MacOs), [PathBuf::from(CHROME_MAC)]);
     assert_eq!(
         system_host_dirs(Os::Linux),
         [
@@ -311,21 +307,14 @@ fn the_host_is_registered_in_each_browser_familys_system_folder() {
 /// turned off.
 #[test]
 fn each_user_level_folder_maps_to_the_system_folder_its_browser_reads() {
-    let mac = user_host_dirs(Os::MacOs, Path::new("/Users/o"));
-    let support = "/Users/o/Library/Application Support";
+    let mac = user_host_dirs(Os::MacOs, Path::new("/Users/owner"));
+    let support = "/Users/owner/Library/Application Support";
+    assert_eq!(mac.len(), 4, "Chrome's channels alone: {mac:?}");
     for (user, system) in [
         ("Google/Chrome", CHROME_MAC),
         ("Google/Chrome Beta", CHROME_MAC),
         ("Google/Chrome Dev", CHROME_MAC),
         ("Google/Chrome Canary", CHROME_MAC),
-        (
-            "Chromium",
-            "/Library/Application Support/Chromium/NativeMessagingHosts",
-        ),
-        (
-            "Microsoft Edge",
-            "/Library/Microsoft/Edge/NativeMessagingHosts",
-        ),
     ] {
         let user = PathBuf::from(format!("{support}/{user}/NativeMessagingHosts"));
         assert!(
@@ -386,25 +375,15 @@ fn user_level_hosts_are_copied_to_system_level_once() {
     );
 }
 
+/// On Windows the host serves Chrome alone: it is registered, and the
+/// policy set, for Chrome.
 #[test]
-fn windows_registers_the_host_under_each_familys_key() {
+fn windows_registers_the_host_for_chrome() {
     assert_eq!(
         windows_host_keys(),
-        [
-            r"SOFTWARE\Google\Chrome\NativeMessagingHosts",
-            r"SOFTWARE\Chromium\NativeMessagingHosts",
-            r"SOFTWARE\Microsoft\Edge\NativeMessagingHosts",
-        ]
+        [r"SOFTWARE\Google\Chrome\NativeMessagingHosts"]
     );
-    assert_eq!(
-        windows_policy_keys(),
-        [
-            r"SOFTWARE\Policies\Google\Chrome",
-            r"SOFTWARE\Policies\Chromium",
-            r"SOFTWARE\Policies\Microsoft\Edge",
-            r"SOFTWARE\Policies\BraveSoftware\Brave",
-        ]
-    );
+    assert_eq!(windows_policy_keys(), [r"SOFTWARE\Policies\Google\Chrome"]);
 }
 
 /// Registry writes go through `reg.exe` with fixed argument vectors: the
@@ -504,30 +483,18 @@ fn linux_turns_off_user_level_hosts_with_a_policy_file_per_family() {
 }
 
 /// macOS honours the policy only as a mandatory one, which on an unmanaged
-/// Mac means a configuration profile: one payload per browser's preference
-/// domain. Chrome's channels all read `com.google.Chrome`.
+/// Mac means a configuration profile: one payload, for the preference domain
+/// all of Chrome's channels read, `com.google.Chrome`.
 #[test]
 fn macos_turns_off_user_level_hosts_with_a_configuration_profile() {
     let profile = mobileconfig();
     assert!(profile.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist"));
-    for domain in [
-        "com.google.Chrome",
-        "org.chromium.Chromium",
-        "com.microsoft.Edge",
-        "com.brave.Browser",
-    ] {
-        assert!(
-            profile.contains(&format!(
-                "<key>PayloadType</key>\n\t\t\t<string>{domain}</string>"
-            )),
-            "a payload for {domain}"
-        );
-    }
+    assert!(profile.contains("<key>PayloadType</key>\n\t\t\t<string>com.google.Chrome</string>"));
     assert_eq!(
         profile
             .matches("<key>NativeMessagingUserLevelHosts</key>\n\t\t\t<false/>")
             .count(),
-        4
+        1
     );
     assert!(profile.contains("<key>PayloadType</key>\n\t<string>Configuration</string>"));
     assert!(profile.contains("<string>dev.jevpilot.policy</string>"));
@@ -1467,12 +1434,9 @@ fn the_policy_is_read_for_its_value_not_its_presence() {
     assert!(!linux_policy_holds("{}"));
     assert_eq!(
         managed_preferences(),
-        [
-            PathBuf::from("/Library/Managed Preferences/com.google.Chrome.plist"),
-            "/Library/Managed Preferences/org.chromium.Chromium.plist".into(),
-            "/Library/Managed Preferences/com.microsoft.Edge.plist".into(),
-            "/Library/Managed Preferences/com.brave.Browser.plist".into(),
-        ]
+        [PathBuf::from(
+            "/Library/Managed Preferences/com.google.Chrome.plist"
+        )]
     );
 }
 
