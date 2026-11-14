@@ -494,3 +494,34 @@ test("a command reads the policy file once", async () => {
   await settle();
   assert.equal(reads, 1);
 });
+
+test("a password that matches a word the page uses elsewhere is still dropped, and the page still reads", async () => {
+  const { fake, bridge, posted } = bridged();
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  const strings = ["#document", "INPUT", "type", "password", "text", "alice", "hunter2"];
+  const doc = (inputValue) => ({
+    nodes: {
+      nodeName: [0, 1, 1, 1],
+      attributes: [[], [2, 3], [2, 3], [2, 4]],
+      inputValue,
+    },
+  });
+  fake.when("debugger.sendCommand", () => ({
+    strings,
+    documents: [
+      // The passwords are "password", "INPUT" and "type": words the page
+      // also uses as an attribute, a tag and a name.
+      doc({ index: [1, 2, 3], value: [3, 1, 5] }),
+      doc({ index: [1, 2, 3], value: [2, 6, 5] }),
+    ],
+  }));
+  await bridge.receive({ type: "request", id: 9, op: "send", tab: 7, method: "DOMSnapshot.captureSnapshot", params: {} });
+  await settle();
+  const result = posted.at(-1).result;
+  for (const document of result.documents) {
+    assert.deepEqual(document.nodes.inputValue, { index: [3], value: [5] });
+  }
+  assert.deepEqual(result.strings.slice(0, 6), ["#document", "INPUT", "type", "password", "text", "alice"]);
+  assert.equal(result.strings.includes("hunter2"), false);
+});
