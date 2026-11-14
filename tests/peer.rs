@@ -308,10 +308,54 @@ fn windows_facts(code: Code) -> Facts {
         sid: Some(SID.to_owned()),
         pid: Some(PID),
         session: Some(SESSION),
+        image: Some(windows_path()),
         path: Some(windows_path()),
         code: Some(code),
         ..Facts::default()
     }
+}
+
+/// A program can rename its own running image away and put a junction to
+/// the install where its folder was: the file it then opens by its name is
+/// the genuine one. The path Windows reports it was started from is not.
+#[test]
+fn windows_refuses_an_image_started_from_another_path() {
+    let facts = Facts {
+        image: Some(PathBuf::from(r"C:\Users\owner\d\jev-pilot.exe")),
+        ..windows_facts(Code::ImageSha256(digest(1)))
+    };
+    assert_eq!(
+        decide(&facts, &windows_expected(hash_pin())),
+        refused(Check::Path, Reason::Mismatch)
+    );
+}
+
+/// The path Windows reports is compared without regard to case, and with
+/// the pin's `\\?\` prefix set aside.
+#[test]
+fn windows_compares_the_started_path_without_regard_to_case() {
+    let expected = Expected::Windows {
+        sid: SID.to_owned(),
+        path: PathBuf::from(r"\\?\C:\Program Files\jev-pilot\jev-pilot.exe"),
+        pin: hash_pin(),
+        session: Some(SESSION),
+    };
+    let facts = Facts {
+        image: Some(PathBuf::from(r"c:\program files\JEV-PILOT\jev-pilot.exe")),
+        path: Some(PathBuf::from(
+            r"\\?\C:\Program Files\jev-pilot\jev-pilot.exe",
+        )),
+        ..windows_facts(Code::ImageSha256(digest(1)))
+    };
+    assert_eq!(decide(&facts, &expected), Verdict::Accept);
+    let missing = Facts {
+        image: None,
+        ..facts
+    };
+    assert_eq!(
+        decide(&missing, &expected),
+        refused(Check::Path, Reason::Missing)
+    );
 }
 
 fn hash_pin() -> WindowsPin {

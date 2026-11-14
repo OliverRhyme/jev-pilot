@@ -217,8 +217,14 @@ pub struct Facts {
     pub session: Option<u32>,
     /// The peer's effective gid when it connected (Linux).
     pub egid: Option<u32>,
-    /// The executable the peer runs.
+    /// The executable the peer runs, with every link resolved.
     pub path: Option<PathBuf>,
+    /// The path the OS says the peer was started from, as it says it
+    /// (Windows). A program can rename its running image away and put a
+    /// junction to the install where its folder was, after which its image
+    /// opened by name is the genuine one; the path it was started from
+    /// still shows it is not.
+    pub image: Option<PathBuf>,
     /// The peer's audit token (macOS). It names one process image: its pid
     /// version changes on every fork and exec, so [`recheck`] compares it.
     pub token: Option<[u32; 8]>,
@@ -284,7 +290,9 @@ pub enum Expected {
         sid: String,
         /// Where the installed image lives, under Program Files, as
         /// `std::fs::canonicalize` gives it (`\\?\C:\Program Files\…`).
-        /// The peer's image is compared by its final path, in that form.
+        /// The peer's image is compared by its final path, in that form,
+        /// and the path Windows says it was started from must name it too,
+        /// ignoring case, so a junction cannot stand in for the install.
         path: PathBuf,
         /// The image's hash, or its signer.
         pin: WindowsPin,
@@ -784,6 +792,10 @@ fn run_checks(facts: &Facts, expected: &Expected) -> Result<(), Refusal> {
             equal(facts.sid.as_ref(), sid, Check::Sid)?;
             let own = present(session.as_ref(), Check::Session)?;
             equal(facts.session.as_ref(), own, Check::Session)?;
+            let started = present(facts.image.as_ref(), Check::Path)?;
+            if !same_windows_path(started, path) {
+                return Err(mismatch(Check::Path));
+            }
             equal(facts.path.as_ref(), path, Check::Path)?;
             match pin {
                 WindowsPin::Sha256(sha256) => image_sha256(facts.code.as_ref(), sha256),
@@ -795,6 +807,17 @@ fn run_checks(facts: &Facts, expected: &Expected) -> Result<(), Refusal> {
             }
         }
     }
+}
+
+/// Whether two Windows paths name the same path, as NTFS compares names:
+/// without regard to case, and with a `\\?\` prefix set aside.
+fn same_windows_path(a: &Path, b: &Path) -> bool {
+    let plain = |p: &Path| {
+        let text = p.to_string_lossy().into_owned();
+        text.strip_prefix(r"\\?\")
+            .map_or(text.clone(), str::to_owned)
+    };
+    plain(a).eq_ignore_ascii_case(&plain(b))
 }
 
 fn image_sha256(code: Option<&Code>, pinned: &Sha256Digest) -> Result<(), Refusal> {
