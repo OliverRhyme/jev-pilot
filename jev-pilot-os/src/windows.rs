@@ -5,9 +5,10 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Cryptography::{
@@ -22,14 +23,17 @@ use windows_sys::Win32::Security::WinTrust::{
 use windows_sys::Win32::Security::{GetTokenInformation, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
 /// Another process, opened only to ask about it.
 ///
 /// While this is held, the process's id cannot be given to a new process,
-/// so everything read through it is about the process that was opened.
+/// so everything read through it is about the process that was opened. It
+/// does not show that the process opened is the one the id named before it
+/// was opened: if that one had exited, the id may already belong to another.
+/// [`Process::created`] is how a caller tells.
 #[derive(Debug)]
 pub struct Process(OwnedHandle);
 
@@ -51,6 +55,43 @@ impl Process {
         // SAFETY: `handle` is a valid process handle that nothing else owns,
         // and OwnedHandle closes it exactly once.
         Ok(Self(unsafe { OwnedHandle::from_raw_handle(handle) }))
+    }
+
+    /// When the process was created.
+    ///
+    /// # Errors
+    ///
+    /// When Windows cannot report it.
+    #[allow(unsafe_code)]
+    pub fn created(&self) -> io::Result<SystemTime> {
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: the handle is a live process handle opened with
+        // PROCESS_QUERY_LIMITED_INFORMATION, which GetProcessTimes accepts,
+        // and the four FILETIMEs are valid places to write.
+        let ok = unsafe {
+            GetProcessTimes(
+                self.0.as_raw_handle(),
+                &raw mut created,
+                &raw mut exited,
+                &raw mut kernel,
+                &raw mut user,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // A FILETIME counts 100ns intervals since 1601-01-01 UTC.
+        let ticks = u64::from(created.dwHighDateTime) << 32 | u64::from(created.dwLowDateTime);
+        let since_1601 = Duration::from_nanos(ticks.saturating_mul(100));
+        // 1970-01-01 is 134 774 days after 1601-01-01.
+        let unix_in_1601 = Duration::from_hours(134_774 * 24);
+        since_1601
+            .checked_sub(unix_in_1601)
+            .map(|since_unix| UNIX_EPOCH + since_unix)
+            .ok_or_else(|| io::Error::other("a process created before 1970"))
     }
 
     /// The string form of the SID of the user the process runs as.
