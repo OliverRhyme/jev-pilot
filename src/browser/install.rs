@@ -988,6 +988,13 @@ pub fn plan(
             owner,
         });
     }
+    // The hosts' lock around rotating the log: the group's alone, so the
+    // owner cannot hold it.
+    planner.steps.push(Step::CreateFile {
+        path: under(os, &layout.audit_log, "audit.lock"),
+        mode: if protected { 0o660 } else { 0o600 },
+        owner,
+    });
     planner.steps.push(Step::Record {
         path: layout.install_json.clone(),
         kind,

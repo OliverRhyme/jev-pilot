@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek as _, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -472,14 +472,25 @@ fn hang_up(stream: &Stream) {
 /// missing one is an error. Rotation copies within them and truncates, so
 /// they keep their owner and mode.
 ///
+/// Two hosts must not rotate under each other, so each holds a lock through
+/// the rotation and the write. The lock is `audit.lock`, which the install
+/// makes root's with the group and mode 0660, not the log: the owner may
+/// read the log, and so could hold it locked and stall the host, but cannot
+/// open the lock.
+///
 /// # Errors
 /// When a file is missing or cannot be written.
 pub fn append_audit(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join("audit.lock"))?;
+    // Let go when the file closes.
+    lock.lock()?;
     let log = dir.join("audit.log");
-    let mut file = OpenOptions::new().read(true).append(true).open(&log)?;
-    // Held through the rotation and the write, so two hosts cannot rotate
-    // under each other; it is let go when the file closes.
-    file.lock()?;
+    // Opened to write, not to append: Windows will not shorten a file
+    // opened only to append. The lock keeps every writer at the end.
+    let mut file = OpenOptions::new().read(true).write(true).open(&log)?;
     if file.metadata()?.len() >= limit {
         for n in (1..AUDIT_KEPT).rev() {
             let from = std::fs::read(dir.join(format!("audit.log.{n}")))?;
@@ -488,6 +499,7 @@ pub fn append_audit(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
         overwrite(&dir.join("audit.log.1"), &std::fs::read(&log)?)?;
         file.set_len(0)?;
     }
+    file.seek(io::SeekFrom::End(0))?;
     file.write_all(line.as_bytes())
 }
 
@@ -523,8 +535,10 @@ impl Diagnostics {
     /// and emptied through the open file when full. The host's group stays
     /// out of it: it is the owner's file.
     fn try_note(&self, what: &str) -> io::Result<()> {
+        // Opened to write, not to append: Windows will not shorten a file
+        // opened only to append.
         let mut options = OpenOptions::new();
-        options.create(true).append(true);
+        options.create(true).write(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
@@ -545,6 +559,7 @@ impl Diagnostics {
         if meta.len() >= self.limit {
             file.set_len(0)?;
         }
+        file.seek(io::SeekFrom::End(0))?;
         writeln!(file, "{} {what}", utc(SystemTime::now()))
     }
 }

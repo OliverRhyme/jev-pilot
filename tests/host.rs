@@ -1456,18 +1456,67 @@ fn the_diagnostics_file_is_bounded() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The audit log's files as an install makes them: all four, mode 0664.
+/// The audit log's files as an install makes them: all four, mode 0664,
+/// and the lock, mode 0660.
 fn audit_files(dir: &std::path::Path) {
     std::fs::create_dir_all(dir).unwrap();
-    for name in ["audit.log", "audit.log.1", "audit.log.2", "audit.log.3"] {
+    for (name, mode) in [
+        ("audit.log", 0o664),
+        ("audit.log.1", 0o664),
+        ("audit.log.2", 0o664),
+        ("audit.log.3", 0o664),
+        ("audit.lock", 0o660),
+    ] {
         std::fs::write(dir.join(name), "").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o664))
+            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(mode))
                 .unwrap();
         }
+        #[cfg(not(unix))]
+        let _ = mode;
     }
+}
+
+/// The owner may read the audit log, and so may lock it: the host locks a
+/// file of its own instead, which the owner cannot open, so an owner who
+/// holds the log locked does not stall the host.
+#[test]
+fn a_lock_held_on_the_audit_log_does_not_stall_the_host() {
+    use jev_pilot::browser::host::append_audit;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-auditlock-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    audit_files(&dir);
+    let held = std::fs::File::open(dir.join("audit.log")).unwrap();
+    held.lock().unwrap();
+    let (done, finished) = std::sync::mpsc::channel();
+    let at = dir.clone();
+    std::thread::spawn(move || {
+        let _ = done.send(append_audit(&at, "line\n", 1000).is_ok());
+    });
+    assert_eq!(
+        finished.recv_timeout(std::time::Duration::from_secs(5)),
+        Ok(true),
+        "written while the log is locked"
+    );
+    drop(held);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The host never makes the audit log's lock either: a missing one is
+/// refused, and an install made before it had one is set up again.
+#[test]
+fn a_missing_audit_lock_is_refused_not_made() {
+    use jev_pilot::browser::host::append_audit;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-nolock-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    audit_files(&dir);
+    std::fs::remove_file(dir.join("audit.lock")).unwrap();
+    assert!(append_audit(&dir, "line\n", 1000).is_err());
+    assert!(!dir.join("audit.lock").exists(), "the lock is not made");
+    assert_eq!(std::fs::read_to_string(dir.join("audit.log")).unwrap(), "");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The host never makes the audit log: one it would make would be the
