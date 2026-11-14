@@ -166,7 +166,7 @@ pub fn serve(
                     }
                     Output::Close { run } => {
                         if let Some(stream) = runs.remove(&run) {
-                            hang_up(&stream);
+                            let_go(&stream);
                         }
                     }
                     Output::Audit(audit) => {
@@ -193,7 +193,7 @@ pub fn serve(
     }
     stop.store(true, Ordering::SeqCst);
     for stream in runs.values() {
-        hang_up(stream);
+        let_go(stream);
     }
     // Wake the accepting thread, so it sees the stop and lets go of the
     // listener.
@@ -477,10 +477,17 @@ fn send_watched(watch: &SendWatch, stream: &Arc<Stream>, message: &Message) -> b
     sent.is_ok()
 }
 
-/// End a connection now, so its reader sees it close, and a write waiting
-/// on it gives up.
+/// End a connection to a run that has stopped reading, now: its reader
+/// sees it close, a write waiting on it gives up, and what the run has not
+/// read is lost.
 fn hang_up(stream: &Stream) {
     super::channel::hang_up(stream, true);
+}
+
+/// End a connection to a run that has been sent its last words, so its
+/// reader sees it close and the run still reads them.
+fn let_go(stream: &Stream) {
+    super::channel::hang_up(stream, false);
 }
 
 /// Cuts a write to a run short when it has waited too long: one thread,
