@@ -988,6 +988,16 @@ pub fn plan(
             owner,
         });
     }
+    // The hosts' lock around the log, and the count of refused starts not
+    // written: the group's alone, so the owner can neither hold the one nor
+    // change the other.
+    for name in ["audit.lock", "audit.skipped"] {
+        planner.steps.push(Step::CreateFile {
+            path: under(os, &layout.audit_log, name),
+            mode: if protected { 0o660 } else { 0o600 },
+            owner,
+        });
+    }
     planner.steps.push(Step::Record {
         path: layout.install_json.clone(),
         kind,
@@ -1302,6 +1312,12 @@ pub fn apply(steps: &[Step], installer: &Installer, kind: InstallKind) -> io::Re
         }
         apply_one(step, installer, &mut said)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", describe(step))))?;
+        #[cfg(windows)]
+        if kind == InstallKind::Protected
+            && let Step::CreateDir { path, .. } = step
+        {
+            check_windows_folder(path)?;
+        }
     }
     Ok(said)
 }
@@ -1338,24 +1354,59 @@ pub fn trusted_owner(sid: &str) -> bool {
     )
 }
 
-/// On Windows, whether a folder of a protected install that is there
-/// already is owned by the system: one the owner made beforehand, in
+/// Why a Windows folder of a protected install, with file `attributes` and
+/// owned by the SID `owner`, is not safe to install into: it must be a
+/// plain folder, not a link or junction (a reparse point) that leads
+/// elsewhere, and owned by the system. One the owner made beforehand, in
 /// ProgramData for instance, would be the owner's to change.
-#[cfg(windows)]
-fn check_windows_folder(path: &Path) -> io::Result<()> {
-    if !path.exists() {
-        return Ok(());
+///
+/// # Errors
+/// Why it is not safe.
+pub fn windows_folder_verdict(path: &Path, attributes: u32, owner: &str) -> Result<(), String> {
+    const DIRECTORY: u32 = 0x10;
+    const REPARSE_POINT: u32 = 0x400;
+    if attributes & REPARSE_POINT != 0 {
+        return Err(format!(
+            "{} is a link or junction, so it may lead somewhere a program running as you can \
+             change: remove it and run the install again",
+            path.display()
+        ));
     }
-    let owner = jev_pilot_os::owner_sid(path)?;
-    if trusted_owner(&owner) {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
+    if attributes & DIRECTORY == 0 {
+        return Err(format!(
+            "{} is not a folder: remove it and run the install again",
+            path.display()
+        ));
+    }
+    if !trusted_owner(owner) {
+        return Err(format!(
             "{} is owned by {owner}, not an administrator, so a program running as you could \
              change what jev-pilot installs in it: remove it and run the install again",
             path.display()
-        )))
+        ));
     }
+    Ok(())
+}
+
+/// On Windows, whether a folder of a protected install, when it is there,
+/// is safe to install into ([`windows_folder_verdict`]). Asked before the
+/// install makes it and again after.
+#[cfg(windows)]
+fn check_windows_folder(path: &Path) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt as _;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let attributes = meta.file_attributes();
+    // Asked only of a plain folder, since asking follows a link.
+    let owner = if attributes & 0x400 == 0 {
+        jev_pilot_os::owner_sid(path)?
+    } else {
+        String::new()
+    };
+    windows_folder_verdict(path, attributes, &owner).map_err(io::Error::other)
 }
 
 /// What a step writes, whose folders must be safe.
@@ -1387,7 +1438,7 @@ pub struct DirMeta {
 
 /// Whether every folder above `path` that exists is one the owner cannot
 /// change: root's, not a link, not writable by anyone, and writable by its
-/// group only when that group is root's or one the owner is not in
+/// group only when the owner is not in that group, root's group included
 /// (`member_of` says which groups the owner is in). Debian's `/usr/local`
 /// (root:staff 2775), Ubuntu's `/var/log` (root:syslog 0775) and the
 /// install's own audit folder (root:jev-pilot 0775) pass for an owner not
@@ -1414,7 +1465,7 @@ pub fn check_ancestors(
             format!("is owned by uid {}", found.uid)
         } else if found.mode & 0o002 != 0 {
             format!("can be written by anyone (mode {mode:o})")
-        } else if found.mode & 0o020 != 0 && found.gid != 0 && member_of(found.gid) {
+        } else if found.mode & 0o020 != 0 && member_of(found.gid) {
             format!(
                 "can be written by group {}, which you are in (mode {mode:o})",
                 found.gid

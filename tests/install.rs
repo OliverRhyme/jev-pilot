@@ -1302,14 +1302,30 @@ fn a_protected_install_makes_the_audit_logs_files() {
             "{name}"
         );
     }
+    assert!(
+        steps.contains(&Step::CreateFile {
+            path: PathBuf::from("/var/log/jev-pilot/audit.lock"),
+            mode: 0o660,
+            owner: Owner::RootGroup,
+        }),
+        "the host's lock, which the owner cannot open"
+    );
+    assert!(
+        steps.contains(&Step::CreateFile {
+            path: PathBuf::from("/var/log/jev-pilot/audit.skipped"),
+            mode: 0o660,
+            owner: Owner::RootGroup,
+        }),
+        "the count of refused starts not written"
+    );
 }
 
 // --- where a protected install writes ---
 
 /// What a protected install writes is safe only if no folder above it can
 /// be changed by the owner: every one that exists must be root's, not a
-/// link, not writable by anyone, and writable by its group only when that
-/// group is root's or one the owner is not in.
+/// link, not writable by anyone, and writable by its group only when the
+/// owner is not in that group.
 #[test]
 fn a_protected_install_writes_only_under_folders_only_root_can_change() {
     use jev_pilot::browser::install::{DirMeta, check_ancestors};
@@ -1397,6 +1413,20 @@ fn a_protected_install_writes_only_under_folders_only_root_can_change() {
             )),
         );
     }
+    // Root's group too is refused when the owner is in it.
+    let in_wheel = |gid: u32| gid == 0;
+    let wheel = DirMeta {
+        mode: 0o775,
+        ..safe
+    };
+    assert_eq!(
+        check_ancestors(target, &lookup("/usr/local", wheel), &in_wheel),
+        Err(
+            "/usr/local can be written by group 0, which you are in (mode 775), so a \
+             program running as you could change what jev-pilot installs under it"
+                .to_owned()
+        ),
+    );
 }
 
 /// Every path a protected install writes passes the check, step by step,
@@ -1680,4 +1710,40 @@ fn a_windows_install_folder_must_be_owned_by_the_system() {
     ] {
         assert!(!trusted_owner(sid), "{sid}");
     }
+}
+
+/// A Windows install folder, before the install makes it and after, must
+/// be a plain folder, not a link or junction (a reparse point) that leads
+/// elsewhere, and owned by the system.
+#[test]
+fn a_windows_install_folder_is_a_plain_folder_the_system_owns() {
+    use jev_pilot::browser::install::windows_folder_verdict;
+    const DIRECTORY: u32 = 0x10;
+    const REPARSE_POINT: u32 = 0x400;
+    let folder = Path::new(r"C:\ProgramData\jev-pilot");
+    assert_eq!(
+        windows_folder_verdict(folder, DIRECTORY, "S-1-5-32-544"),
+        Ok(())
+    );
+    assert_eq!(
+        windows_folder_verdict(folder, DIRECTORY | REPARSE_POINT, "S-1-5-32-544"),
+        Err(format!(
+            "{} is a link or junction, so it may lead somewhere a program running as you can \
+             change: remove it and run the install again",
+            folder.display()
+        ))
+    );
+    let owner = "S-1-5-21-1004336348-1177238915-682003330-1001";
+    assert_eq!(
+        windows_folder_verdict(folder, DIRECTORY, owner),
+        Err(format!(
+            "{} is owned by {owner}, not an administrator, so a program running as you \
+             could change what jev-pilot installs in it: remove it and run the install again",
+            folder.display()
+        ))
+    );
+    assert!(
+        windows_folder_verdict(folder, 0x20, "S-1-5-32-544").is_err(),
+        "a file"
+    );
 }

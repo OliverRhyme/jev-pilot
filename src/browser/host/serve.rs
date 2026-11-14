@@ -3,8 +3,8 @@
 //! happened, and the relay's answers carried out on the calling thread.
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::OpenOptions;
-use std::io::{self, Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek as _, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -14,7 +14,7 @@ use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
 use interprocess::local_socket::{Listener, ListenerOptions, Stream};
 
 use super::channel::Place;
-use super::{Input, Output, Relay, RunId, Started, Throttle, utc};
+use super::{Audit, Input, Output, Relay, RunId, Started, Throttle, refused_start_lately, utc};
 use crate::browser::bridge::{self, ByteOrder, FrameError, Message, Nonce};
 use crate::peer::{Expected, PeerCheck, Verdict, decide, recheck};
 
@@ -134,10 +134,10 @@ pub fn serve(
     let mut runs: HashMap<RunId, Arc<Stream>> = HashMap::new();
     let mut pending: VecDeque<Input> = VecDeque::new();
     let mut throttle = Throttle::default();
+    let watch = SendWatch::start(SEND_WAIT);
     'serving: for event in heard {
         match event {
             Event::Joined(run, stream) => {
-                let _ = stream.set_send_timeout(Some(SEND_WAIT));
                 runs.insert(run, stream);
                 continue;
             }
@@ -155,13 +155,9 @@ pub fn serve(
                         }
                     }
                     Output::ToRun { run, message } => {
-                        // A run that stops reading is taken as gone once a
-                        // write has waited SEND_WAIT, so it cannot hold up the
-                        // extension or the other runs.
                         if let Some(stream) = runs.get(&run)
-                            && send_to_run(stream, &message).is_err()
+                            && !send_watched(&watch, stream, &message)
                         {
-                            hang_up(stream);
                             pending.push_back(Input::RunGone { run });
                         }
                     }
@@ -185,6 +181,13 @@ pub fn serve(
         }
     }
 
+    if let Some(held) = throttle.finish() {
+        let _ = append_audit(
+            &config.audit_dir,
+            &held.line(&utc(SystemTime::now())),
+            AUDIT_LIMIT,
+        );
+    }
     stop.store(true, Ordering::SeqCst);
     for stream in runs.values() {
         hang_up(stream);
@@ -351,19 +354,27 @@ fn serve_run(
         send(Input::RunGone { run });
         return;
     }
-    let _ = stream.set_recv_timeout(Some(echo_wait));
-    // Gone before echoing: a host checking whether this one serves, or a
-    // run that gave up. Nothing to audit.
-    let echo = match bridge::decode(&mut &*stream, ByteOrder::Little) {
+    // Silent past the wait: refused, and audited, by the timer, which the
+    // relay then hangs up on; the read below then ends, and says nothing.
+    let timer = EchoTimer::start(echo_wait, {
+        let events = events.clone();
+        move || {
+            let _ = events.send(Event::Input(Input::RunRefused {
+                run,
+                pid: first.pid,
+                check: "nonce: not echoed in time".into(),
+            }));
+        }
+    });
+    let read = bridge::decode(&mut &*stream, ByteOrder::Little);
+    if !timer.stop() {
+        return;
+    }
+    let echo = match read {
         Ok(Some(frame)) => serde_json::from_slice(&frame).unwrap_or(Message::Absent),
-        // Silent past the wait: refused, and audited.
-        Err(FrameError::Io(e))
-            if matches!(
-                e.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) =>
-        {
-            refuse("nonce: not echoed in time".into());
+        // Not a frame of the bridge: refused, and audited.
+        Err(e @ (FrameError::Truncated | FrameError::TooLargeToRead { .. })) => {
+            refuse(format!("nonce: echo malformed: {e}"));
             return;
         }
         // Closed before echoing: a check that a host answers, or a run that
@@ -384,7 +395,6 @@ fn serve_run(
         refuse(refusal.to_string());
         return;
     }
-    let _ = stream.set_recv_timeout(None);
     let Message::Echo {
         goal,
         sites,
@@ -450,15 +460,142 @@ fn send_to_chrome(stdout: &mut impl Write, message: &Message) -> io::Result<()> 
     stdout.flush()
 }
 
-/// End a connection now, so its reader sees it close.
-fn hang_up(stream: &Stream) {
-    #[cfg(unix)]
-    {
-        let Stream::UdSocket(socket) = stream;
-        let _ = socket.inner().shutdown(std::net::Shutdown::Both);
+/// Write `message` to a run, whether it went. A run that stops reading is
+/// hung up on once a write has waited [`SEND_WAIT`], and taken as gone, so
+/// it cannot hold up the extension or the other runs.
+fn send_watched(watch: &SendWatch, stream: &Arc<Stream>, message: &Message) -> bool {
+    let sent = {
+        let _watched = watch.watch(stream);
+        send_to_run(stream, message)
+    };
+    if sent.is_err() {
+        hang_up(stream);
     }
-    #[cfg(not(unix))]
-    let _ = stream;
+    sent.is_ok()
+}
+
+/// End a connection now, so its reader sees it close, and a write waiting
+/// on it gives up.
+fn hang_up(stream: &Stream) {
+    super::channel::hang_up(stream, true);
+}
+
+/// Cuts a write to a run short when it has waited too long: one thread,
+/// watching whichever write the relay is making.
+struct SendWatch {
+    shared: Arc<(std::sync::Mutex<Watched>, std::sync::Condvar)>,
+}
+
+/// The write being watched, if any, and whether the watch is over.
+#[derive(Default)]
+struct Watched {
+    write: Option<(Arc<Stream>, std::time::Instant)>,
+    over: bool,
+}
+
+impl SendWatch {
+    /// Watch writes, hanging up on a run whose write takes longer than
+    /// `wait`.
+    fn start(wait: Duration) -> Self {
+        let shared = Arc::new((
+            std::sync::Mutex::new(Watched::default()),
+            std::sync::Condvar::new(),
+        ));
+        let watching = shared.clone();
+        std::thread::spawn(move || {
+            let (lock, wake) = &*watching;
+            let Ok(mut watched) = lock.lock() else {
+                return;
+            };
+            while !watched.over {
+                let now = std::time::Instant::now();
+                watched = match &watched.write {
+                    None => match wake.wait(watched) {
+                        Ok(guard) => guard,
+                        Err(_) => return,
+                    },
+                    Some((stream, started)) if now.duration_since(*started) >= wait => {
+                        hang_up(stream);
+                        watched.write = None;
+                        watched
+                    }
+                    Some((_, started)) => {
+                        let left = wait.saturating_sub(now.duration_since(*started));
+                        match wake.wait_timeout(watched, left) {
+                            Ok((guard, _)) => guard,
+                            Err(_) => return,
+                        }
+                    }
+                };
+            }
+        });
+        Self { shared }
+    }
+
+    /// Watch a write to `stream` until what this returns is dropped.
+    fn watch(&self, stream: &Arc<Stream>) -> WatchedWrite<'_> {
+        self.set(Some((stream.clone(), std::time::Instant::now())));
+        WatchedWrite(self)
+    }
+
+    fn set(&self, write: Option<(Arc<Stream>, std::time::Instant)>) {
+        let (lock, wake) = &*self.shared;
+        if let Ok(mut watched) = lock.lock() {
+            watched.write = write;
+        }
+        wake.notify_one();
+    }
+}
+
+impl Drop for SendWatch {
+    fn drop(&mut self) {
+        let (lock, wake) = &*self.shared;
+        if let Ok(mut watched) = lock.lock() {
+            watched.over = true;
+        }
+        wake.notify_one();
+    }
+}
+
+/// A write being watched; done with when dropped.
+struct WatchedWrite<'a>(&'a SendWatch);
+
+impl Drop for WatchedWrite<'_> {
+    fn drop(&mut self) {
+        self.0.set(None);
+    }
+}
+
+/// The wait for a run's echo: when it runs out first, `expired` is called.
+struct EchoTimer {
+    done: mpsc::Sender<()>,
+    expired: Arc<AtomicBool>,
+}
+
+impl EchoTimer {
+    fn start(wait: Duration, expire: impl FnOnce() + Send + 'static) -> Self {
+        let (done, told) = mpsc::channel::<()>();
+        let expired = Arc::new(AtomicBool::new(false));
+        let flag = expired.clone();
+        std::thread::spawn(move || {
+            if matches!(
+                told.recv_timeout(wait),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) && !flag.swap(true, Ordering::SeqCst)
+            {
+                expire();
+            }
+        });
+        Self { done, expired }
+    }
+
+    /// Stop the wait: whether the echo came first, so the timer will not
+    /// refuse the run.
+    fn stop(self) -> bool {
+        let first = !self.expired.swap(true, Ordering::SeqCst);
+        let _ = self.done.send(());
+        first
+    }
 }
 
 /// Append `line` to `dir`'s `audit.log`, first rotating it into
@@ -472,14 +609,35 @@ fn hang_up(stream: &Stream) {
 /// missing one is an error. Rotation copies within them and truncates, so
 /// they keep their owner and mode.
 ///
+/// Two hosts must not rotate under each other, so each holds a lock through
+/// the rotation and the write. The lock is `audit.lock`, which the install
+/// makes root's with the group and mode 0660, not the log: the owner may
+/// read the log, and so could hold it locked and stall the host, but cannot
+/// open the lock.
+///
 /// # Errors
 /// When a file is missing or cannot be written.
 pub fn append_audit(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
+    let _lock = lock_audit(dir)?;
+    append_locked(dir, line, limit)
+}
+
+/// The hosts' lock on `dir`'s audit log, let go when the file closes.
+fn lock_audit(dir: &Path) -> io::Result<File> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join("audit.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+/// Append `line`, rotating first when full, under the lock.
+fn append_locked(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
     let log = dir.join("audit.log");
-    let mut file = OpenOptions::new().read(true).append(true).open(&log)?;
-    // Held through the rotation and the write, so two hosts cannot rotate
-    // under each other; it is let go when the file closes.
-    file.lock()?;
+    // Opened to write, not to append: Windows will not shorten a file
+    // opened only to append. The lock keeps every writer at the end.
+    let mut file = OpenOptions::new().read(true).write(true).open(&log)?;
     if file.metadata()?.len() >= limit {
         for n in (1..AUDIT_KEPT).rev() {
             let from = std::fs::read(dir.join(format!("audit.log.{n}")))?;
@@ -488,7 +646,70 @@ pub fn append_audit(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
         overwrite(&dir.join("audit.log.1"), &std::fs::read(&log)?)?;
         file.set_len(0)?;
     }
+    file.seek(io::SeekFrom::End(0))?;
     file.write_all(line.as_bytes())
+}
+
+/// Audit the host's start, `started`, at `now`.
+///
+/// A refused start less than a minute after the last one written is not
+/// written: it is counted in `audit.skipped`, which the install makes
+/// beside the log as it makes the lock, and the count is written before the
+/// next start that is. So a loop of refused starts can neither rotate the
+/// log away nor go uncounted.
+///
+/// # Errors
+/// When a file is missing or cannot be written.
+pub fn audit_host_start(dir: &Path, started: &Audit, now: SystemTime) -> io::Result<()> {
+    let _lock = lock_audit(dir)?;
+    let mut skipped = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join("audit.skipped"))?;
+    let mut text = String::new();
+    skipped.read_to_string(&mut text)?;
+    let count: u32 = text.trim().parse().unwrap_or(0);
+    let refused = matches!(
+        started,
+        Audit::HostStarted {
+            refused: Some(_),
+            ..
+        }
+    );
+    if refused && refused_start_lately(&log_tail(&dir.join("audit.log")), now) {
+        return set_count(&mut skipped, count.saturating_add(1));
+    }
+    let time = utc(now);
+    if count > 0 {
+        append_locked(
+            dir,
+            &Audit::StartsNotWritten { starts: count }.line(&time),
+            AUDIT_LIMIT,
+        )?;
+    }
+    append_locked(dir, &started.line(&time), AUDIT_LIMIT)?;
+    if count > 0 {
+        set_count(&mut skipped, 0)?;
+    }
+    Ok(())
+}
+
+fn set_count(file: &mut File, count: u32) -> io::Result<()> {
+    file.set_len(0)?;
+    file.seek(io::SeekFrom::Start(0))?;
+    writeln!(file, "{count}")
+}
+
+/// The last lines of the log, enough to find the last start.
+fn log_tail(log: &Path) -> String {
+    let Ok(mut file) = File::open(log) else {
+        return String::new();
+    };
+    let length = file.metadata().map_or(0, |m| m.len());
+    let _ = file.seek(io::SeekFrom::Start(length.saturating_sub(8 << 10)));
+    let mut tail = Vec::new();
+    let _ = file.read_to_end(&mut tail);
+    String::from_utf8_lossy(&tail).into_owned()
 }
 
 /// Replace what an existing file holds.
@@ -523,8 +744,10 @@ impl Diagnostics {
     /// and emptied through the open file when full. The host's group stays
     /// out of it: it is the owner's file.
     fn try_note(&self, what: &str) -> io::Result<()> {
+        // Opened to write, not to append: Windows will not shorten a file
+        // opened only to append.
         let mut options = OpenOptions::new();
-        options.create(true).append(true);
+        options.create(true).write(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
@@ -545,6 +768,7 @@ impl Diagnostics {
         if meta.len() >= self.limit {
             file.set_len(0)?;
         }
+        file.seek(io::SeekFrom::End(0))?;
         writeln!(file, "{} {what}", utc(SystemTime::now()))
     }
 }
