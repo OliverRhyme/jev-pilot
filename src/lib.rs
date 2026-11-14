@@ -42,6 +42,9 @@ pub mod judgment;
 #[cfg(feature = "mcp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
 pub mod mcp;
+#[cfg(feature = "extension")]
+#[cfg_attr(docsrs, doc(cfg(feature = "extension")))]
+pub mod peer;
 pub mod pilot;
 pub mod platform;
 pub mod snapshot;

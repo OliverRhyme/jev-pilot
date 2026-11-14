@@ -1,0 +1,37 @@
+[package]
+name = "jev-pilot-os"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "The few Windows calls jev-pilot needs that no safe crate offers, behind safe functions."
+repository = "https://github.com/OliverRhyme/jev-pilot"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# A library of jev-pilot's, never a release of its own.
+[package.metadata.dist]
+dist = false
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Security_WinTrust",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+] }
+
+[lints.rust]
+missing_docs = "deny"
+# The one crate in the workspace that may call into the OS directly, and then
+# only inside functions that say so with an `#[allow]`.
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+doc_markdown = "allow"
