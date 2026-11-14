@@ -6,7 +6,7 @@ use std::io;
 use std::time::SystemTime;
 
 use interprocess::local_socket::Stream;
-use jev_pilot_os::{Process, authenticode_signer, process_image};
+use jev_pilot_os::{Process, authenticode_signer, final_path, process_image};
 
 use super::{Code, Expected, Facts, WindowsPin, sha256_file};
 
@@ -43,15 +43,17 @@ pub(super) fn facts(stream: &Stream, expected: &Expected) -> Facts {
         return facts;
     }
     facts.sid = process.user_sid().ok();
-    facts.path = process_image(&process).ok();
+    // The image is opened once, and its final path, its hash and its signer
+    // all come from that one file. Windows refuses to write to the image of
+    // a running process, so it is the file the process runs.
+    let image = process_image(&process).and_then(File::open);
+    let Ok(image) = image else {
+        return facts;
+    };
+    facts.path = final_path(&image).ok();
     if let (Expected::Windows { pin, .. }, Some(path)) = (expected, &facts.path) {
-        // Windows refuses to write to the image of a running process, so the
-        // file hashed is the file the process runs.
         facts.code = match pin {
-            WindowsPin::Sha256(_) => File::open(path)
-                .and_then(sha256_file)
-                .ok()
-                .map(Code::ImageSha256),
+            WindowsPin::Sha256(_) => sha256_file(image).ok().map(Code::ImageSha256),
             WindowsPin::Signer(_) => authenticode_signer(path).map(|signer| Code::Signer {
                 subject: signer.subject,
             }),

@@ -831,7 +831,8 @@ mod gather {
         let hash: [u8; 32] = Sha256::digest(std::fs::read(own_exe()).unwrap()).into();
         let expected = Expected::Windows {
             sid: own_sid().unwrap(),
-            path: std::env::current_exe().unwrap(),
+            // What an install pins: the installed path, canonicalized.
+            path: own_exe(),
             pin: WindowsPin::Sha256(Sha256Digest::from_bytes(hash)),
             session: None,
         }
@@ -852,7 +853,8 @@ mod gather {
         let (server, _client) = pair();
         let expected = Expected::Windows {
             sid: own_sid().unwrap(),
-            path: std::env::current_exe().unwrap(),
+            // What an install pins: the installed path, canonicalized.
+            path: own_exe(),
             pin: WindowsPin::Signer("CN=Anyone".to_owned()),
             session: None,
         }

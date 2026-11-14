@@ -227,7 +227,10 @@ pub enum Expected {
     Linux {
         /// The owner's uid.
         uid: u32,
-        /// Where the installed copy lives.
+        /// Where the installed copy lives, canonicalized: a development
+        /// peer's executable is read from `/proc/<pid>/exe`, which has every
+        /// link resolved. A setgid install's path is not compared, because
+        /// its executable cannot be read.
         path: PathBuf,
         /// The setgid group, or a development install's hash.
         pin: LinuxPin,
@@ -236,7 +239,9 @@ pub enum Expected {
     Windows {
         /// The string form of the owner's SID.
         sid: String,
-        /// Where the installed image lives, under Program Files.
+        /// Where the installed image lives, under Program Files, as
+        /// `std::fs::canonicalize` gives it (`\\?\C:\Program Files\…`).
+        /// The peer's image is compared by its final path, in that form.
         path: PathBuf,
         /// The image's hash, or its signer.
         pin: WindowsPin,

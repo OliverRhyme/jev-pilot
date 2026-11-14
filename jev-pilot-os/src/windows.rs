@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::fs::File;
 use std::io;
 use std::iter;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -21,6 +22,7 @@ use windows_sys::Win32::Security::WinTrust::{
     WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
 };
 use windows_sys::Win32::Security::{GetTokenInformation, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser};
+use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
@@ -139,6 +141,41 @@ pub fn process_image(process: &Process) -> io::Result<PathBuf> {
             return Err(error);
         }
         capacity *= 2;
+    }
+}
+
+/// The final path of the open file `file`: every link and junction
+/// resolved, in the form `std::fs::canonicalize` gives (`\\?\C:\…`).
+///
+/// Two names for one file compare equal only in this form, so a path read
+/// from Windows is compared with a pinned path as final paths.
+///
+/// # Errors
+///
+/// When Windows cannot report it.
+#[allow(unsafe_code)]
+pub fn final_path(file: &File) -> io::Result<PathBuf> {
+    let mut capacity: u32 = 1024;
+    loop {
+        let mut buffer = vec![0u16; capacity as usize];
+        // SAFETY: the handle is an open file's; `buffer` holds `capacity`
+        // u16s. Flags 0 are FILE_NAME_NORMALIZED and VOLUME_NAME_DOS, as
+        // std::fs::canonicalize asks.
+        let length = unsafe {
+            GetFinalPathNameByHandleW(file.as_raw_handle(), buffer.as_mut_ptr(), capacity, 0)
+        };
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if length < capacity {
+            buffer.truncate(length as usize);
+            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
+        }
+        // Too small: `length` is the size needed, counting the NUL.
+        if length > 1 << 16 {
+            return Err(io::Error::other("a final path longer than Windows allows"));
+        }
+        capacity = length;
     }
 }
 
