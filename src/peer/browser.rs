@@ -47,32 +47,51 @@ pub struct FileFacts {
     pub mode: u32,
     /// Whether it is a symbolic link.
     pub is_link: bool,
-    /// The device it is on.
-    pub dev: u64,
-    /// Its inode there.
-    pub ino: u64,
+    /// Whether it is a regular file.
+    pub is_file: bool,
 }
 
-/// Which Google Chrome install the file the parent runs is, by its device
-/// and inode (`exe`, from `stat` of `/proc/<pid>/exe`), when that install
-/// and every folder above it are root's, not writable by group or others,
-/// and not links. `facts` reports a path, without following a link, or
-/// `None` when it is missing.
+/// What the kernel adds to the name of a running program's file once that
+/// file has been removed, as a package upgrade does while Chrome runs.
+const DELETED: &str = " (deleted)";
+
+/// Which Google Chrome install the parent runs: `named` is the kernel's
+/// name for its executable (`readlink` of `/proc/<pid>/exe`), and `opened`
+/// is that file itself, opened through the same link and `fstat`ed.
 ///
-/// Comparing the file itself, not the link's text, needs no trust in a
-/// name. A Chrome still running a file an upgrade replaced matches none,
-/// and is refused until it restarts.
+/// The file must be a regular file of root's that group and others cannot
+/// write. Its name, less a trailing " (deleted)", must be exactly one of
+/// Chrome's installs, and that install and every folder above it must be
+/// root's, not writable by group or others, and not links. `facts` reports
+/// a path without following a link, or `None` when it is missing.
+///
+/// The name is the kernel's, and only root can put a file at one of those
+/// paths, so a name that matches was root's install when it was started.
+/// A Chrome still running a file an upgrade has since replaced keeps that
+/// name with " (deleted)" after it, and is still served.
 ///
 /// # Errors
 /// Why it is not one.
 pub fn linux_browser(
-    exe: (u64, u64),
+    named: &Path,
+    opened: FileFacts,
     facts: &dyn Fn(&Path) -> Option<FileFacts>,
 ) -> Result<PathBuf, String> {
+    if !opened.is_file {
+        return Err("the program it runs is not a regular file".to_owned());
+    }
+    if opened.uid != 0 {
+        return Err("the program it runs is not root's".to_owned());
+    }
+    if opened.mode & 0o022 != 0 {
+        return Err("the program it runs can be written by others".to_owned());
+    }
+    let name = named.to_str().unwrap_or_default();
+    let name = name.strip_suffix(DELETED).unwrap_or(name);
     let known = LINUX_BROWSERS
         .iter()
         .map(Path::new)
-        .find(|path| facts(path).is_some_and(|f| (f.dev, f.ino) == exe))
+        .find(|path| path.as_os_str() == name)
         .ok_or("it runs no Google Chrome install jev-pilot knows")?;
     for path in known.ancestors() {
         let found = facts(path).ok_or_else(|| format!("{} is missing", path.display()))?;
@@ -248,35 +267,37 @@ fn linux() -> BrowserParent {
     // the install's group: it looks as the owner's own gid, then goes back.
     let held = nix::unistd::setfsgid(nix::unistd::getgid());
     let link = format!("/proc/{pid}/exe");
-    let file = std::fs::metadata(&link).map(|meta| (meta.dev(), meta.ino()));
-    let named = std::fs::read_link(&link).ok();
+    let opened = std::fs::File::open(&link).and_then(|file| file.metadata());
+    let named = std::fs::read_link(&link);
     nix::unistd::setfsgid(held);
-    let Ok(file) = file else {
-        return refused(Some(pid), named, "the parent's executable cannot be read");
+    let (Ok(opened), Ok(named)) = (opened, named) else {
+        return refused(Some(pid), None, "the parent's executable cannot be read");
     };
     if std::os::unix::process::parent_id() != pid {
         return refused(
             Some(pid),
-            named,
+            Some(named),
             "the program that started the host has gone",
         );
     }
-    let facts = |path: &Path| {
-        std::fs::symlink_metadata(path).ok().map(|meta| FileFacts {
-            uid: meta.uid(),
-            mode: meta.mode(),
-            is_link: meta.file_type().is_symlink(),
-            dev: meta.dev(),
-            ino: meta.ino(),
-        })
+    let facts = |meta: &std::fs::Metadata| FileFacts {
+        uid: meta.uid(),
+        mode: meta.mode(),
+        is_link: meta.file_type().is_symlink(),
+        is_file: meta.file_type().is_file(),
     };
-    match linux_browser(file, &facts) {
+    let on_disk = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .ok()
+            .map(|meta| facts(&meta))
+    };
+    match linux_browser(&named, facts(&opened), &on_disk) {
         Ok(chrome) => BrowserParent {
             pid: Some(pid),
             exe: Some(chrome),
             verdict: Ok(()),
         },
-        Err(why) => refused(Some(pid), named, why),
+        Err(why) => refused(Some(pid), Some(named), why),
     }
 }
 
