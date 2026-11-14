@@ -11,6 +11,10 @@ export const GROUP = "jev-pilot";
 /** How long a tab with no opener waits for Chrome to say what opened it. */
 const OPENER_WAIT_MS = 500;
 
+/** How often, and how many times, a new tab's target id is looked for. */
+const TARGET_WAIT_MS = 100;
+const TARGET_TRIES = 5;
+
 /** The debugger protocol version the extension asks Chrome for. */
 const DEBUGGER_VERSION = "1.3";
 
@@ -71,8 +75,19 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
   const say = async (type) =>
     post(protocol.hello({ version, userAgent, paused: await paused(), policy: await policyNow() }, type));
 
-  const targetOf = async (tabId) =>
+  const targetNow = async (tabId) =>
     (await chrome.debugger.getTargets()).find((t) => t.tabId === tabId && t.type === "page")?.id;
+
+  /** A tab's target id, looked for again for a while: Chrome gives a new tab one a moment after it opens. */
+  const targetOf = async (tabId) => {
+    for (let tried = 1; ; tried += 1) {
+      const target = await targetNow(tabId);
+      if (target !== undefined || tried >= TARGET_TRIES) {
+        return target;
+      }
+      await new Promise((resolve) => setTimer(resolve, TARGET_WAIT_MS));
+    }
+  };
 
   const groups = async () => new Set((await chrome.tabGroups.query({ title: GROUP })).map((g) => g.id));
 
@@ -195,14 +210,28 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
   };
 
   /**
+   * Check where a held tab is now, whatever DevTools has or has not said
+   * yet, and wait for every check of where it went.
+   */
+  const whereNow = async (tabId, policy) => {
+    if (held.has(tabId)) {
+      const now = await chrome.tabs.get(tabId).catch(() => undefined);
+      if (now?.url) {
+        checkArrival(tabId, now.url, policy);
+      }
+    }
+    await settled(tabId);
+  };
+
+  /**
    * Send a command the policy allowed to a held tab. The last check that
    * the run still holds the tab comes after every check of where it went,
    * with nothing awaited between it and the command; the reply is passed on
    * only if the run still holds the tab once the command is done.
    */
-  const send = async (request) => {
+  const send = async (request, policy) => {
     const tabId = request.tab;
-    await settled(tabId);
+    await whereNow(tabId, policy);
     if (!held.has(tabId)) {
       post(protocol.refused(request.id, refusal("no_tab", `the run does not hold tab ${tabId}`)));
       return;
@@ -220,7 +249,7 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
       }
       return;
     }
-    await settled(tabId);
+    await whereNow(tabId, policy);
     if (!held.has(tabId)) {
       return;
     }
@@ -264,13 +293,6 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
     }
     if (request.op === "send") {
       await settled(request.tab);
-      // Where the tab is now, whatever DevTools has or has not said yet.
-      if (held.has(request.tab)) {
-        const now = await chrome.tabs.get(request.tab).catch(() => undefined);
-        if (now?.url) {
-          await checkArrival(request.tab, now.url, policy);
-        }
-      }
       if (!held.has(request.tab)) {
         post(protocol.refused(request.id, refusal("no_tab", `the run does not hold tab ${request.tab}`)));
         return;
@@ -289,7 +311,7 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
       return;
     }
     if (request.op === "send") {
-      await send(request);
+      await send(request, policy);
       return;
     }
     try {
@@ -393,9 +415,12 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
             post(protocol.cdp(tabId, source.sessionId, method, params));
           }
         });
-      queues.set(tabId, passed);
-      passed.finally(() => {
-        if (queues.get(tabId) === passed) {
+      // Queued as settled either way, so that one event that could not be
+      // passed on does not stop the tab's later ones.
+      const queued = passed.catch(() => {});
+      queues.set(tabId, queued);
+      queued.finally(() => {
+        if (queues.get(tabId) === queued) {
           queues.delete(tabId);
         }
       });

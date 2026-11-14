@@ -505,11 +505,12 @@ impl Translator {
                 let target = result
                     .get("target")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                if let Some(tab) = tab {
-                    self.targets.insert(tab, target.clone());
-                }
+                    .filter(|t| !t.is_empty());
+                // Without a target id the tab cannot be named to the engine.
+                let (Some(tab), Some(target)) = (tab, target) else {
+                    return refusal(id, "Chrome opened the tab without a target id");
+                };
+                self.targets.insert(tab, target.to_owned());
                 reply(id, &json!({"targetId": target}))
             }
             Pending::Attach(tab) => {

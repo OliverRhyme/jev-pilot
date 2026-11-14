@@ -525,3 +525,92 @@ test("a password that matches a word the page uses elsewhere is still dropped, a
   assert.deepEqual(result.strings.slice(0, 6), ["#document", "INPUT", "type", "password", "text", "alice"]);
   assert.equal(result.strings.includes("hunter2"), false);
 });
+
+test("a password field's value attribute leaves Chrome blank too", async () => {
+  const { fake, bridge, posted } = bridged();
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  const strings = ["#document", "INPUT", "type", "password", "value", "hunter2", "name", "pw"];
+  fake.when("debugger.sendCommand", () => ({
+    strings,
+    documents: [
+      {
+        nodes: {
+          nodeName: [0, 1],
+          attributes: [[], [2, 3, 6, 7, 4, 5]],
+          inputValue: { index: [1], value: [5] },
+        },
+      },
+    ],
+  }));
+  await bridge.receive({ type: "request", id: 9, op: "send", tab: 7, method: "DOMSnapshot.captureSnapshot", params: {} });
+  await settle();
+  const result = posted.at(-1).result;
+  assert.equal(JSON.stringify(result).includes("hunter2"), false);
+  const attributes = result.documents[0].nodes.attributes[1].map((i) => result.strings[i]);
+  assert.deepEqual(attributes, ["type", "password", "name", "pw", "value", ""]);
+});
+
+test("a command's reply is held back when its tab is off the sites by the time it is done", async () => {
+  const { fake, bridge, posted } = bridged({ policy: { sites: ["https://github.com"], owner_tabs: "group" } });
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  posted.length = 0;
+  fake.when("debugger.sendCommand", () => {
+    // The page moves while the command runs, and Chrome has said nothing yet.
+    fake.state.tabs.get(7).url = "https://elsewhere.test/x";
+    return { strings: ["from elsewhere"], documents: [] };
+  });
+  await bridge.receive({ type: "request", id: 6, op: "send", tab: 7, method: "DOMSnapshot.captureSnapshot", params: {} });
+  await settle();
+  assert.deepEqual(posted.map((m) => m.type), ["detached"]);
+});
+
+test("an event that cannot be passed on does not stop the tab's later ones", async () => {
+  const fake = fakeChrome();
+  const posted = [];
+  let failOnce = true;
+  const bridge = createBridge({
+    chrome: fake.chrome,
+    post: (m) => {
+      if (m.type === "cdp" && failOnce) {
+        failOnce = false;
+        throw new Error("the port closed under it");
+      }
+      posted.push(m);
+    },
+    loadPolicy: async () => ({ sites: [], owner_tabs: "group" }),
+    scripts: SCRIPTS,
+    userAgent: UA,
+  });
+  listen(fake.chrome, bridge);
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  await fake.emit("debugger.onEvent", { tabId: 7 }, "Page.loadEventFired", {}).catch(() => {});
+  await fake.emit("debugger.onEvent", { tabId: 7 }, "Page.domContentEventFired", {}).catch(() => {});
+  await settle();
+  assert.deepEqual(
+    posted.filter((m) => m.type === "cdp").map((m) => m.method),
+    ["Page.domContentEventFired"],
+  );
+});
+
+test("a tab Chrome has not yet given a target id is looked up again before it is reported", async () => {
+  const { fake, bridge, posted, timers } = bridged();
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  posted.length = 0;
+  fake.state.tabs.set(12, { id: 12, url: "", pendingUrl: "https://github.com/x", title: "", groupId: -1, windowId: 1, openerTabId: 7 });
+  const reporting = fake.emit("tabs.onCreated", fake.state.tabs.get(12));
+  await settle();
+  // Chrome gives the tab its target a moment later.
+  fake.state.targets.set(12, "T12");
+  for (const timer of timers.splice(0)) {
+    timer.fn();
+  }
+  await reporting;
+  await settle();
+  assert.deepEqual(posted, [
+    { type: "tab_created", tab: 12, target: "T12", opener: 7, url: "https://github.com/x", title: "" },
+  ]);
+});

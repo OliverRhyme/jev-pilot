@@ -107,7 +107,8 @@ export function read(message) {
 /**
  * A DOMSnapshot without the value of any password field. Every node of
  * every document is classified first, from the snapshot as Chrome sent it;
- * then each `<input type=password>` loses its `inputValue` entry, and the
+ * then each `<input type=password>` loses its `inputValue` entry, its
+ * `value` attribute reads blank, and the
  * words it held are blanked in the snapshot's string table unless the page
  * uses that string for something else too, where it is already in plain
  * sight and blanking it would change what the page reads as.
@@ -153,10 +154,28 @@ export function withoutPasswords(snapshot) {
     for (const key of ["documentURL", "title", "baseURL", "contentLanguage", "encodingName", "publicId", "systemId", "frameId"]) {
       use(document?.[key]);
     }
+    // A password field's own value attribute is a secret, not a use.
+    const valueAttributes = [];
     if (nodes) {
       useAll(nodes.nodeName);
       useAll(nodes.nodeValue);
-      useAll(nodes.attributes);
+      (Array.isArray(nodes.attributes) ? nodes.attributes : []).forEach((attributes, node) => {
+        if (!Array.isArray(attributes)) {
+          return;
+        }
+        const password = isPassword(nodes, node);
+        for (let i = 0; i < attributes.length; i += 1) {
+          const isValue = i % 2 === 1 && text(attributes[i - 1]).toLowerCase() === "value";
+          if (password && isValue) {
+            if (Number.isInteger(attributes[i])) {
+              secret.add(attributes[i]);
+            }
+            valueAttributes.push([attributes, i]);
+          } else {
+            use(attributes[i]);
+          }
+        }
+      });
       useAll(nodes.pseudoIdentifier);
       for (const rare of ["textValue", "currentSourceURL", "originURL"]) {
         useAll(nodes[rare]?.value);
@@ -165,7 +184,7 @@ export function withoutPasswords(snapshot) {
     useAll(document?.layout?.text);
     useAll(document?.layout?.styles);
     if (!values || !Array.isArray(values.index) || !Array.isArray(values.value)) {
-      return null;
+      return { inputValue: null, valueAttributes };
     }
     const index = [];
     const value = [];
@@ -180,13 +199,25 @@ export function withoutPasswords(snapshot) {
         use(values.value[k]);
       }
     });
-    return { index, value };
+    return { inputValue: { index, value }, valueAttributes };
   });
 
   // Then the changes.
+  let empty = strings.indexOf("");
+  const blank = () => {
+    if (empty < 0) {
+      empty = strings.push("") - 1;
+    }
+    return empty;
+  };
   snapshot.documents.forEach((document, d) => {
-    if (kept[d]) {
-      document.nodes.inputValue = kept[d];
+    if (kept[d].inputValue) {
+      document.nodes.inputValue = kept[d].inputValue;
+    }
+    // Pointed at an empty string, so that it reads blank even when its
+    // words are used elsewhere and stay in the table.
+    for (const [attributes, i] of kept[d].valueAttributes) {
+      attributes[i] = blank();
     }
   });
   for (const index of secret) {

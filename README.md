@@ -676,10 +676,13 @@ bridge is built so that only the installed jev-pilot can use it. Five layers:
 
 The host also checks the program that started it, and serves nothing unless
 that is Google Chrome. On macOS the check is Chrome's code signature; on Linux,
-Chrome's root-owned install, matched by file identity; on Windows, System32's
+the path of the program, which must be a root-owned regular file at one of
+Chrome's own paths under `/opt/google/` (or that path marked " (deleted)", for a
+Chrome still running after an upgrade replaced its file); on Windows, System32's
 cmd.exe started by a Google-signed chrome.exe under Program Files. Each start is
-written to the audit log. This narrows what a program running as you can pose
-as; it cannot stop one that drives Chrome itself (see
+written to the audit log, a refused one at most about once a minute, with a
+count of those refused since. This narrows what a program running as you can
+pose as; it cannot stop one that drives Chrome itself (see
 [What it cannot protect against](#what-it-cannot-protect-against)).
 
 The two refusals mean different things. "something other than the installed
@@ -707,10 +710,13 @@ driving Chrome itself:
   own, and then replace itself with Chrome by exec, so the host's parent is
   Chrome's own file when it is checked. On macOS the host also checks that its
   parent has not exec'd since it started.
-- Google Chrome no longer loads an extension from `--load-extension`, but a
-  program running as you can write to Chrome's profile, which Chrome protects
-  only weakly, and so may get Chrome to load a modified copy of the extension
-  that keeps its key, and so its id.
+- A program running as you can start Chrome with a modified copy of the
+  extension that keeps its key, and so its id: Google Chrome 137 to 141 still
+  loads one from `--load-extension` when also given
+  `--disable-features=DisableLoadExtensionCommandLineSwitch`, and Google Chrome
+  started with `--remote-debugging-pipe --enable-unsafe-extension-debugging`
+  accepts DevTools' `Extensions.loadUnpacked`. It can also write to Chrome's
+  profile, which Chrome protects only weakly, to the same end.
 - On Linux, Chrome started with `LD_PRELOAD` runs the program's code inside
   Chrome.
 - On Windows, a process may name any process it can open as the parent of one
@@ -718,7 +724,8 @@ driving Chrome itself:
   can be made to be Chrome's.
 
 Each of these is more work than speaking the protocol directly, and each start
-of the host is in the audit log with its parent.
+of the host is in the audit log with its parent; refused starts are logged at
+most about once a minute, with a count.
 
 **macOS** gives the most. Without a prompt, a program running as you cannot
 drive the screen, read it, script Chrome or read Chrome's cookie key, and the
