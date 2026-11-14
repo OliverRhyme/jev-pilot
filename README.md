@@ -357,14 +357,27 @@ somebody's phone with nothing watching it and nothing able to answer it.
 argument in place of `device` (`mode`, `tab`, `open`, `channel`, `endpoint`,
 `chrome`, `headless`), and `start_run` takes `urls` in place of `app`; each
 becomes the command line's flag, and a call naming both a device and a browser
-is refused. A browser run is named `browser:attach:<channel>` or
-`browser:fresh`, beside device serials, so the rule of one run per target still
-holds and a browser run never blocks a phone run. Every tool call is its own
-connection, so in attach mode each one needs its own click on Allow; a look
-waits forty seconds for it, because a client gives up long before the command
-line's two minutes. The server's instructions tell the client never to retry a
-refused attach. Stopping a fresh run closes its browser and removes its
-profile.
+is refused. A browser run is named `browser:extension`,
+`browser:attach:<channel>` or `browser:fresh`, beside device serials, so the
+rule of one run per target still holds and a browser run never blocks a phone
+run.
+
+`mode: "extension"` is the one to use for the owner's own Chrome. It becomes
+`--browser extension --sites-only`, and nothing waits for a click: the owner
+set the extension up once, and its policy decides which sites and tabs a run
+may have. The server refuses a [development install](#a-development-install)
+unless it was started with `JEV_PILOT_ALLOW_DEV_BRIDGE=1`, and says so in the
+refusal, because another agent would read straight past the warning a run
+prints for one. Its instructions tell the client what to pass on to the owner
+when the extension is not set up, is paused, refuses a site, or is asked for
+a tab outside the "jev-pilot" group, and never to retry a refused identity
+check.
+
+Attach mode is kept below it as the fallback. Every tool call is its own
+connection, so each one needs its own click on Allow; a look waits forty
+seconds for it, because a client gives up long before the command line's two
+minutes. The server's instructions tell the client never to retry a refused
+attach. Stopping a fresh run closes its browser and removes its profile.
 
 **When a run cannot decide, the client answers it** — on its own turn, through
 the result of the call it is already waiting on. The model holding the
@@ -551,10 +564,10 @@ run with `--url` offers it whenever a supplied address is not the current one.
 In attach mode the page text of the tab being driven goes to TypeSafe with
 each step, exactly as screen text does on a phone, and that tab may be signed
 in to your accounts. Only the tabs the run started on or opened are described;
-your other tabs never are. Over MCP, `devices` in attach mode and the error for
-a tab that could not be chosen name each tab by its id and its site alone
-(github.com), with no title and no path; the command line, run by hand in a
-terminal, lists them in full. Password values are never read. Words you supply
+your other tabs never are. Over MCP, `devices` in extension and attach mode and
+the error for a tab that could not be chosen name each tab by its id and its
+site alone (github.com), with no title and no path; the command line, run by
+hand in a terminal, lists them in full. Password values are never read. Words you supply
 are typed only after the endpoint has shown it is Chrome, and page script runs
 only for the engine's own fixed jobs (choosing a `<select>` option, watching
 for the page to go quiet), never with text from the model.

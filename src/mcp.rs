@@ -45,8 +45,8 @@ use serde::Deserialize;
 /// Which run a call is about, when more than one is going.
 #[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
 pub struct Which {
-    /// Which run: a device serial, or `browser:fresh` or
-    /// `browser:attach:<channel>` for a browser run. Needed only when more
+    /// Which run: a device serial, or `browser:extension`, `browser:fresh`
+    /// or `browser:attach:<channel>` for a browser run. Needed only when more
     /// than one run is going.
     pub device: Option<String>,
 }
@@ -54,9 +54,11 @@ pub struct Which {
 /// A web browser to drive instead of a device.
 #[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
 pub struct BrowserArgs {
-    /// `attach` drives the owner's running Chrome, which asks them to click
-    /// Allow for every tool call; `fresh` starts a browser on a throwaway
-    /// profile and asks nobody.
+    /// `extension` drives the owner's running Chrome through the jev-pilot
+    /// extension, with no click, within the sites and tabs its policy allows;
+    /// `attach` drives it without the extension, and Chrome asks the owner to
+    /// click Allow for every tool call; `fresh` starts a browser on a
+    /// throwaway profile and asks nobody.
     pub mode: String,
     /// An existing tab to drive: its id, or a piece of its address that only
     /// one tab has.
@@ -151,7 +153,7 @@ pub struct StartArgs {
 #[derive(Debug, Deserialize, serde::Serialize, JsonSchema)]
 pub struct AnswerArgs {
     /// Which run, when more than one is going: a device serial, or
-    /// `browser:fresh` or `browser:attach:<channel>`.
+    /// `browser:extension`, `browser:fresh` or `browser:attach:<channel>`.
     pub device: Option<String>,
     /// One of the operations the run listed, or `stop` to end it.
     pub operation: Option<String>,
@@ -235,7 +237,11 @@ impl Pilot {
         annotations(title = "Look at the screen", read_only_hint = true)
     )]
     pub async fn observe(&self, Parameters(args): Parameters<ObserveArgs>) -> CallToolResult {
-        match invocation("observe", &to_value(&args)) {
+        let arguments = to_value(&args);
+        if let Some(said) = development_install(&arguments) {
+            return refused(&said);
+        }
+        match invocation("observe", &arguments) {
             Ok(line) => ran(&line),
             Err(said) => refused(&said),
         }
@@ -248,7 +254,11 @@ impl Pilot {
         annotations(title = "List devices", read_only_hint = true)
     )]
     pub async fn devices(&self, Parameters(args): Parameters<DevicesArgs>) -> CallToolResult {
-        match invocation("devices", &to_value(&args)) {
+        let arguments = to_value(&args);
+        if let Some(said) = development_install(&arguments) {
+            return refused(&said);
+        }
+        match invocation("devices", &arguments) {
             Ok(line) => ran(&line),
             Err(said) => refused(&said),
         }
@@ -289,6 +299,9 @@ impl Pilot {
         Parameters(args): Parameters<StartArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let arguments = to_value(&args);
+        if let Some(said) = development_install(&arguments) {
+            return Ok(refused(&said));
+        }
         let line = match invocation("start_run", &arguments) {
             Ok(line) => line,
             Err(said) => return Ok(refused(&said)),
@@ -508,10 +521,10 @@ impl ServerHandler for Pilot {
 /// guidance can be built with it.
 macro_rules! tabs_over_mcp {
     () => {
-        "Over MCP, `devices` in attach mode and the error for a tab that could not \
-         be chosen name each tab by its id and its site alone (github.com), with no \
-         title and no path; the command line, run by hand in a terminal, lists them \
-         in full."
+        "Over MCP, `devices` in extension and attach mode and the error for a tab \
+         that could not be chosen name each tab by its id and its site alone \
+         (github.com), with no title and no path; the command line, run by hand in \
+         a terminal, lists them in full."
     };
 }
 
@@ -584,26 +597,55 @@ ONE RUN PER DEVICE. A second run on the same phone would take turns at the \
 same screen with the first. Stop or finish the one that is there.
 
 A BROWSER. Pass `browser` instead of `device` to `observe`, `devices` and \
-`start_run`; naming both is refused. `mode` 'fresh' starts a browser on a \
-throwaway profile and asks nobody. `mode` 'attach' drives the owner's own \
-Chrome, which must have remote debugging turned on at \
+`start_run`; naming both is refused. Prefer the first of three modes.
+
+`mode` 'extension' drives the owner's own Chrome through the jev-pilot \
+extension. Setting it up is a one-time install by the owner, as an \
+administrator; after that there is no click per call, and nothing waits for \
+anyone. Its policy, which only the \
+owner can change, decides which sites a run may visit and which of the owner's \
+tabs it may take. When it stops a call, the message names the fix: pass it to \
+the owner, and do not work round it.
+- Not set up: the owner runs `sudo jev-pilot extension install` once (an \
+elevated prompt on Windows) and loads the extension in chrome://extensions.
+- Chrome is not running with the extension: ask the owner to open Chrome, or \
+to turn the extension on.
+- Paused: 'jev-pilot is paused in Chrome: resume it from the extension's \
+toolbar button'. Only the owner can resume it.
+- A site is refused: the owner may allow it with `sudo jev-pilot extension \
+policy sites add <origin>`. Do not try another address to get past it.
+- `tab` names a tab the run did not open: the owner must 'put that tab in the \
+'jev-pilot' tab group first, so the run may use it', or pass `open` instead.
+- 'something other than the installed jev-pilot answered on the bridge', or \
+'the bridge only serves the installed jev-pilot': an identity check failed, \
+which is what it is there for. Tell the owner, and never retry it.
+- A development install is refused unless this server was started with \
+JEV_PILOT_ALLOW_DEV_BRIDGE=1. Tell the owner; it is theirs to decide.
+The owner sees every run: a notification as it starts, Chrome's 'started \
+debugging' bar, and the run's tabs in a 'jev-pilot' tab group.
+
+`mode` 'fresh' starts a browser on a throwaway profile and asks nobody.
+
+`mode` 'attach' is the fallback for a Chrome without the extension. It drives \
+the owner's own Chrome, which must have remote debugging turned on at \
 chrome://inspect/#remote-debugging, and then:
 - Every tool call is a new connection, and Chrome asks the owner to click \
 Allow for each one. Its dialog has Cancel focused, so Enter refuses. A look \
 waits forty seconds for the click.
 - If the attach is refused (Cancel was chosen, or Chrome had no window open), \
 say so to the owner and stop. Never retry: each retry raises another dialog.
-- Page text from the owner's signed-in sessions goes to the model, as screen \
-text does on a phone. Only tabs the run opened or started on are described.
-- ",
+
+In extension and attach mode, page text from the owner's signed-in sessions \
+goes to the model, as screen text does on a phone. Only tabs the run opened or \
+started on are described. ",
     tabs_over_mcp!(),
     "
 Choose the tab with `tab` (its id or part of its address, as `devices` lists \
 them) or open one with `open`. For a browser, `urls` replaces `app`: it lists \
 the addresses the run may go to, and `open` is always one of them. A browser \
-run is named `browser:fresh` or `browser:attach:<channel>`; pass that as \
-`device` to `run_status`, `answer_run` and `stop_run` when more than one run \
-is going. A run may ask you to `switch_tab` or `navigate` by index, or to \
+run is named `browser:extension`, `browser:fresh` or \
+`browser:attach:<channel>`; pass that as `device` to `run_status`, \
+`answer_run` and `stop_run` when more than one run is going. A run may ask you to `switch_tab` or `navigate` by index, or to \
 `accept_dialog` or `dismiss_dialog` a JavaScript dialog."
 );
 
@@ -875,7 +917,7 @@ fn browser_flags(browser: &serde_json::Value, args: &mut Vec<String>) {
         args.push("--browser".to_owned());
         args.push(mode.to_owned());
         // The owner's tabs reach another agent here, not the owner.
-        if mode == "attach" {
+        if mode == "attach" || mode == "extension" {
             args.push("--sites-only".to_owned());
         }
     }
@@ -897,11 +939,12 @@ fn browser_flags(browser: &serde_json::Value, args: &mut Vec<String>) {
 }
 
 /// What a run is called: the device serial it drives, or for a browser
-/// `browser:attach:<channel>` or `browser:fresh`.
+/// `browser:extension`, `browser:attach:<channel>` or `browser:fresh`.
 ///
-/// One attached Chrome per channel and one fresh browser at a time, because
-/// that is what each names: two runs attached to one Chrome would take turns
-/// at its tabs.
+/// One attached Chrome per channel, one fresh browser and one run through
+/// the extension at a time, because that is what each names: two runs
+/// attached to one Chrome would take turns at its tabs, and the extension's
+/// host serves one run and tells any other it is busy.
 #[must_use]
 pub fn run_key(arguments: &serde_json::Value) -> String {
     let text = |value: &serde_json::Value, key: &str| {
@@ -916,10 +959,66 @@ pub fn run_key(arguments: &serde_json::Value) -> String {
                 "browser:attach:{}",
                 text(browser, "channel").unwrap_or_else(|| "stable".to_owned())
             ),
+            Some("extension") => "browser:extension".to_owned(),
             _ => "browser:fresh".to_owned(),
         };
     }
     text(arguments, "device").unwrap_or_else(|| UNNAMED_DEVICE.to_owned())
+}
+
+/// The refusal for a call through the extension when this system's install
+/// is a development one the server was not told to accept.
+fn development_install(arguments: &serde_json::Value) -> Option<String> {
+    #[cfg(feature = "extension")]
+    {
+        use crate::browser::{discover::Os, install};
+        let env = |name: &str| std::env::var(name).ok();
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+        let read = |path: &std::path::Path| std::fs::read_to_string(path).ok();
+        let kind = install::find_installed(Os::current(), home.as_ref(), &env, &read)
+            .ok()
+            .flatten()
+            .map(|found| found.record.kind);
+        development_refusal(arguments, kind, env(install::ALLOW_DEV_BRIDGE).as_deref())
+    }
+    #[cfg(not(feature = "extension"))]
+    {
+        let _ = arguments;
+        None
+    }
+}
+
+/// Why a call through the extension is refused, when the install it would
+/// go through is a development one and the server was not started with
+/// `JEV_PILOT_ALLOW_DEV_BRIDGE=1`.
+///
+/// A development install is the owner's own files, which any program running
+/// as the owner can rewrite, so the bridge it serves proves nothing about who
+/// is at the other end. A person at a terminal sees that in the run's header
+/// and decides for themselves; another agent would read past it, so here the
+/// header becomes a refusal unless whoever started the server chose
+/// otherwise. `kind` is the install found, if any, and `allowed` the
+/// variable's value.
+#[cfg(feature = "extension")]
+#[must_use]
+pub fn development_refusal(
+    arguments: &serde_json::Value,
+    kind: Option<crate::browser::install::InstallKind>,
+    allowed: Option<&str>,
+) -> Option<String> {
+    use crate::browser::install::{ALLOW_DEV_BRIDGE, InstallKind, UNPROTECTED};
+    let through = arguments
+        .get("browser")
+        .and_then(|b| b.get("mode"))
+        .and_then(serde_json::Value::as_str)
+        == Some("extension");
+    (through && kind == Some(InstallKind::Development) && allowed != Some("1")).then(|| {
+        format!(
+            "refused: this is a {UNPROTECTED}. Tell the owner; they can install it properly \
+             with `sudo jev-pilot extension install`, or start this server with \
+             {ALLOW_DEV_BRIDGE}=1 to accept it"
+        )
+    })
 }
 
 /// What a phone run that named no device is called.
