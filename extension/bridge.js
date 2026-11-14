@@ -57,6 +57,8 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
    * passes until the check has said whether the run may still have it.
    */
   const checks = new Map();
+  /** For each held tab, its events not yet passed on, in Chrome's order. */
+  const queues = new Map();
   let running = false;
   /** The run being served: its goal and its sites. */
   let run = { goal: "", sites: [] };
@@ -111,9 +113,9 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
    * and let go of it, telling the run, when it is not. Checks of one tab run
    * in turn, and whatever waits on the tab waits for the last of them.
    */
-  const checkArrival = (tabId, url) => {
+  const checkArrival = (tabId, url, policy) => {
     const check = (checks.get(tabId) ?? Promise.resolve()).then(async () => {
-      if (!held.has(tabId) || !leftAllowedSites(url, await policyNow())) {
+      if (!held.has(tabId) || !leftAllowedSites(url, policy ?? (await policyNow()))) {
         return;
       }
       if (held.delete(tabId)) {
@@ -187,19 +189,43 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
         await chrome.tabs.update(tab.id, { active: true });
         await chrome.windows.update(tab.windowId, { focused: true });
         return {};
-      case "send": {
-        const debuggee =
-          request.session === undefined ? { tabId: request.tab } : { tabId: request.tab, sessionId: request.session };
-        try {
-          const result = await chrome.debugger.sendCommand(debuggee, request.method, request.params ?? {});
-          return request.method === "DOMSnapshot.captureSnapshot" ? protocol.withoutPasswords(result) : result;
-        } catch (error) {
-          throw chromeFailure("chrome", error);
-        }
-      }
       default:
         return {};
     }
+  };
+
+  /**
+   * Send a command the policy allowed to a held tab. The last check that
+   * the run still holds the tab comes after every check of where it went,
+   * with nothing awaited between it and the command; the reply is passed on
+   * only if the run still holds the tab once the command is done.
+   */
+  const send = async (request) => {
+    const tabId = request.tab;
+    await settled(tabId);
+    if (!held.has(tabId)) {
+      post(protocol.refused(request.id, refusal("no_tab", `the run does not hold tab ${tabId}`)));
+      return;
+    }
+    const debuggee = request.session === undefined ? { tabId } : { tabId, sessionId: request.session };
+    let result;
+    try {
+      result = await chrome.debugger.sendCommand(debuggee, request.method, request.params ?? {});
+    } catch (error) {
+      await settled(tabId);
+      // A command cut short by its tab being let go of has no answer: the
+      // run has already been told the tab is gone.
+      if (held.has(tabId)) {
+        post(protocol.refused(request.id, chromeFailure("chrome", error)));
+      }
+      return;
+    }
+    await settled(tabId);
+    if (!held.has(tabId)) {
+      return;
+    }
+    const passed = request.method === "DOMSnapshot.captureSnapshot" ? protocol.withoutPasswords(result) : result;
+    post(protocol.reply(request.id, passed));
   };
 
   /** The address of the history entry a tab would go back to, if any. */
@@ -225,6 +251,8 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
   };
 
   const answerOrThrow = async (request) => {
+    // Read once, and used for every check of this request.
+    const policy = await policyNow();
     let tab;
     if (request.op === "attach" || request.op === "activate") {
       try {
@@ -240,7 +268,7 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
       if (held.has(request.tab)) {
         const now = await chrome.tabs.get(request.tab).catch(() => undefined);
         if (now?.url) {
-          await checkArrival(request.tab, now.url);
+          await checkArrival(request.tab, now.url, policy);
         }
       }
       if (!held.has(request.tab)) {
@@ -250,7 +278,7 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
     }
     const refused = requestRefusal(request, {
       historyUrl: request.op === "send" ? await historyUrl(request) : undefined,
-      policy: await policyNow(),
+      policy,
       paused: await paused(),
       scripts,
       run: { owned, groups: await groups() },
@@ -260,15 +288,14 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
       post(protocol.refused(request.id, refused));
       return;
     }
+    if (request.op === "send") {
+      await send(request);
+      return;
+    }
     try {
       const result = await carryOut(request, tab);
       post(protocol.reply(request.id, result));
     } catch (failure) {
-      // A command cut short by its tab being let go of has no answer: the
-      // run has already been told the tab is gone.
-      if (request.op === "send" && !held.has(request.tab)) {
-        return;
-      }
       post(protocol.refused(request.id, failure?.code ? failure : chromeFailure("chrome", failure)));
     }
   };
@@ -356,12 +383,23 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
       if (method === "Page.frameNavigated" && frame && frame.parentId === undefined) {
         checkArrival(source.tabId, frame.url);
       }
-      // Nothing from a tab passes while where it went is being checked.
-      await settled(source.tabId);
-      if (!held.has(source.tabId)) {
-        return;
-      }
-      post(protocol.cdp(source.tabId, source.sessionId, method, params));
+      // Nothing from a tab passes while where it went is being checked, and
+      // its events pass in the order Chrome sent them.
+      const tabId = source.tabId;
+      const passed = (queues.get(tabId) ?? Promise.resolve())
+        .then(() => settled(tabId))
+        .then(() => {
+          if (held.has(tabId)) {
+            post(protocol.cdp(tabId, source.sessionId, method, params));
+          }
+        });
+      queues.set(tabId, passed);
+      passed.finally(() => {
+        if (queues.get(tabId) === passed) {
+          queues.delete(tabId);
+        }
+      });
+      await passed;
     },
 
     /** A tab's page changed, as Chrome's navigation events say it. */

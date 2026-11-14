@@ -57,9 +57,32 @@ async function fire(fake, event) {
 }
 
 /**
- * Set Chrome up to answer `request` as recorded in `answers` (the frames the
- * extension sent before the run's next one). Returns the events to fire
- * before the request is given, and those to fire after its reply.
+ * The Chrome the conversations were recorded against, from the same page
+ * targets the run's side lists (tests/fixtures/cdp/signup/targets.json):
+ * each page a tab, numbered from 1. The owner has put the sign-up page in
+ * the jev-pilot tab group; the blank tab is theirs alone.
+ */
+function chromeAsRecorded(fake) {
+  const targets = JSON.parse(readFileSync(new URL("../../tests/fixtures/cdp/signup/targets.json", import.meta.url), "utf8"));
+  const pages = targets.targetInfos.filter((t) => t.type === "page");
+  for (const [i, page] of pages.entries()) {
+    const id = i + 1;
+    const grouped = page.url.endsWith("/signup");
+    fake.state.tabs.set(id, { id, url: page.url, title: page.title, groupId: grouped ? 31 : -1, windowId: 1 });
+    fake.state.targets.set(id, page.targetId);
+  }
+}
+
+/** What Chrome says when a command fails, by method, in its own words. */
+const CHROME_FAILS = { "DOM.resolveNode": "No node with given id found" };
+
+/**
+ * Set Chrome up for `request`, given the frames the extension sent before
+ * the run's next one (`answers`). Chrome's state is its own, never the
+ * recorded reply: the recording only says when Chrome did something the
+ * fake cannot know of, such as the owner closing a tab, and the reply the
+ * extension makes of it must match. Returns the events to fire before the
+ * request is given, and those to fire after its reply.
  */
 function prepare(fake, request, answers) {
   const reply = answers.find((a) => a.type === "reply" && a.id === request.id);
@@ -68,64 +91,25 @@ function prepare(fake, request, answers) {
   const after = answers.slice(at + 1).filter(isEvent);
   const first = before.filter((e) => e.type === "status");
   const during = before.filter((e) => e.type !== "status");
-  const failure = reply?.error && !POLICY_CODES.includes(reply.error.code) ? reply.error : undefined;
-  const fail = () => {
-    throw new Error(failure.message);
-  };
 
-  switch (request.op) {
-    case "tabs": {
-      const tabs = reply.result.tabs.map((t) => ({
-        id: t.tab,
-        url: t.url,
-        title: t.title,
-        groupId: fake.state.tabs.get(t.tab)?.groupId ?? 31,
-        windowId: 1,
-        openerTabId: t.opener,
-      }));
-      for (const [i, t] of reply.result.tabs.entries()) {
-        fake.state.tabs.set(t.tab, fake.state.tabs.get(t.tab) ?? tabs[i]);
-        fake.state.targets.set(t.tab, t.target);
+  if ((request.op === "attach" || request.op === "activate") && reply?.error?.code === "no_tab") {
+    // The owner closed the tab, and Chrome has not yet said so.
+    fake.state.tabs.delete(request.tab);
+  }
+  if (request.op === "send" && !(reply?.error && POLICY_CODES.includes(reply.error.code))) {
+    const fails = reply?.error?.code === "chrome";
+    fake.when("debugger.sendCommand", async () => {
+      for (const event of during) {
+        await fire(fake, event);
       }
-      fake.when("tabs.query", () => tabs);
-      break;
-    }
-    case "create":
-      if (reply.result) {
-        fake.when("tabs.create", () => {
-          const tab = { id: reply.result.tab, url: request.url, title: "", groupId: -1, windowId: 1 };
-          fake.state.tabs.set(tab.id, tab);
-          fake.state.targets.set(tab.id, reply.result.target);
-          return tab;
-        });
+      if (!reply) {
+        throw new Error("Detached while handling command.");
       }
-      break;
-    case "attach":
-    case "activate":
-      if (reply.error?.code === "refused_tab") {
-        fake.state.tabs.get(request.tab).groupId = -1;
-      } else if (reply.error?.code === "no_tab") {
-        fake.when("tabs.get", fail);
-      } else if (reply.error?.code === "attach_failed") {
-        fake.when("debugger.attach", fail);
+      if (fails) {
+        throw new Error(CHROME_FAILS[request.method] ?? `no failure of ${request.method} is modelled`);
       }
-      break;
-    case "send":
-      if (reply?.error && POLICY_CODES.includes(reply.error.code)) {
-        break;
-      }
-      fake.when("debugger.sendCommand", async () => {
-        for (const event of during) {
-          await fire(fake, event);
-        }
-        if (!reply) {
-          throw new Error("Detached while handling command.");
-        }
-        return failure ? fail() : reply.result;
-      });
-      break;
-    default:
-      break;
+      return reply.result;
+    });
   }
   return { first, after: reply ? after : [] };
 }
@@ -145,6 +129,7 @@ for (const name of readdirSync(FOLDER).filter((f) => f.endsWith(".json")).sort()
       userAgent: `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ${hello.product} Safari/537.36`,
     });
     listen(fake.chrome, bridge);
+    chromeAsRecorded(fake);
     await bridge.connect();
     await settle();
 

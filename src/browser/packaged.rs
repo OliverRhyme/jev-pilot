@@ -26,6 +26,7 @@ pub static FILES: &[(&str, &[u8])] = &[
     file!("policy.json"),
     file!("popup.html"),
     file!("popup.js"),
+    file!("popup-view.js"),
     file!("protocol.js"),
     file!("scripts.json"),
     file!("service-worker.js"),

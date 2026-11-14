@@ -15,6 +15,8 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
     targets: new Map(),
     groups: [{ id: 31, title: "jev-pilot", windowId: 1 }],
     nextTab: 100,
+    /** The tabs some debugger is attached to. */
+    attached: new Set(),
     storage: { paused },
     session: {},
     /** How the next call of each kind answers, set by a test. */
@@ -99,6 +101,7 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
         return answer("tabs.create", () => {
           const tab = { id: state.nextTab++, url: properties.url, title: "", groupId: -1, windowId: properties.windowId ?? 1 };
           state.tabs.set(tab.id, tab);
+          state.targets.set(tab.id, `T${tab.id}`);
           return tab;
         });
       },
@@ -148,11 +151,19 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
     debugger: {
       attach: async (debuggee, protocolVersion) => {
         calls.push(["debugger.attach", debuggee, protocolVersion]);
-        return answer("debugger.attach", () => undefined);
+        return answer("debugger.attach", () => {
+          // Chrome lets one debugger at a time attach to a tab.
+          if (state.attached.has(debuggee.tabId)) {
+            throw new Error(`Another debugger is already attached to the tab with id: ${debuggee.tabId}.`);
+          }
+          state.attached.add(debuggee.tabId);
+        });
       },
       detach: async (debuggee) => {
         calls.push(["debugger.detach", debuggee]);
-        return answer("debugger.detach", () => undefined);
+        return answer("debugger.detach", () => {
+          state.attached.delete(debuggee.tabId);
+        });
       },
       sendCommand: async (debuggee, method, params) => {
         calls.push(["debugger.sendCommand", debuggee, method, params]);
@@ -164,7 +175,7 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
           id,
           tabId,
           type: "page",
-          attached: state.attached?.has(tabId) ?? false,
+          attached: state.attached.has(tabId),
         }));
       },
       onEvent: event("debugger.onEvent"),

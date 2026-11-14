@@ -476,10 +476,11 @@ real hierarchy dump, not as a finished counterpart.
 
 ## A web browser
 
-`--browser` drives a tab of Chrome (or Chrome for Testing, or Chromium) with
-the same loop, the same desk and the same rules: code lists what the page
-allows, and Jev picks one. It needs a build with the `browser` feature, and
-extension mode the `extension` feature; the prebuilt releases have both.
+`--browser` drives a tab of Chrome (or, in fresh and attach mode, Chrome for
+Testing or Chromium) with the same loop, the same desk and the same rules: code
+lists what the page allows, and Jev picks one. It needs a build with the
+`browser` feature, and extension mode the `extension` feature; the prebuilt
+releases have both.
 
 The engine speaks the Chrome DevTools Protocol itself. Each step reads the
 tab's accessibility tree and its layout (boxes, paint order, which elements
@@ -540,22 +541,17 @@ jev-pilot extension install                  # Windows, from a prompt run as adm
 
 The install copies the running jev-pilot where only an administrator can
 write, pins its identity, writes the extension's files and its `policy.json`
-(keeping an existing one), registers the host with every Chromium-family
-browser it finds (Chrome stable, beta, dev and canary, Chromium, Edge and
-Brave), turns off user-level native messaging hosts, creates the audit log's
+(keeping an existing one), registers the host with Google Chrome, turns off
+Chrome's user-level native messaging hosts, creates the audit log's
 folder, and prints what it changed. Native messaging hosts you already had at
 user level (Claude in Chrome's, for example) are copied to system level first,
 so they keep working, and `uninstall` puts them back.
 
-The host is registered with each of those browsers, but it serves only a
-browser it can identify as the one that started it (see
-[How the bridge is protected](#how-the-bridge-is-protected)):
-
-| | Served |
-| --- | --- |
-| macOS | Google Chrome, any channel, and Chrome for Testing. Not Chromium, Edge or Brave. |
-| Linux | Google Chrome, any channel, from `/opt/google/`; Chromium from `/usr/lib/chromium/` or `/usr/lib/chromium-browser/`; Edge from `/opt/microsoft/msedge/`; Brave from `/opt/brave.com/brave/`. Not a Snap or Flatpak browser. |
-| Windows | Google Chrome, signed by Google, under Program Files. Not Edge or Brave. |
+**Google Chrome only.** The host serves branded Google Chrome, stable, Beta,
+Dev or Canary, and nothing else: not Chrome for Testing, Chromium, Edge or
+Brave, which load any unpacked extension they are told to on the command line.
+On Linux that means Chrome installed under `/opt/google/`; a Snap or Flatpak
+browser is not served.
 
 | | macOS | Linux | Windows |
 | --- | --- | --- | --- |
@@ -650,8 +646,11 @@ bridge is built so that only the installed jev-pilot can use it. Five layers:
 1. **The local channel.** A Unix socket of mode 0600, in a folder of mode 0700
    that is yours (`~/Library/Application Support/jev-pilot/run/` on macOS;
    `$XDG_RUNTIME_DIR/jev-pilot/`, else `~/.local/state/jev-pilot/run/`, on
-   Linux), or on Windows a named pipe whose
-   access list admits only you and the system and refuses remote clients.
+   Linux), or on Windows a named pipe whose access list admits only you and
+   the system, and refuses remote clients. Each run is served on a new
+   instance of the pipe, so you may create instances; a program running as
+   you could therefore add one of its own and wait for a run, which is why
+   the run checks who serves it before it sends anything (the next layer).
    Other users, other machines and web pages cannot connect. Any program
    running as you still could, which is what the next layers are for.
 2. **Which program is at the other end.** Each end asks the OS about the
@@ -676,13 +675,12 @@ bridge is built so that only the installed jev-pilot can use it. Five layers:
    run raises a notification, Chrome's debugging bar and the tab group.
 
 The host also checks the program that started it, and serves nothing unless
-that is a browser. On macOS the check is Chrome's own code signature (Google's
-Developer ID, Chrome for Testing included). On Linux it is a known browser
-install, root-owned under folders only root can change, read through /proc. On
-Windows it is System32's cmd.exe, started by a browser under Program Files
-signed by Google. Each start is written to the audit log with the parent and the
-verdict. Without this, a program running as you could start the genuine host on
-pipes of its own and pose as the extension.
+that is Google Chrome. On macOS the check is Chrome's code signature; on Linux,
+Chrome's root-owned install, matched by file identity; on Windows, System32's
+cmd.exe started by a Google-signed chrome.exe under Program Files. Each start is
+written to the audit log. This narrows what a program running as you can pose
+as; it cannot stop one that drives Chrome itself (see
+[What it cannot protect against](#what-it-cannot-protect-against)).
 
 The two refusals mean different things. "something other than the installed
 jev-pilot answered on the bridge (…); nothing was sent" is the run refusing the
@@ -700,6 +698,27 @@ such a run gets only what any run gets (Jev choosing among offered rows,
 `navigate` only to the addresses it names, the allowed sites, the tab rules,
 and no cookies, storage, network or script of its own), it raises a
 notification, and on macOS and Linux it is written to a log it cannot erase.
+
+**Posing as the extension, on every OS.** The host's check of the program that
+started it is made of facts a program running as you can still arrange, by
+driving Chrome itself:
+
+- On Linux, a program can start the host, keep its pipes in a process of its
+  own, and then replace itself with Chrome by exec, so the host's parent is
+  Chrome's own file when it is checked. On macOS the host also checks that its
+  parent has not exec'd since it started.
+- Google Chrome no longer loads an extension from `--load-extension`, but a
+  program running as you can write to Chrome's profile, which Chrome protects
+  only weakly, and so may get Chrome to load a modified copy of the extension
+  that keeps its key, and so its id.
+- On Linux, Chrome started with `LD_PRELOAD` runs the program's code inside
+  Chrome.
+- On Windows, a process may name any process it can open as the parent of one
+  it creates (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`), so the host's parent
+  can be made to be Chrome's.
+
+Each of these is more work than speaking the protocol directly, and each start
+of the host is in the audit log with its parent.
 
 **macOS** gives the most. Without a prompt, a program running as you cannot
 drive the screen, read it, script Chrome or read Chrome's cookie key, and the

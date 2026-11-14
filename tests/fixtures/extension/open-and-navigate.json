@@ -105,6 +105,12 @@
             "target": "933B271DD0EC81D3402A478AE60B40E5",
             "title": "Sign up",
             "url": "http://127.0.0.1:52578/signup"
+          },
+          {
+            "tab": 100,
+            "target": "T100",
+            "title": "",
+            "url": "about:blank"
           }
         ]
       },

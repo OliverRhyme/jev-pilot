@@ -312,7 +312,7 @@ test("on starting, the extension lets go of tabs an earlier worker left attached
   const { fake, bridge } = bridged();
   fake.state.targets.set(7, "T7");
   fake.state.targets.set(8, "T8");
-  fake.state.attached = new Set([7]);
+  fake.state.attached.add(7);
   await bridge.forgetEarlierRun();
   assert.deepEqual(
     fake.calls.filter(([call]) => call === "debugger.detach").map(([, d]) => d.tabId),
@@ -390,4 +390,138 @@ test("a page snapshot leaves Chrome without the value of any password field", as
   const values = reply.result.documents[0].nodes.inputValue.value.map((i) => reply.result.strings[i]);
   assert.deepEqual(values, ["alice"]);
   assert.equal(JSON.stringify(reply).includes("hunter2"), false, "the words themselves stay behind");
+});
+
+test("a commit off the sites while a command's own policy is read stops the command", async () => {
+  const policy = { sites: ["https://github.com"], owner_tabs: "group" };
+  const slow = slowPolicy(policy);
+  const { fake, bridge, posted } = bridged({ loadPolicy: slow.loadPolicy });
+  await bridge.receive(started);
+  const attaching = attachedTo(fake, bridge, 7);
+  for (let i = 0; i < 3; i += 1) {
+    await settle();
+    slow.release();
+  }
+  await attaching;
+  posted.length = 0;
+  const typing = bridge.receive({
+    type: "request",
+    id: 5,
+    op: "send",
+    tab: 7,
+    method: "Input.insertText",
+    params: { text: "secret" },
+  });
+  await settle();
+  // The page commits elsewhere while the command waits on the policy file;
+  // Chrome's tab says where it is only once the commit is reported.
+  fake.state.tabs.get(7).url = "https://elsewhere.test/x";
+  fake.emit("webNavigation.onCommitted", { tabId: 7, frameId: 0, url: "https://elsewhere.test/x" });
+  let answered = false;
+  typing.then(() => {
+    answered = true;
+  });
+  for (let i = 0; i < 50 && !answered; i += 1) {
+    await settle();
+    slow.release();
+  }
+  assert.ok(answered, "the command was answered");
+  assert.equal(
+    fake.calls.some(([call, , method]) => call === "debugger.sendCommand" && method === "Input.insertText"),
+    false,
+  );
+  assert.equal(posted[0].type, "detached");
+});
+
+test("a command's reply stays in Chrome when its tab left the sites while it ran", async () => {
+  const { fake, bridge, posted } = bridged({ policy: { sites: ["https://github.com"], owner_tabs: "group" } });
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  posted.length = 0;
+  fake.when("debugger.sendCommand", () => {
+    fake.emit("webNavigation.onCommitted", { tabId: 7, frameId: 0, url: "https://elsewhere.test/x" });
+    return { documents: [], strings: ["from elsewhere"] };
+  });
+  await bridge.receive({ type: "request", id: 6, op: "send", tab: 7, method: "DOMSnapshot.captureSnapshot", params: {} });
+  await settle();
+  assert.deepEqual(
+    posted.map((m) => m.type),
+    ["detached"],
+    "the snapshot of the other site is not passed on",
+  );
+});
+
+test("a tab's events reach the run in the order Chrome sent them", async () => {
+  const policy = { sites: ["https://github.com"], owner_tabs: "group" };
+  const slow = slowPolicy(policy);
+  const { fake, bridge, posted } = bridged({ loadPolicy: slow.loadPolicy });
+  await bridge.receive(started);
+  const attaching = attachedTo(fake, bridge, 7);
+  for (let i = 0; i < 3; i += 1) {
+    await settle();
+    slow.release();
+  }
+  await attaching;
+  posted.length = 0;
+  const first = fake.emit("debugger.onEvent", { tabId: 7 }, "Page.frameNavigated", {
+    frame: { id: "F", url: "https://github.com/next" },
+  });
+  const second = fake.emit("debugger.onEvent", { tabId: 7 }, "Page.loadEventFired", {});
+  for (let i = 0; i < 4; i += 1) {
+    await settle();
+    slow.release();
+  }
+  await Promise.all([first, second]);
+  await settle();
+  assert.deepEqual(
+    posted.map((m) => m.method),
+    ["Page.frameNavigated", "Page.loadEventFired"],
+  );
+});
+
+test("a command reads the policy file once", async () => {
+  let reads = 0;
+  const { fake, bridge } = bridged({
+    loadPolicy: async () => {
+      reads += 1;
+      return { sites: ["https://github.com"], owner_tabs: "group" };
+    },
+  });
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  reads = 0;
+  await bridge.receive({ type: "request", id: 7, op: "send", tab: 7, method: "Page.enable", params: {} });
+  await settle();
+  assert.equal(reads, 1);
+});
+
+test("a password that matches a word the page uses elsewhere is still dropped, and the page still reads", async () => {
+  const { fake, bridge, posted } = bridged();
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  const strings = ["#document", "INPUT", "type", "password", "text", "alice", "hunter2"];
+  const doc = (inputValue) => ({
+    nodes: {
+      nodeName: [0, 1, 1, 1],
+      attributes: [[], [2, 3], [2, 3], [2, 4]],
+      inputValue,
+    },
+  });
+  fake.when("debugger.sendCommand", () => ({
+    strings,
+    documents: [
+      // The passwords are "password", "INPUT" and "type": words the page
+      // also uses as an attribute, a tag and a name.
+      doc({ index: [1, 2, 3], value: [3, 1, 5] }),
+      doc({ index: [1, 2, 3], value: [2, 6, 5] }),
+    ],
+  }));
+  await bridge.receive({ type: "request", id: 9, op: "send", tab: 7, method: "DOMSnapshot.captureSnapshot", params: {} });
+  await settle();
+  const result = posted.at(-1).result;
+  for (const document of result.documents) {
+    assert.deepEqual(document.nodes.inputValue, { index: [3], value: [5] });
+  }
+  assert.deepEqual(result.strings.slice(0, 6), ["#document", "INPUT", "type", "password", "text", "alice"]);
+  assert.equal(result.strings.includes("hunter2"), false);
 });

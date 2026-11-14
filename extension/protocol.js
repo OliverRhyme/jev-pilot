@@ -105,12 +105,12 @@ export function read(message) {
 }
 
 /**
- * A DOMSnapshot without the value of any password field: each `<input
- * type=password>` loses its `inputValue` entry, and the words it held are
- * blanked in the snapshot's string table. The run never reads a password's
- * value; this keeps it from leaving Chrome at all. A string the page also
- * uses elsewhere is blanked there too, which costs at most a word of the
- * page and never a secret.
+ * A DOMSnapshot without the value of any password field. Every node of
+ * every document is classified first, from the snapshot as Chrome sent it;
+ * then each `<input type=password>` loses its `inputValue` entry, and the
+ * words it held are blanked in the snapshot's string table unless the page
+ * uses that string for something else too, where it is already in plain
+ * sight and blanking it would change what the page reads as.
  */
 export function withoutPasswords(snapshot) {
   const strings = snapshot?.strings;
@@ -118,37 +118,81 @@ export function withoutPasswords(snapshot) {
     return snapshot;
   }
   const text = (index) => (typeof strings[index] === "string" ? strings[index] : "");
-  for (const document of snapshot.documents) {
+  const isPassword = (nodes, node) => {
+    if (text(nodes.nodeName?.[node]).toUpperCase() !== "INPUT") {
+      return false;
+    }
+    const attributes = nodes.attributes?.[node] ?? [];
+    for (let i = 0; i + 1 < attributes.length; i += 2) {
+      if (text(attributes[i]).toLowerCase() === "type") {
+        return text(attributes[i + 1]).toLowerCase() === "password";
+      }
+    }
+    return false;
+  };
+
+  // First, from the snapshot untouched: which values are passwords, and
+  // which strings anything else uses.
+  const secret = new Set();
+  const used = new Set();
+  const use = (index) => {
+    if (Number.isInteger(index)) {
+      used.add(index);
+    }
+  };
+  const useAll = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(useAll);
+    } else {
+      use(value);
+    }
+  };
+  const kept = snapshot.documents.map((document) => {
     const nodes = document?.nodes;
     const values = nodes?.inputValue;
-    if (!values || !Array.isArray(values.index) || !Array.isArray(values.value)) {
-      continue;
+    for (const key of ["documentURL", "title", "baseURL", "contentLanguage", "encodingName", "publicId", "systemId", "frameId"]) {
+      use(document?.[key]);
     }
-    const isPassword = (node) => {
-      if (text(nodes.nodeName?.[node]).toUpperCase() !== "INPUT") {
-        return false;
+    if (nodes) {
+      useAll(nodes.nodeName);
+      useAll(nodes.nodeValue);
+      useAll(nodes.attributes);
+      useAll(nodes.pseudoIdentifier);
+      for (const rare of ["textValue", "currentSourceURL", "originURL"]) {
+        useAll(nodes[rare]?.value);
       }
-      const attributes = nodes.attributes?.[node] ?? [];
-      for (let i = 0; i + 1 < attributes.length; i += 2) {
-        if (text(attributes[i]).toLowerCase() === "type") {
-          return text(attributes[i + 1]).toLowerCase() === "password";
-        }
-      }
-      return false;
-    };
+    }
+    useAll(document?.layout?.text);
+    useAll(document?.layout?.styles);
+    if (!values || !Array.isArray(values.index) || !Array.isArray(values.value)) {
+      return null;
+    }
     const index = [];
     const value = [];
     values.index.forEach((node, k) => {
-      if (isPassword(node)) {
-        if (Number.isInteger(values.value[k]) && values.value[k] >= 0) {
-          strings[values.value[k]] = "";
+      if (isPassword(nodes, node)) {
+        if (Number.isInteger(values.value[k])) {
+          secret.add(values.value[k]);
         }
       } else {
         index.push(node);
         value.push(values.value[k]);
+        use(values.value[k]);
       }
     });
-    nodes.inputValue = { index, value };
+    return { index, value };
+  });
+
+  // Then the changes.
+  snapshot.documents.forEach((document, d) => {
+    if (kept[d]) {
+      document.nodes.inputValue = kept[d];
+    }
+  });
+  for (const index of secret) {
+    if (!used.has(index) && index >= 0 && index < strings.length) {
+      strings[index] = "";
+    }
   }
   return snapshot;
 }
