@@ -1142,6 +1142,14 @@ fn only_a_host_manifest_named_as_its_file_is_copied() {
         serde_json::from_str::<serde_json::Value>(&copied).unwrap(),
         serde_json::from_str::<serde_json::Value>(good).unwrap()
     );
+    // Anything else in it is left behind.
+    let padded = r#"{"name": "com.example.x", "path": "/opt/x/host", "type": "stdio",
+                     "allowed_origins": [], "payload": "x", "nested": {"a": 1}}"#;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&manifest_to_copy(padded, "com.example.x").unwrap())
+            .unwrap(),
+        json!({"name": "com.example.x", "path": "/opt/x/host", "type": "stdio", "allowed_origins": []})
+    );
     for (text, stem) in [
         (good, "com.example.other"),
         (
@@ -1183,6 +1191,12 @@ fn a_linked_or_foreign_host_file_is_not_read() {
     let link = dir.join("com.example.y.json");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     assert!(read_owners_host(&link, me).is_err(), "a link");
+    // A pipe would hold the install up forever on opening.
+    let fifo = dir.join("com.example.fifo.json");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+    let started = std::time::Instant::now();
+    assert!(read_owners_host(&fifo, me).is_err(), "a pipe");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
     let big = dir.join("com.example.big.json");
     std::fs::write(&big, vec![b' '; 1 << 20]).unwrap();
     assert!(read_owners_host(&big, me).is_err(), "too large");

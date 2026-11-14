@@ -510,7 +510,7 @@ const HOST_MANIFEST_LIMIT: u64 = 64 << 10;
 
 /// An owner's host manifest, to be copied to system level: parsed as one,
 /// named as its file (`stem`), with an absolute `path`, and written out
-/// again rather than copied byte for byte.
+/// again with only a manifest's fields rather than copied byte for byte.
 ///
 /// # Errors
 /// When it is not such a manifest.
@@ -528,7 +528,18 @@ pub fn manifest_to_copy(text: &str, stem: &str) -> Result<String, String> {
     if !(Path::new(path).is_absolute() || path.starts_with('/')) {
         return Err(format!("its program {path} is not an absolute path"));
     }
-    serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())
+    // Only what a host manifest has is written again.
+    let kept: serde_json::Map<String, Value> = object
+        .iter()
+        .filter(|(key, _)| {
+            matches!(
+                key.as_str(),
+                "name" | "description" | "path" | "type" | "allowed_origins"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    serde_json::to_string_pretty(&Value::Object(kept)).map_err(|e| e.to_string())
 }
 
 /// An owner's host file, read without following a link, when it is a
@@ -543,7 +554,8 @@ pub fn read_owners_host(path: &Path, uid: u32) -> io::Result<String> {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     let mut file = OpenOptions::new()
         .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW)
+        // Without following a link, and without waiting on a pipe.
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
         .open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.uid() != uid || meta.len() > HOST_MANIFEST_LIMIT {

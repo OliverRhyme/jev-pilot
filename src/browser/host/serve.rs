@@ -455,6 +455,9 @@ fn hang_up(stream: &Stream) {
 pub fn append_audit(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
     let log = dir.join("audit.log");
     let mut file = OpenOptions::new().read(true).append(true).open(&log)?;
+    // Held through the rotation and the write, so two hosts cannot rotate
+    // under each other; it is let go when the file closes.
+    file.lock()?;
     if file.metadata()?.len() >= limit {
         for n in (1..AUDIT_KEPT).rev() {
             let from = std::fs::read(dir.join(format!("audit.log.{n}")))?;
