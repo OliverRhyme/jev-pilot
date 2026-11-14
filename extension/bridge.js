@@ -14,6 +14,27 @@ const OPENER_WAIT_MS = 500;
 /** The debugger protocol version the extension asks Chrome for. */
 const DEBUGGER_VERSION = "1.3";
 
+/**
+ * What Chrome says when a managed browser's policy forbids debugging a
+ * page: `runtime_blocked_hosts` in ExtensionSettings, or a screenshot
+ * restriction, which since Chrome 155 can also stop an attach.
+ */
+const POLICY_FORBIDS = [
+  "Host access is restricted by policy.",
+  "This page cannot be scripted due to an ExtensionsSettings policy.",
+  "Screenshot capture is restricted by policy.",
+  "Screenshot capture is restricted on this target.",
+];
+
+/** The origin of `url`, or `url` itself when it has none. */
+const originOf = (url) => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url;
+  }
+};
+
 /** A failure in Chrome, as the run is told it. */
 const chromeFailure = (code, error) => refusal(code, String(error?.message ?? error));
 
@@ -30,14 +51,23 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
   const held = new Set();
   /** Tabs opened with no opener yet, waiting to hear what opened them. */
   const unclaimed = new Map();
+  /**
+   * For a held tab whose page has just changed, the check of where it went.
+   * Set before anything is awaited, so that no command or event for the tab
+   * passes until the check has said whether the run may still have it.
+   */
+  const checks = new Map();
   let running = false;
   /** The run being served: its goal and its sites. */
   let run = { goal: "", sites: [] };
 
+  /** The policy file, or `null` when it cannot be read, which refuses. */
+  const policyNow = () => loadPolicy().catch(() => null);
+
   const paused = async () => (await chrome.storage.local.get("paused")).paused === true;
 
   const say = async (type) =>
-    post(protocol.hello({ version, userAgent, paused: await paused(), policy: await loadPolicy() }, type));
+    post(protocol.hello({ version, userAgent, paused: await paused(), policy: await policyNow() }, type));
 
   const targetOf = async (tabId) =>
     (await chrome.debugger.getTargets()).find((t) => t.tabId === tabId && t.type === "page")?.id;
@@ -76,6 +106,37 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
     }
   };
 
+  /**
+   * Check that a held tab arriving at `url` is still on the allowed sites,
+   * and let go of it, telling the run, when it is not. Checks of one tab run
+   * in turn, and whatever waits on the tab waits for the last of them.
+   */
+  const checkArrival = (tabId, url) => {
+    const check = (checks.get(tabId) ?? Promise.resolve()).then(async () => {
+      if (!held.has(tabId) || !leftAllowedSites(url, await policyNow())) {
+        return;
+      }
+      if (held.delete(tabId)) {
+        await chrome.debugger.detach({ tabId }).catch(() => {});
+        post(protocol.detached(tabId, "left_allowed_sites", url));
+      }
+    });
+    checks.set(tabId, check);
+    check.finally(() => {
+      if (checks.get(tabId) === check) {
+        checks.delete(tabId);
+      }
+    });
+    return check;
+  };
+
+  /** Wait for any check of where `tabId` went. */
+  const settled = async (tabId) => {
+    while (checks.has(tabId)) {
+      await checks.get(tabId).catch(() => {});
+    }
+  };
+
   /** Carry out a request the policy allowed. */
   const carryOut = async (request, tab) => {
     switch (request.op) {
@@ -107,6 +168,12 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
         try {
           await chrome.debugger.attach({ tabId: request.tab }, DEBUGGER_VERSION);
         } catch (error) {
+          if (POLICY_FORBIDS.includes(String(error?.message ?? error))) {
+            throw refusal(
+              "attach_failed",
+              `this Chrome's policy does not let extensions debug ${originOf(tab.url)}`,
+            );
+          }
           throw chromeFailure("attach_failed", error);
         }
         held.add(request.tab);
@@ -124,7 +191,8 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
         const debuggee =
           request.session === undefined ? { tabId: request.tab } : { tabId: request.tab, sessionId: request.session };
         try {
-          return await chrome.debugger.sendCommand(debuggee, request.method, request.params ?? {});
+          const result = await chrome.debugger.sendCommand(debuggee, request.method, request.params ?? {});
+          return request.method === "DOMSnapshot.captureSnapshot" ? protocol.withoutPasswords(result) : result;
         } catch (error) {
           throw chromeFailure("chrome", error);
         }
@@ -134,8 +202,29 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
     }
   };
 
-  /** Answer one request from the run. */
+  /** The address of the history entry a tab would go back to, if any. */
+  const historyUrl = async (request) => {
+    if (request.method !== "Page.navigateToHistoryEntry") {
+      return undefined;
+    }
+    try {
+      const history = await chrome.debugger.sendCommand({ tabId: request.tab }, "Page.getNavigationHistory", {});
+      return history?.entries?.find((entry) => entry.id === request.params?.entryId)?.url;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** Answer one request from the run, always: a failure is a coded refusal. */
   const answer = async (request) => {
+    try {
+      await answerOrThrow(request);
+    } catch (failure) {
+      post(protocol.refused(request.id, failure?.code ? failure : chromeFailure("chrome", failure)));
+    }
+  };
+
+  const answerOrThrow = async (request) => {
     let tab;
     if (request.op === "attach" || request.op === "activate") {
       try {
@@ -145,12 +234,23 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
         return;
       }
     }
-    if (request.op === "send" && !held.has(request.tab)) {
-      post(protocol.refused(request.id, refusal("no_tab", `the run does not hold tab ${request.tab}`)));
-      return;
+    if (request.op === "send") {
+      await settled(request.tab);
+      // Where the tab is now, whatever DevTools has or has not said yet.
+      if (held.has(request.tab)) {
+        const now = await chrome.tabs.get(request.tab).catch(() => undefined);
+        if (now?.url) {
+          await checkArrival(request.tab, now.url);
+        }
+      }
+      if (!held.has(request.tab)) {
+        post(protocol.refused(request.id, refusal("no_tab", `the run does not hold tab ${request.tab}`)));
+        return;
+      }
     }
     const refused = requestRefusal(request, {
-      policy: await loadPolicy(),
+      historyUrl: request.op === "send" ? await historyUrl(request) : undefined,
+      policy: await policyNow(),
       paused: await paused(),
       scripts,
       run: { owned, groups: await groups() },
@@ -193,6 +293,18 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
     /** The run being served and the tabs it holds, for the popup. */
     state: () => ({ running, goal: run.goal, sites: run.sites, tabs: [...held] }),
 
+    /**
+     * Let go of tabs an earlier service worker left attached: its run's
+     * state went with it, so nothing would ever let go of them.
+     */
+    async forgetEarlierRun() {
+      for (const target of await chrome.debugger.getTargets()) {
+        if (target.attached && target.tabId !== undefined && !held.has(target.tabId)) {
+          await chrome.debugger.detach({ tabId: target.tabId }).catch(() => {});
+        }
+      }
+    },
+
     /** Say hello to the host, on connecting. */
     connect: () => say("hello"),
 
@@ -222,9 +334,11 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
         case "release":
           return releaseAll();
         case "reload": {
-          const { reloaded } = await chrome.storage.session.get("reloaded");
-          if (reloaded !== version) {
-            await chrome.storage.session.set({ reloaded: version });
+          // Kept in local storage, which a reload leaves alone: if Chrome
+          // comes back with this same version, it is not reloaded again.
+          const { reloadedFrom } = await chrome.storage.local.get("reloadedFrom");
+          if (reloadedFrom !== version) {
+            await chrome.storage.local.set({ reloadedFrom: version });
             chrome.runtime.reload();
           }
           return;
@@ -240,15 +354,21 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
       }
       const frame = params?.frame;
       if (method === "Page.frameNavigated" && frame && frame.parentId === undefined) {
-        const policy = await loadPolicy();
-        if (leftAllowedSites(frame.url, policy)) {
-          held.delete(source.tabId);
-          await chrome.debugger.detach({ tabId: source.tabId }).catch(() => {});
-          post(protocol.detached(source.tabId, "left_allowed_sites", frame.url));
-          return;
-        }
+        checkArrival(source.tabId, frame.url);
+      }
+      // Nothing from a tab passes while where it went is being checked.
+      await settled(source.tabId);
+      if (!held.has(source.tabId)) {
+        return;
       }
       post(protocol.cdp(source.tabId, source.sessionId, method, params));
+    },
+
+    /** A tab's page changed, as Chrome's navigation events say it. */
+    async committed({ tabId, frameId, url }) {
+      if (frameId === 0 && held.has(tabId)) {
+        await checkArrival(tabId, url);
+      }
     },
 
     /** Chrome let go of an attached tab. */
@@ -311,5 +431,6 @@ export function listen(chrome, bridge) {
   chrome.tabs.onCreated.addListener((tab) => bridge.tabCreated(tab));
   chrome.tabs.onRemoved.addListener((tabId) => bridge.tabRemoved(tabId));
   chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => bridge.navigationTarget(details));
+  chrome.webNavigation.onCommitted.addListener((details) => bridge.committed(details));
   chrome.storage.onChanged.addListener((changes, area) => bridge.storageChanged(changes, area));
 }

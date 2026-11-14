@@ -98,7 +98,14 @@ impl<S: Read + Write> ExtensionWire<S> {
             });
         };
         write_message(&mut stream, &echo)?;
-        match read_message(&mut stream)? {
+        // The goal has gone to the host by now, and the host passed the
+        // run's check, so an answer this run cannot read is a version apart
+        // rather than a squatter.
+        let answer = read_message(&mut stream).map_err(|e| match e {
+            ConnectError::NotTheHost { why } => ConnectError::Garbled { why },
+            other => other,
+        })?;
+        match answer {
             Message::Ready {
                 hello,
                 host_version,
@@ -123,7 +130,7 @@ impl<S: Read + Write> ExtensionWire<S> {
             Message::Busy { pid, goal } => Err(ConnectError::Busy { pid, goal }),
             Message::Absent => Err(ConnectError::Absent),
             Message::Refused { check } => Err(ConnectError::Refused { check }),
-            _ => Err(ConnectError::NotTheHost {
+            _ => Err(ConnectError::Garbled {
                 why: "it answered the echo with something other than the bridge's state".into(),
             }),
         }
@@ -177,8 +184,13 @@ impl<S: Read + Write> Wire for ExtensionWire<S> {
             if let Some(pacer) = &self.pacer {
                 pacer.set(left);
             }
-            let message = match read_message(&mut self.stream) {
-                Ok(message) => message,
+            let message = match read_frame(&mut self.stream) {
+                // One message this run cannot read, a newer extension's or
+                // one missing a field, is passed over rather than ending it.
+                Ok(frame) => match serde_json::from_slice::<Message>(&frame) {
+                    Ok(message) => message,
+                    Err(_) => continue,
+                },
                 Err(ConnectError::Frame(FrameError::Io(e)))
                     if matches!(
                         e.kind(),
@@ -200,12 +212,26 @@ impl<S: Read + Write> Wire for ExtensionWire<S> {
     }
 }
 
-/// What a failure on the channel means to the engine.
+/// What a failure on the channel means to the engine. A channel the host
+/// has gone from reads as Chrome having quit, however the OS words it; a
+/// frame too large is said in the failure table's words.
 fn wire_error(e: ConnectError) -> WireError {
+    let gone = || WireError::Ended(ConnectError::Closed.to_string().into());
     match e {
-        ConnectError::Closed => WireError::Ended(ConnectError::Closed.to_string().into()),
+        ConnectError::Closed | ConnectError::Frame(FrameError::Truncated) => gone(),
+        ConnectError::Frame(FrameError::Io(e))
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::UnexpectedEof
+            ) =>
+        {
+            gone()
+        }
         ConnectError::Frame(FrameError::Io(e)) => WireError::Io(e),
-        other => WireError::Protocol(other.to_string().into()),
+        other => WireError::Ended(other.to_string().into()),
     }
 }
 
@@ -411,13 +437,28 @@ impl Translator {
                         .to_string(),
                 ]
             }
-            Message::TabRemoved { tab } => match self.targets.remove(&tab) {
-                Some(target) => vec![
-                    json!({"method": "Target.targetDestroyed", "params": {"targetId": target}})
+            Message::TabRemoved { tab } => {
+                let mut said = Vec::new();
+                // Closed before Chrome said the debugger let go of it: its
+                // session ends here, so no call waits on a tab that is gone.
+                if let Some(session) = self.session_of(tab).map(str::to_owned) {
+                    self.sessions.remove(&session);
+                    let target = self.targets.get(&tab).cloned().unwrap_or_default();
+                    said.push(
+                        json!({"method": "Target.detachedFromTarget", "params": {
+                            "sessionId": session, "targetId": target, "reason": "target_closed",
+                        }})
                         .to_string(),
-                ],
-                None => Vec::new(),
-            },
+                    );
+                }
+                if let Some(target) = self.targets.remove(&tab) {
+                    said.push(
+                        json!({"method": "Target.targetDestroyed", "params": {"targetId": target}})
+                            .to_string(),
+                    );
+                }
+                said
+            }
             Message::Detached { tab, reason, url } => {
                 let Some(session) = self.session_of(tab).map(str::to_owned) else {
                     return Vec::new();
@@ -439,11 +480,15 @@ impl Translator {
     fn answer(&mut self, id: &Value, pending: &Pending, result: &Value) -> String {
         match pending {
             Pending::Tabs => {
+                // Entry by entry: one tab that cannot be described does not
+                // hide the others.
                 let tabs: Vec<TabInfo> = result
                     .get("tabs")
-                    .cloned()
-                    .and_then(|t| serde_json::from_value(t).ok())
-                    .unwrap_or_default();
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| serde_json::from_value(t.clone()).ok())
+                    .collect();
                 // Openers are named by target id, so every tab is known first.
                 for tab in &tabs {
                     self.targets.insert(tab.tab, tab.target.clone());
@@ -513,10 +558,15 @@ fn ended(reason: &str) -> String {
 
 /// Read one message from the local channel.
 fn read_message(stream: &mut impl Read) -> Result<Message, ConnectError> {
-    let frame = bridge::decode(stream, ByteOrder::Little)?.ok_or(ConnectError::Closed)?;
+    let frame = read_frame(stream)?;
     serde_json::from_slice(&frame).map_err(|e| ConnectError::NotTheHost {
         why: format!("it sent something that is not a bridge message: {e}").into(),
     })
+}
+
+/// Read one frame from the local channel.
+fn read_frame(stream: &mut impl Read) -> Result<Vec<u8>, ConnectError> {
+    bridge::decode(stream, ByteOrder::Little)?.ok_or(ConnectError::Closed)
 }
 
 /// Write one message to the local channel.
@@ -536,6 +586,12 @@ pub enum ConnectError {
     /// What answered on the channel is not the jev-pilot host.
     NotTheHost {
         /// What gave it away.
+        why: Box<str>,
+    },
+    /// The host passed the run's check, and then answered the echo in a
+    /// shape this run cannot read: a version apart.
+    Garbled {
+        /// What could not be read.
         why: Box<str>,
     },
     /// Another run holds the bridge.
@@ -578,6 +634,11 @@ impl core::fmt::Display for ConnectError {
                 f,
                 "something other than the installed jev-pilot answered on the bridge ({why}); \
                  nothing was sent"
+            ),
+            Self::Garbled { why } => write!(
+                f,
+                "the jev-pilot host answered in a way this run cannot read ({why}): run the \
+                 install again"
             ),
             Self::Busy { pid, goal } => write!(
                 f,

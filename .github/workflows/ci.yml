@@ -24,11 +24,16 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # jev-pilot-os holds the only unsafe code, and only for Windows, so its
-  # lints (every unsafe block documented) are checked where it compiles.
-  lint-windows:
-    name: lint (windows-latest)
-    runs-on: windows-latest
+  # jev-pilot-os holds the only unsafe code, for Windows and macOS, and the
+  # peer checks differ by OS, so the lints (every unsafe block documented
+  # among them) are checked on each OS that compiles that code.
+  lint-os:
+    name: lint (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -163,10 +163,14 @@ pub enum EngineError {
     NotOwned(TabKey),
     /// The tab is not in the browser.
     NoSuchTab(TabKey),
+    /// The browser would not attach to the tab, in its own words: through
+    /// the extension these name the cause and its fix, as a managed
+    /// Chrome's policy forbidding the site.
+    AttachRefused(Box<str>),
     /// Chrome let go of the driven tab, and nothing more can be done in it.
     Detached {
-        /// Why: `canceled_by_user`, `target_closed`, `left_allowed_sites`, or
-        /// Chrome's own word.
+        /// Why: `canceled_by_user`, `target_closed`, `left_allowed_sites`,
+        /// Chrome's own word, or `closed` when Chrome's event gave none.
         reason: Box<str>,
         /// Where the tab went, when it left the allowed sites.
         url: Option<Box<str>>,
@@ -183,6 +187,7 @@ impl core::fmt::Display for EngineError {
             Self::Read(e) => e.fmt(f),
             Self::NotOwned(tab) => write!(f, "tab {} is not one this run owns", tab.as_str()),
             Self::NoSuchTab(tab) => write!(f, "there is no tab {}", tab.as_str()),
+            Self::AttachRefused(said) => f.write_str(said),
             Self::Detached { reason, url } => match &**reason {
                 "canceled_by_user" => f.write_str(
                     "you pressed Cancel on Chrome's 'started debugging' bar; jev-pilot let go \
@@ -191,6 +196,7 @@ impl core::fmt::Display for EngineError {
                 "target_closed" => f.write_str(
                     "the tab was closed, or went to a page extensions may not drive",
                 ),
+                "closed" => f.write_str("the tab was closed"),
                 "left_allowed_sites" => write!(
                     f,
                     "the tab went to {}, which is not on the allowed sites",
@@ -375,10 +381,17 @@ impl<W: Wire> CdpEngine<W> {
     }
 
     fn attach_session(&mut self, target: &str) -> Result<(), EngineError> {
-        let attached = self.browser_call(
-            "Target.attachToTarget",
-            json!({"targetId": target, "flatten": true}),
-        )?;
+        let attached = self
+            .browser_call(
+                "Target.attachToTarget",
+                json!({"targetId": target, "flatten": true}),
+            )
+            .map_err(|e| match e {
+                EngineError::Transport(TransportError::Refused { error, .. }) => {
+                    EngineError::AttachRefused(error.message)
+                }
+                other => other,
+            })?;
         let session = attached
             .get("sessionId")
             .and_then(Value::as_str)
@@ -536,11 +549,11 @@ impl<W: Wire> CdpEngine<W> {
             }
             "Page.loadEventFired" if self.ours(event) => self.seen.loaded = true,
             // Chrome's own event gives no reason; a tab let go of without
-            // one was closed.
+            // one, with no extension between, was closed.
             "Target.detachedFromTarget" if str_of("sessionId") == &*self.session => {
                 let reason = Some(str_of("reason"))
                     .filter(|r| !r.is_empty())
-                    .unwrap_or("target_closed");
+                    .unwrap_or("closed");
                 let url = Some(str_of("url"))
                     .filter(|u| !u.is_empty())
                     .map(Into::into);

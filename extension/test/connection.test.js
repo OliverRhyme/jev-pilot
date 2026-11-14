@@ -98,3 +98,9 @@ test("when another browser already serves jev-pilot, the extension says so, lets
   assert.equal(timers.at(-1).ms, 30000, "no quick retries against a browser that is serving");
   assert.ok(fake.calls.some(([call, d]) => call === "action.setBadgeText" && d.text === "!"));
 });
+
+test("a connection is shown as connected once hello is on its way, before the host says anything", async () => {
+  const { connection } = connected();
+  await connection.open();
+  assert.equal(connection.status(), "connected");
+});

@@ -71,7 +71,11 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
     runtime: {
       getManifest: () => ({ version }),
       getURL: (path) => `chrome-extension://eckgjcpdiehapkphgcflmcikippoegcp/${path}`,
-      reload: () => calls.push(["runtime.reload"]),
+      // Chrome clears session storage when an extension reloads.
+      reload: () => {
+        calls.push(["runtime.reload"]);
+        state.session = {};
+      },
       connectNative: (name) => {
         calls.push(["runtime.connectNative", name]);
         return port();
@@ -156,13 +160,19 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
       },
       getTargets: async () => {
         calls.push(["debugger.getTargets"]);
-        return [...state.targets].map(([tabId, id]) => ({ id, tabId, type: "page", attached: false }));
+        return [...state.targets].map(([tabId, id]) => ({
+          id,
+          tabId,
+          type: "page",
+          attached: state.attached?.has(tabId) ?? false,
+        }));
       },
       onEvent: event("debugger.onEvent"),
       onDetach: event("debugger.onDetach"),
     },
     webNavigation: {
       onCreatedNavigationTarget: event("webNavigation.onCreatedNavigationTarget"),
+      onCommitted: event("webNavigation.onCommitted"),
     },
     storage: {
       local: {
@@ -171,6 +181,7 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
       },
       session: {
         get: async (key) => ({ [key]: state.session[key] }),
+        // Replaced on reload, as Chrome empties it.
         set: async (values) => {
           calls.push(["storage.session.set", values]);
           Object.assign(state.session, values);

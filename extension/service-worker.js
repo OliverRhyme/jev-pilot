@@ -45,5 +45,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   return true;
 });
 
-// Any wake-up of the worker is a chance to be connected.
+// A worker that starts again has lost its run, so it lets go of what that
+// run held. Any wake-up of the worker is also a chance to be connected.
+bridge.forgetEarlierRun().catch(() => {});
 connection.open();
