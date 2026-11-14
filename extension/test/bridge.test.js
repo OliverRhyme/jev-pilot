@@ -550,3 +550,18 @@ test("a password field's value attribute leaves Chrome blank too", async () => {
   const attributes = result.documents[0].nodes.attributes[1].map((i) => result.strings[i]);
   assert.deepEqual(attributes, ["type", "password", "name", "pw", "value", ""]);
 });
+
+test("a command's reply is held back when its tab is off the sites by the time it is done", async () => {
+  const { fake, bridge, posted } = bridged({ policy: { sites: ["https://github.com"], owner_tabs: "group" } });
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  posted.length = 0;
+  fake.when("debugger.sendCommand", () => {
+    // The page moves while the command runs, and Chrome has said nothing yet.
+    fake.state.tabs.get(7).url = "https://elsewhere.test/x";
+    return { strings: ["from elsewhere"], documents: [] };
+  });
+  await bridge.receive({ type: "request", id: 6, op: "send", tab: 7, method: "DOMSnapshot.captureSnapshot", params: {} });
+  await settle();
+  assert.deepEqual(posted.map((m) => m.type), ["detached"]);
+});

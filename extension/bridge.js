@@ -195,14 +195,28 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
   };
 
   /**
+   * Check where a held tab is now, whatever DevTools has or has not said
+   * yet, and wait for every check of where it went.
+   */
+  const whereNow = async (tabId, policy) => {
+    if (held.has(tabId)) {
+      const now = await chrome.tabs.get(tabId).catch(() => undefined);
+      if (now?.url) {
+        checkArrival(tabId, now.url, policy);
+      }
+    }
+    await settled(tabId);
+  };
+
+  /**
    * Send a command the policy allowed to a held tab. The last check that
    * the run still holds the tab comes after every check of where it went,
    * with nothing awaited between it and the command; the reply is passed on
    * only if the run still holds the tab once the command is done.
    */
-  const send = async (request) => {
+  const send = async (request, policy) => {
     const tabId = request.tab;
-    await settled(tabId);
+    await whereNow(tabId, policy);
     if (!held.has(tabId)) {
       post(protocol.refused(request.id, refusal("no_tab", `the run does not hold tab ${tabId}`)));
       return;
@@ -220,7 +234,7 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
       }
       return;
     }
-    await settled(tabId);
+    await whereNow(tabId, policy);
     if (!held.has(tabId)) {
       return;
     }
@@ -264,13 +278,6 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
     }
     if (request.op === "send") {
       await settled(request.tab);
-      // Where the tab is now, whatever DevTools has or has not said yet.
-      if (held.has(request.tab)) {
-        const now = await chrome.tabs.get(request.tab).catch(() => undefined);
-        if (now?.url) {
-          await checkArrival(request.tab, now.url, policy);
-        }
-      }
       if (!held.has(request.tab)) {
         post(protocol.refused(request.id, refusal("no_tab", `the run does not hold tab ${request.tab}`)));
         return;
@@ -289,7 +296,7 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
       return;
     }
     if (request.op === "send") {
-      await send(request);
+      await send(request, policy);
       return;
     }
     try {
