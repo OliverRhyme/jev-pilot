@@ -126,36 +126,49 @@ pub const READ_VALUE: &str = r"function () {
   return { password, value: password ? '' : value };
 }";
 
-/// The page-script watch for DOM changes: one `MutationObserver` per
-/// document, installed in an isolated world so the page's own scripts cannot
-/// see or disturb it.
-const WATCH: &str = r"(globalThis.__jevPilotWatch ??= (() => {
-  const state = { last: performance.now(), count: 0 };
-  new MutationObserver(() => { state.last = performance.now(); state.count += 1; })
-    .observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
-  return state;
-})())";
-
 /// How long the page has gone without a DOM change, and how many changes the
-/// watch has seen, now.
-#[must_use]
-pub fn quiet_now() -> String {
-    format!(
-        "(() => {{ const w = {WATCH}; return {{ quiet: Math.round(performance.now() - w.last), mutations: w.count }}; }})()"
-    )
-}
+/// watch has seen, now. Run in an isolated world, so the page's own scripts
+/// cannot see or disturb the watch: one `MutationObserver` per document,
+/// installed the first time it is asked.
+pub const QUIET_NOW: &str = r"function () {
+  const w = (globalThis.__jevPilotWatch ??= (() => {
+    const state = { last: performance.now(), count: 0 };
+    new MutationObserver(() => { state.last = performance.now(); state.count += 1; })
+      .observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    return state;
+  })());
+  return { quiet: Math.round(performance.now() - w.last), mutations: w.count };
+}";
 
-/// Resolve once the page has gone `window_ms` without a DOM change, or after
-/// `cap_ms` whatever it is doing, with the same answer as [`quiet_now`].
-#[must_use]
-pub fn quiet_within(window_ms: u64, cap_ms: u64) -> String {
-    format!(
-        "new Promise(resolve => {{ const w = {WATCH}; const start = performance.now(); \
-         const tick = () => {{ const now = performance.now(); const quiet = now - w.last; \
-         if (quiet >= {window_ms} || now - start >= {cap_ms}) resolve({{ quiet: Math.round(quiet), mutations: w.count }}); \
-         else setTimeout(tick, Math.max(10, {window_ms} - quiet)); }}; tick(); }})"
-    )
-}
+/// Resolve once the page has gone `windowMs` without a DOM change, or after
+/// `capMs` whatever it is doing, with the same answer as [`QUIET_NOW`]. The
+/// two numbers are passed as arguments, so the text never changes.
+pub const QUIET_WITHIN: &str = r"function (windowMs, capMs) {
+  const w = (globalThis.__jevPilotWatch ??= (() => {
+    const state = { last: performance.now(), count: 0 };
+    new MutationObserver(() => { state.last = performance.now(); state.count += 1; })
+      .observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    return state;
+  })());
+  const start = performance.now();
+  return new Promise(resolve => {
+    const tick = () => {
+      const now = performance.now();
+      const quiet = now - w.last;
+      if (quiet >= windowMs || now - start >= capMs) {
+        resolve({ quiet: Math.round(quiet), mutations: w.count });
+      } else {
+        setTimeout(tick, Math.max(10, windowMs - quiet));
+      }
+    };
+    tick();
+  });
+}";
+
+/// Every script the engine can send a page, each fixed text run with
+/// `Runtime.callFunctionOn`. The extension lets a script through only when it
+/// is byte for byte one of these.
+pub const PAGE_SCRIPTS: &[&str] = &[CONTAINS, SELECT_OPTION, READ_VALUE, QUIET_NOW, QUIET_WITHIN];
 
 /// The outcome line for a drop-down choice, from [`SELECT_OPTION`]'s answer.
 #[must_use]

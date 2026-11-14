@@ -621,7 +621,7 @@ fn script_read(script: &Script) {
             json!({"executionContextId": 41}),
         )
         .on(
-            "Runtime.evaluate",
+            "Runtime.callFunctionOn",
             json!({"result": {"type": "object", "value": {"quiet": 250, "mutations": 3}}}),
         );
 }
@@ -630,7 +630,7 @@ fn script_read(script: &Script) {
 /// the page is quiet with the same number of changes as at the read.
 fn script_settle(script: &Script, mutations: u64) {
     script.on(
-        "Runtime.evaluate",
+        "Runtime.callFunctionOn",
         json!({"result": {"type": "object", "value": {"quiet": 120, "mutations": mutations}}}),
     );
 }
@@ -652,7 +652,15 @@ fn command_traffic(script: &Script) -> Vec<Value> {
     script
         .sent()
         .into_iter()
-        .filter(|m| m["method"] != "Runtime.evaluate" && m["method"] != "Page.createIsolatedWorld")
+        .filter(|m| {
+            m["method"] != "Page.createIsolatedWorld"
+                && !(m["method"] == "Runtime.callFunctionOn"
+                    && [input::QUIET_NOW, input::QUIET_WITHIN].contains(
+                        &m["params"]["functionDeclaration"]
+                            .as_str()
+                            .unwrap_or_default(),
+                    ))
+        })
         .collect()
 }
 
@@ -1497,7 +1505,7 @@ fn a_tab_the_page_opens_is_reported_and_can_be_switched_to() {
     script.on("Page.enable", json!({}));
     script.on("Page.createIsolatedWorld", json!({"executionContextId": 7}));
     script.on(
-        "Runtime.evaluate",
+        "Runtime.callFunctionOn",
         json!({"result": {"type": "object", "value": {"quiet": 500, "mutations": 0}}}),
     );
 
@@ -1542,11 +1550,11 @@ fn settling_waits_for_quiet_in_an_isolated_world_and_reports_no_change() {
 
     engine.perform(&BrowserCommand::Settle).expect("settles");
 
-    let evaluate = &script.params_of("Runtime.evaluate")[0];
-    assert_eq!(evaluate["contextId"], 41);
-    assert_eq!(evaluate["awaitPromise"], true);
+    let watch = &script.params_of("Runtime.callFunctionOn")[0];
+    assert_eq!(watch["executionContextId"], 41);
+    assert_eq!(watch["awaitPromise"], true);
     assert!(
-        evaluate["expression"]
+        watch["functionDeclaration"]
             .as_str()
             .is_some_and(|e| e.contains("MutationObserver"))
     );
@@ -1772,9 +1780,12 @@ fn a_select_on_a_page_that_changed_is_not_set() {
         })
         .expect("a refusal is not an error");
 
-    assert_eq!(
-        script.params_of("Runtime.callFunctionOn"),
-        Vec::<Value>::new()
+    assert!(
+        script
+            .params_of("Runtime.callFunctionOn")
+            .iter()
+            .all(|call| call["functionDeclaration"] != input::SELECT_OPTION),
+        "no option was chosen"
     );
     assert_eq!(
         script.params_of("DOM.getNodeForLocation"),
@@ -1877,4 +1888,707 @@ fn a_frame_that_cannot_be_read_is_counted() {
 
     assert_eq!(read.unreadable_frames, 1);
     assert!(read.nodes.iter().all(|n| &*n.frame != signup::CHILD_FRAME));
+}
+
+// --- a tab let go of ---
+
+/// Chrome lets go of the driven tab: the owner pressed Cancel on its
+/// debugging bar, the tab closed or went somewhere extensions may not drive,
+/// or the extension let go of it for leaving the allowed sites. The run is
+/// told which, and every call after fails at once, sending nothing.
+#[test]
+fn a_tab_let_go_of_ends_every_call_with_the_reason() {
+    for (reason, said) in [
+        (
+            json!({"reason": "canceled_by_user"}),
+            "you pressed Cancel on Chrome's 'started debugging' bar; jev-pilot let go of every tab",
+        ),
+        (
+            json!({"reason": "target_closed"}),
+            "the tab was closed, or went to a page extensions may not drive",
+        ),
+        (
+            // Chrome's own event, in attach mode, gives no reason.
+            json!({}),
+            "the tab was closed, or went to a page extensions may not drive",
+        ),
+        (
+            json!({"reason": "left_allowed_sites", "url": "https://elsewhere.test/account?x=1"}),
+            "the tab went to https://elsewhere.test, which is not on the allowed sites",
+        ),
+        (
+            json!({"reason": "render_process_gone"}),
+            "Chrome let go of the tab: render_process_gone",
+        ),
+    ] {
+        let (script, mut engine) = engine_after_read();
+        let mut params = reason.clone();
+        params["sessionId"] = SESSION.into();
+        params["targetId"] = signup::TARGET.into();
+        script.event(&json!({"method": "Target.detachedFromTarget", "params": params}));
+
+        let first = engine.read().expect_err("let go of");
+        assert_eq!(first.to_string(), said, "{reason}");
+        script.clear_sent();
+        let again = engine
+            .perform(&BrowserCommand::Submit)
+            .expect_err("still let go of");
+        assert_eq!(again.to_string(), said, "{reason}");
+        assert!(
+            script.sent().is_empty(),
+            "nothing is sent after: {:?}",
+            script.methods()
+        );
+    }
+}
+
+/// A call waiting for its reply when the tab is let go of ends then, rather
+/// than when its wait runs out.
+#[test]
+fn a_call_in_flight_ends_when_its_tab_is_let_go_of() {
+    let (script, mut engine) = engine_after_read();
+    script.answer(
+        "Page.getFrameTree",
+        Answer::EventsThen(
+            vec![json!({"method": "Target.detachedFromTarget", "params": {"sessionId": SESSION, "targetId": signup::TARGET, "reason": "target_closed"}})],
+            Box::new(Answer::Silence),
+        ),
+    );
+    let started = std::time::Instant::now();
+    let error = engine.read().expect_err("let go of");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        error.to_string(),
+        "the tab was closed, or went to a page extensions may not drive"
+    );
+}
+
+/// Another tab's session being let go of leaves the driven tab as it was.
+#[test]
+fn another_session_let_go_of_leaves_the_tab_alone() {
+    let (script, mut engine) = engine_after_read();
+    script.event(&json!({"method": "Target.detachedFromTarget", "params": {"sessionId": "OTHER", "targetId": "T2", "reason": "target_closed"}}));
+    script_read(&script);
+    engine.read().expect("still reads");
+}
+
+// --- page scripts ---
+
+use jev_pilot::browser::input;
+
+/// The extension lets a page script through only when it is, byte for byte,
+/// one of the engine's own, so no script is built with numbers in it: the
+/// quiet watch after a command is a fixed declaration given its window and
+/// cap as arguments, run in the isolated world.
+#[test]
+fn the_quiet_watch_is_a_fixed_script_given_its_numbers() {
+    let (script, mut engine) = engine_after_read();
+    script_settle(&script, 3);
+
+    engine.perform(&BrowserCommand::Submit).expect("performs");
+
+    let calls = script.params_of("Runtime.callFunctionOn");
+    let watch = calls
+        .iter()
+        .find(|c| c["functionDeclaration"] == input::QUIET_WITHIN)
+        .expect("the watch is called");
+    assert_eq!(watch["arguments"], json!([{"value": 100}, {"value": 3000}]));
+    assert_eq!(watch["executionContextId"], 41);
+    assert_eq!(watch["awaitPromise"], true);
+    assert_eq!(script.params_of("Runtime.evaluate"), Vec::<Value>::new());
+}
+
+/// A read samples how long the page has been quiet with a fixed script too.
+#[test]
+fn a_read_samples_the_quiet_with_a_fixed_script() {
+    let (script, mut engine) = engine_after_read();
+    script_read(&script);
+    engine.read().expect("reads");
+    let calls = script.params_of("Runtime.callFunctionOn");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c["functionDeclaration"] == input::QUIET_NOW && c["arguments"] == json!([])),
+        "{calls:?}"
+    );
+    assert_eq!(script.params_of("Runtime.evaluate"), Vec::<Value>::new());
+}
+
+/// One list holds every script the engine can send a page, for the
+/// extension's allow list to be checked against.
+#[test]
+fn the_page_scripts_are_listed_in_one_place() {
+    assert_eq!(
+        input::PAGE_SCRIPTS,
+        [
+            input::CONTAINS,
+            input::SELECT_OPTION,
+            input::READ_VALUE,
+            input::QUIET_NOW,
+            input::QUIET_WITHIN,
+        ]
+    );
+    for script in input::PAGE_SCRIPTS {
+        assert!(script.trim_start().starts_with("function"), "{script}");
+    }
+}
+
+// --- driving through the extension ---
+
+/// The bridge as a run meets it, with the extension behind the host played
+/// by a function from each request to the frames that answer it. Every frame
+/// that crosses, either way, is logged as `{from, to, frame}`: the recorded
+/// conversations in `tests/fixtures/extension/` are these logs.
+mod through_the_extension {
+    use jev_pilot::browser::bridge::{self, ByteOrder};
+    use serde_json::{Value, json};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::io::{self, Read, Write};
+    use std::rc::Rc;
+
+    pub type Log = Rc<RefCell<Vec<Value>>>;
+    type Answer = Box<dyn FnMut(&Value) -> Vec<Value>>;
+
+    pub struct Bridge {
+        log: Log,
+        hello: Value,
+        answer: Answer,
+        to_run: VecDeque<u8>,
+        from_run: Vec<u8>,
+    }
+
+    pub const NONCE: &str = "6a65762d70696c6f742d6272696467652d6e6f6e63652d666f722d746573747";
+
+    impl Bridge {
+        /// A host whose extension says `hello`, and answers with `answer`.
+        pub fn new(hello: Value, answer: impl FnMut(&Value) -> Vec<Value> + 'static) -> Self {
+            let log: Log = Rc::default();
+            let mut said = hello.clone();
+            said["type"] = "hello".into();
+            log.borrow_mut()
+                .push(json!({"from": "extension", "to": "host", "frame": said}));
+            let mut bridge = Self {
+                log,
+                hello,
+                answer: Box::new(answer),
+                to_run: VecDeque::new(),
+                from_run: Vec::new(),
+            };
+            bridge.tell_run(&json!({"type": "nonce", "nonce": NONCE}), "host");
+            bridge
+        }
+
+        pub fn log(&self) -> Log {
+            Rc::clone(&self.log)
+        }
+
+        fn tell_run(&mut self, frame: &Value, from: &str) {
+            self.log
+                .borrow_mut()
+                .push(json!({"from": from, "to": "run", "frame": frame}));
+            self.to_run.extend(bridge::encode(
+                frame.to_string().as_bytes(),
+                ByteOrder::Little,
+            ));
+        }
+
+        fn heard(&mut self, frame: &Value) {
+            if frame["type"] == "echo" {
+                self.log
+                    .borrow_mut()
+                    .push(json!({"from": "run", "to": "host", "frame": frame}));
+                self.log.borrow_mut().push(json!({"from": "host", "to": "extension", "frame": {
+                    "type": "run_started", "pid": 4242, "goal": frame["goal"], "sites": frame["sites"],
+                }}));
+                let mut ready = self.hello.clone();
+                ready["type"] = "ready".into();
+                ready["host_version"] = "0.2.0".into();
+                self.tell_run(&ready, "host");
+            } else {
+                self.log
+                    .borrow_mut()
+                    .push(json!({"from": "run", "to": "extension", "frame": frame}));
+                for answer in (self.answer)(frame) {
+                    self.tell_run(&answer, "extension");
+                }
+            }
+        }
+    }
+
+    impl Read for Bridge {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.to_run.is_empty() {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            let n = buf.len().min(self.to_run.len());
+            for (slot, byte) in buf.iter_mut().zip(self.to_run.drain(..n)) {
+                *slot = byte;
+            }
+            Ok(n)
+        }
+    }
+
+    impl Write for Bridge {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.from_run.extend_from_slice(buf);
+            loop {
+                let mut reader = &self.from_run[..];
+                let Ok(Some(frame)) = bridge::decode(&mut reader, ByteOrder::Little) else {
+                    break;
+                };
+                let used = self.from_run.len() - reader.len();
+                self.from_run.drain(..used);
+                self.heard(&serde_json::from_slice(&frame).expect("the run writes JSON"));
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// When the run's channel closes, the host tells the extension to let go
+    /// of every tab the run held.
+    impl Drop for Bridge {
+        fn drop(&mut self) {
+            self.log
+                .borrow_mut()
+                .push(json!({"from": "host", "to": "extension", "frame": {"type": "release"}}));
+        }
+    }
+
+    /// The extension's hello, unpaused, with an empty site list.
+    pub fn hello() -> Value {
+        json!({
+            "protocol": 1, "extension_version": "0.2.0", "product": "Chrome/158.0.7400.12",
+            "paused": false, "policy": {"sites": [], "owner_tabs": "group"},
+        })
+    }
+
+    /// The conversation `name` as recorded, compared with `log`. With
+    /// `JEV_PILOT_RECORD` set, or no recording yet, the log is written as the
+    /// recording instead.
+    pub fn matches_recording(name: &str, log: &Log) {
+        let path = format!(
+            "{}/tests/fixtures/extension/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let frames = Value::Array(log.borrow().clone());
+        if std::env::var_os("JEV_PILOT_RECORD").is_some() || !std::path::Path::new(&path).exists() {
+            let text = serde_json::to_string_pretty(&frames).expect("JSON") + "\n";
+            std::fs::write(&path, text).expect("the recording is written");
+            return;
+        }
+        let recorded: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("JSON");
+        assert_eq!(frames, recorded, "the conversation differs from {path}");
+    }
+}
+
+use jev_pilot::browser::extension::ExtensionWire;
+use jev_pilot::browser::transport::Wire as _;
+use through_the_extension::{Bridge, hello, matches_recording};
+
+/// The sign-up page's tabs, as the extension lists them: the page targets of
+/// the recorded browser, numbered.
+fn signup_tabs() -> Value {
+    let targets = signup::load("targets");
+    let tabs: Vec<Value> = targets["targetInfos"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .filter(|t| t["type"] == "page")
+        .zip(1..)
+        .map(|(t, tab)| json!({"tab": tab, "target": t["targetId"], "url": t["url"], "title": t["title"]}))
+        .collect();
+    json!({"tabs": tabs})
+}
+
+/// The tab the sign-up page is in.
+fn signup_tab() -> i64 {
+    signup_tabs()["tabs"]
+        .as_array()
+        .expect("tabs")
+        .iter()
+        .find(|t| t["target"] == signup::TARGET)
+        .and_then(|t| t["tab"].as_i64())
+        .expect("the sign-up tab")
+}
+
+/// The extension in front of the recorded sign-up page: each request
+/// answered as the real Chrome answered it over its websocket.
+fn signup_extension(request: &Value) -> Vec<Value> {
+    let id = &request["id"];
+    let result = match request["op"].as_str() {
+        Some("tabs") => signup_tabs(),
+        Some("send") => match request["method"].as_str().unwrap_or_default() {
+            "Page.getFrameTree" => signup::load("frame-tree"),
+            "Accessibility.getFullAXTree" if request["params"]["frameId"] == signup::MAIN_FRAME => {
+                signup::load("ax-0")
+            }
+            "Accessibility.getFullAXTree" => signup::load("ax-1"),
+            "DOMSnapshot.captureSnapshot" => signup::load("snapshot"),
+            "Page.getLayoutMetrics" => signup::load("layout-metrics"),
+            "Page.createIsolatedWorld" => json!({"executionContextId": 41}),
+            "Runtime.callFunctionOn" => {
+                json!({"result": {"type": "object", "value": {"quiet": 250, "mutations": 3}}})
+            }
+            _ => json!({}),
+        },
+        _ => json!({}),
+    };
+    vec![json!({"type": "reply", "id": id, "result": result})]
+}
+
+/// Through the extension, the engine attaches to the tab and reads the same
+/// page it reads over Chrome's own websocket from the same replies; then it
+/// presses a row, which opens a tab, and switches to that tab.
+#[test]
+fn attaching_and_reading_through_the_extension_reads_the_same_page() {
+    let (script, mut direct) = engine_after_read();
+    script_read(&script);
+    let over_websocket = direct.read().expect("reads");
+
+    let bridge = Bridge::new(hello(), |request| {
+        let mut answers = signup_extension(request);
+        if is_send(request, "DOM.getNodeForLocation") {
+            answers =
+                vec![json!({"type": "reply", "id": request["id"], "result": {"backendNodeId": 2}})];
+        }
+        if is_send(request, "Input.dispatchMouseEvent")
+            && request["params"]["type"] == "mouseReleased"
+        {
+            answers.push(json!({"type": "tab_created", "tab": 50, "target": "T50", "opener": signup_tab(), "url": "https://example.test/terms", "title": "Terms"}));
+        }
+        answers
+    });
+    let log = bridge.log();
+    let wire = ExtensionWire::connect(bridge, "Sign up", &[]).expect("connects");
+    let mut engine =
+        CdpEngine::attach(wire, &TabKey::new(signup::TARGET), false).expect("attaches");
+    let through_extension = engine.read().expect("reads");
+    assert_eq!(through_extension, over_websocket);
+
+    engine
+        .perform(&BrowserCommand::Press {
+            at: Point { x: 120, y: 19 },
+            node: email(),
+        })
+        .expect("presses");
+    assert_eq!(engine.outcome(), Some("opened a new tab: Terms"));
+    engine
+        .perform(&BrowserCommand::SwitchTab(TabKey::new("T50")))
+        .expect("switches");
+    assert_eq!(engine.current_tab(), TabKey::new("T50"));
+
+    drop(engine);
+    matches_recording("attach-and-read", &log);
+    let frames = log.borrow();
+    assert!(
+        frames.iter().any(|f| f["frame"]
+            == json!({"type": "request", "id": 3, "op": "attach", "tab": signup_tab()})),
+        "the tab was attached by its tab id"
+    );
+}
+
+/// Connect to the bridge in front of `answer`, as a run with no sites.
+fn through(
+    answer: impl FnMut(&Value) -> Vec<Value> + 'static,
+) -> (ExtensionWire<Bridge>, through_the_extension::Log) {
+    let bridge = Bridge::new(hello(), answer);
+    let log = bridge.log();
+    let wire = ExtensionWire::connect(bridge, "Sign up for an account", &[]).expect("connects");
+    (wire, log)
+}
+
+/// A page event from the sign-up tab, as the extension forwards it.
+fn tab_event(method: &str, params: &Value) -> Value {
+    json!({"type": "cdp", "tab": signup_tab(), "method": method, "params": params})
+}
+
+/// Whether a request is a send of `method`.
+fn is_send(request: &Value, method: &str) -> bool {
+    request["op"] == "send" && request["method"] == method
+}
+
+/// The nonce, the echo with the run's goal, the host's notice to the
+/// extension, and ready.
+#[test]
+fn the_handshake_through_the_extension() {
+    let (wire, log) = through(signup_extension);
+    assert_eq!(wire.hello().product, "Chrome/158.0.7400.12");
+    drop(wire);
+    matches_recording("handshake", &log);
+}
+
+/// A tab the run opens is created blank in the extension's profile, held,
+/// and then sent to its address, whose load is waited for.
+#[test]
+fn opening_and_navigating_through_the_extension() {
+    let (wire, log) = through(|request| {
+        let id = &request["id"];
+        if request["op"] == "create" {
+            return vec![
+                json!({"type": "reply", "id": id, "result": {"tab": 100, "target": "T100"}}),
+            ];
+        }
+        if is_send(request, "Page.navigate") {
+            let event = |method: &str, params: Value| json!({"type": "cdp", "tab": 100, "method": method, "params": params});
+            return vec![
+                event(
+                    "Page.frameNavigated",
+                    json!({"frame": {"id": "T100", "loaderId": "L2", "url": "https://example.test/signup"}}),
+                ),
+                json!({"type": "reply", "id": id, "result": {"frameId": "T100", "loaderId": "L2"}}),
+                event("Page.loadEventFired", json!({"timestamp": 1.0})),
+            ];
+        }
+        signup_extension(request)
+    });
+
+    let engine = CdpEngine::open(wire, "https://example.test/signup").expect("opens");
+
+    assert_eq!(engine.outcome(), Some("navigated to https://example.test"));
+    assert_eq!(engine.current_tab(), TabKey::new("T100"));
+    drop(engine);
+    matches_recording("open-and-navigate", &log);
+}
+
+/// A link that opens a tab: the extension reports the new tab with the held
+/// tab as its opener, and the engine takes it for the run's.
+#[test]
+fn a_link_opening_a_tab_through_the_extension() {
+    let (wire, log) = through(|request| {
+        let mut answers = signup_extension(request);
+        if is_send(request, "Input.dispatchKeyEvent") && request["params"]["type"] == "keyUp" {
+            answers.push(json!({"type": "tab_created", "tab": 50, "target": "T50", "opener": signup_tab(), "url": "https://example.test/receipt", "title": "Receipt"}));
+        }
+        answers
+    });
+    let mut engine =
+        CdpEngine::attach(wire, &TabKey::new(signup::TARGET), false).expect("attaches");
+
+    engine.perform(&BrowserCommand::Submit).expect("performs");
+
+    assert_eq!(engine.outcome(), Some("opened a new tab: Receipt"));
+    drop(engine);
+    matches_recording("link-opens-tab", &log);
+}
+
+/// An alert is accepted at once, through the extension like any command.
+#[test]
+fn an_alert_through_the_extension() {
+    let (wire, log) = through(|request| {
+        let mut answers = signup_extension(request);
+        if is_send(request, "Input.dispatchKeyEvent") && request["params"]["type"] == "keyUp" {
+            answers.insert(
+                0,
+                tab_event(
+                    "Page.javascriptDialogOpening",
+                    &json!({"type": "alert", "message": "Saved", "url": "https://example.test/"}),
+                ),
+            );
+        }
+        answers
+    });
+    let mut engine =
+        CdpEngine::attach(wire, &TabKey::new(signup::TARGET), false).expect("attaches");
+
+    engine.perform(&BrowserCommand::Submit).expect("performs");
+
+    assert_eq!(engine.outcome(), Some("a dialog opened: Saved"));
+    drop(engine);
+    let frames = log.borrow().clone();
+    assert!(
+        frames
+            .iter()
+            .any(|f| f["frame"]["method"] == "Page.handleJavaScriptDialog"
+                && f["frame"]["params"] == json!({"accept": true})),
+        "the alert was accepted"
+    );
+    matches_recording("alert", &log);
+}
+
+/// A confirm is held for the run to answer, and while it is open the read is
+/// the dialog alone.
+#[test]
+fn a_confirm_through_the_extension() {
+    let (wire, log) = through(|request| {
+        let mut answers = signup_extension(request);
+        if is_send(request, "Input.dispatchKeyEvent") && request["params"]["type"] == "keyUp" {
+            answers.insert(
+                0,
+                tab_event(
+                    "Page.javascriptDialogOpening",
+                    &json!({"type": "confirm", "message": "Really delete?", "url": "https://example.test/"}),
+                ),
+            );
+        }
+        answers
+    });
+    let mut engine =
+        CdpEngine::attach(wire, &TabKey::new(signup::TARGET), false).expect("attaches");
+
+    engine.perform(&BrowserCommand::Submit).expect("performs");
+    let read = engine.read().expect("reads the dialog");
+
+    assert_eq!(engine.outcome(), Some("a dialog opened: Really delete?"));
+    assert_eq!(
+        read.dialog.map(|d| d.message),
+        Some("Really delete?".into())
+    );
+    drop(engine);
+    matches_recording("confirm", &log);
+}
+
+/// Each refusal the extension can give, on the call it refused, with its
+/// code.
+#[test]
+fn each_refusal_through_the_extension() {
+    let refusals = [
+        (
+            "attach",
+            "refused_tab",
+            "that tab is not one this run may use",
+        ),
+        (
+            "create",
+            "refused_site",
+            "https://elsewhere.test is not on jev-pilot's allowed sites",
+        ),
+        (
+            "Runtime.evaluate",
+            "refused_method",
+            "Runtime.evaluate is not allowed",
+        ),
+        (
+            "Runtime.callFunctionOn",
+            "refused_script",
+            "that script is not one of jev-pilot's",
+        ),
+        (
+            "Page.navigate",
+            "refused_page",
+            "Chrome does not let extensions drive chrome://settings",
+        ),
+        ("DOM.getDocument", "paused", "jev-pilot is paused in Chrome"),
+        ("activate", "no_tab", "there is no such tab"),
+        (
+            "detach",
+            "attach_failed",
+            "Chrome would not attach to that tab",
+        ),
+        ("Page.reload", "chrome", "Cannot navigate to invalid URL"),
+    ];
+    let (mut wire, log) = through(move |request| {
+        let wanted = request["method"]
+            .as_str()
+            .or_else(|| request["op"].as_str())
+            .unwrap_or_default();
+        let refused = refusals.iter().find(|(what, ..)| *what == wanted);
+        match refused {
+            Some((what, code, message)) if *what != "attach" || request["id"] != 3 => {
+                vec![
+                    json!({"type": "reply", "id": request["id"], "error": {"code": code, "message": message}}),
+                ]
+            }
+            _ => signup_extension(request),
+        }
+    });
+
+    // Listed and attached, then every refusal in turn.
+    let mut sent = |text: Value| {
+        wire.send(&text.to_string()).expect("sends");
+        let reply = wire
+            .receive(Duration::from_millis(50))
+            .expect("up")
+            .expect("a reply");
+        serde_json::from_str::<Value>(&reply).expect("JSON")
+    };
+    sent(json!({"id": 1, "method": "Target.getTargets", "params": {}}));
+    let session = sent(json!({"id": 3, "method": "Target.attachToTarget", "params": {"targetId": signup::TARGET, "flatten": true}}))
+        ["result"]["sessionId"]
+        .clone();
+    let calls = [
+        json!({"id": 4, "method": "Target.attachToTarget", "params": {"targetId": signup::TARGET, "flatten": true}}),
+        json!({"id": 5, "method": "Target.createTarget", "params": {"url": "https://elsewhere.test/"}}),
+        json!({"id": 6, "method": "Runtime.evaluate", "params": {"expression": "1"}, "sessionId": session}),
+        json!({"id": 7, "method": "Runtime.callFunctionOn", "params": {"functionDeclaration": "function () {}"}, "sessionId": session}),
+        json!({"id": 8, "method": "Page.navigate", "params": {"url": "chrome://settings"}, "sessionId": session}),
+        json!({"id": 9, "method": "DOM.getDocument", "params": {}, "sessionId": session}),
+        json!({"id": 10, "method": "Target.activateTarget", "params": {"targetId": signup::TARGET}}),
+        json!({"id": 11, "method": "Target.detachFromTarget", "params": {"sessionId": session}}),
+        json!({"id": 12, "method": "Page.reload", "params": {}, "sessionId": session}),
+    ];
+    for (call, (_, code, message)) in calls.into_iter().zip(refusals) {
+        let reply = sent(call);
+        assert_eq!(reply["error"]["data"], code, "{reply}");
+        assert_eq!(reply["error"]["message"], message, "{reply}");
+    }
+    drop(wire);
+    matches_recording("refusals", &log);
+}
+
+/// A paused extension turns the run away before it does anything.
+#[test]
+fn a_paused_extension_turns_the_run_away() {
+    let mut paused = hello();
+    paused["paused"] = true.into();
+    let bridge = Bridge::new(paused, signup_extension);
+    let log = bridge.log();
+    let refused = ExtensionWire::connect(bridge, "Sign up for an account", &[])
+        .err()
+        .expect("paused");
+    assert_eq!(
+        refused.to_string(),
+        "jev-pilot is paused in Chrome: resume it from the extension's toolbar button"
+    );
+    matches_recording("pause", &log);
+}
+
+/// The owner presses Cancel on Chrome's debugging bar mid-run: the extension
+/// reports the tab let go of, and the run ends saying so.
+#[test]
+fn cancel_on_the_bar_through_the_extension() {
+    let (wire, log) = through(|request| {
+        if is_send(request, "Input.dispatchKeyEvent") {
+            return vec![
+                json!({"type": "detached", "tab": signup_tab(), "reason": "canceled_by_user"}),
+            ];
+        }
+        signup_extension(request)
+    });
+    let mut engine =
+        CdpEngine::attach(wire, &TabKey::new(signup::TARGET), false).expect("attaches");
+
+    let error = engine
+        .perform(&BrowserCommand::Submit)
+        .expect_err("let go of");
+
+    assert_eq!(
+        error.to_string(),
+        "you pressed Cancel on Chrome's 'started debugging' bar; jev-pilot let go of every tab"
+    );
+    drop(engine);
+    matches_recording("cancel", &log);
+}
+
+/// When the run goes, it lets go of its tab, and the host tells the
+/// extension to let go of everything the run held.
+#[test]
+fn release_through_the_extension() {
+    let (wire, log) = through(signup_extension);
+    let engine = CdpEngine::attach(wire, &TabKey::new(signup::TARGET), false).expect("attaches");
+    drop(engine);
+    let frames = log.borrow().clone();
+    let last: Vec<&Value> = frames.iter().rev().take(3).collect();
+    assert_eq!(last[0]["frame"], json!({"type": "release"}));
+    assert_eq!(last[0]["to"], "extension");
+    assert_eq!(last[2]["frame"]["op"], "detach");
+    matches_recording("release", &log);
 }

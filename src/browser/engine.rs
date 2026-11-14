@@ -163,6 +163,14 @@ pub enum EngineError {
     NotOwned(TabKey),
     /// The tab is not in the browser.
     NoSuchTab(TabKey),
+    /// Chrome let go of the driven tab, and nothing more can be done in it.
+    Detached {
+        /// Why: `canceled_by_user`, `target_closed`, `left_allowed_sites`, or
+        /// Chrome's own word.
+        reason: Box<str>,
+        /// Where the tab went, when it left the allowed sites.
+        url: Option<Box<str>>,
+    },
 }
 
 impl core::fmt::Display for EngineError {
@@ -175,6 +183,21 @@ impl core::fmt::Display for EngineError {
             Self::Read(e) => e.fmt(f),
             Self::NotOwned(tab) => write!(f, "tab {} is not one this run owns", tab.as_str()),
             Self::NoSuchTab(tab) => write!(f, "there is no tab {}", tab.as_str()),
+            Self::Detached { reason, url } => match &**reason {
+                "canceled_by_user" => f.write_str(
+                    "you pressed Cancel on Chrome's 'started debugging' bar; jev-pilot let go \
+                     of every tab",
+                ),
+                "target_closed" => f.write_str(
+                    "the tab was closed, or went to a page extensions may not drive",
+                ),
+                "left_allowed_sites" => write!(
+                    f,
+                    "the tab went to {}, which is not on the allowed sites",
+                    url.as_deref().map_or("another site", origin)
+                ),
+                other => write!(f, "Chrome let go of the tab: {other}"),
+            },
         }
     }
 }
@@ -237,6 +260,8 @@ pub struct CdpEngine<W: Wire> {
     rows: HashMap<Box<str>, (Box<str>, String)>,
     /// Whether the last command was refused at click time.
     refused: bool,
+    /// Why Chrome let go of the driven tab, and where it went, once it has.
+    let_go: Option<(Box<str>, Option<Box<str>>)>,
 }
 
 impl<W: Wire> CdpEngine<W> {
@@ -278,6 +303,7 @@ impl<W: Wire> CdpEngine<W> {
             seen: Seen::default(),
             rows: HashMap::new(),
             refused: false,
+            let_go: None,
         };
         // Listed before discovery starts, because discovery reports every tab
         // already open as if it had just been created, opener and all.
@@ -377,6 +403,9 @@ impl<W: Wire> CdpEngine<W> {
 
     /// A call to the browser itself, outside any tab's session.
     fn browser_call(&mut self, method: &str, params: Value) -> Result<Value, EngineError> {
+        if let Some(error) = self.let_go_error() {
+            return Err(error);
+        }
         let value = self
             .connection
             .call(method, params, None, self.timeouts.call)?;
@@ -396,12 +425,18 @@ impl<W: Wire> CdpEngine<W> {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, Stop> {
+        if let Some(error) = self.let_go_error() {
+            return Err(Stop::Failed(error));
+        }
         let id = self.connection.send(method, params, Some(&self.session))?;
         let deadline = Instant::now() + timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             let waited = self.connection.wait(id, method, left, &|event: &Event| {
-                &*event.method == "Page.javascriptDialogOpening"
+                matches!(
+                    &*event.method,
+                    "Page.javascriptDialogOpening" | "Target.detachedFromTarget"
+                )
             });
             match waited {
                 Ok(Waited::Reply(value)) => {
@@ -410,6 +445,9 @@ impl<W: Wire> CdpEngine<W> {
                 }
                 Ok(Waited::Interrupted) => {
                     self.pump();
+                    if let Some(error) = self.let_go_error() {
+                        return Err(Stop::Failed(error));
+                    }
                     if self.dialog.is_some() {
                         return Err(Stop::Dialog);
                     }
@@ -427,6 +465,16 @@ impl<W: Wire> CdpEngine<W> {
         for event in self.connection.take_events() {
             self.handle(&event);
         }
+    }
+
+    /// The error every call ends with once Chrome has let go of the tab.
+    fn let_go_error(&self) -> Option<EngineError> {
+        self.let_go
+            .as_ref()
+            .map(|(reason, url)| EngineError::Detached {
+                reason: reason.clone(),
+                url: url.clone(),
+            })
     }
 
     fn ours(&self, event: &Event) -> bool {
@@ -487,6 +535,17 @@ impl<W: Wire> CdpEngine<W> {
                 }
             }
             "Page.loadEventFired" if self.ours(event) => self.seen.loaded = true,
+            // Chrome's own event gives no reason; a tab let go of without
+            // one was closed.
+            "Target.detachedFromTarget" if str_of("sessionId") == &*self.session => {
+                let reason = Some(str_of("reason"))
+                    .filter(|r| !r.is_empty())
+                    .unwrap_or("target_closed");
+                let url = Some(str_of("url"))
+                    .filter(|u| !u.is_empty())
+                    .map(Into::into);
+                self.let_go = Some((reason.into(), url));
+            }
             // Only a tab created while the run watches can be the run's; a
             // change to a tab says nothing about who it belongs to.
             "Target.targetCreated" => {
@@ -582,7 +641,7 @@ impl<W: Wire> CdpEngine<W> {
         };
         let mut read = read::translate(&raw, &self.target, &self.owned, &mut self.loaders)
             .map_err(EngineError::Read)?;
-        if let Some((quiet, mutations)) = self.watch(&input::quiet_now(), false) {
+        if let Some((quiet, mutations)) = self.watch(input::QUIET_NOW, &[], false) {
             self.quiet_for_ms = Some(quiet);
             self.mutations = Some(mutations);
         }
@@ -608,10 +667,11 @@ impl<W: Wire> CdpEngine<W> {
         })
     }
 
-    /// Evaluate one of the watch's expressions in the isolated world, making
-    /// the world first if this document has none. `None` when the page would
+    /// Call one of the watch's fixed scripts, with `numbers` as its
+    /// arguments, in the isolated world, making the world first if this
+    /// document has none. `None` when the page would
     /// not answer; the watch is a help, never a requirement.
-    fn watch(&mut self, expression: &str, wait: bool) -> Option<(u64, u64)> {
+    fn watch(&mut self, script: &str, numbers: &[u64], wait: bool) -> Option<(u64, u64)> {
         for _ in 0..2 {
             let context = if let Some(context) = self.world {
                 context
@@ -626,15 +686,20 @@ impl<W: Wire> CdpEngine<W> {
                 self.world = Some(context);
                 context
             };
-            let mut params =
-                json!({"expression": expression, "contextId": context, "returnByValue": true});
+            let arguments: Vec<Value> = numbers.iter().map(|n| json!({"value": n})).collect();
+            let mut params = json!({
+                "functionDeclaration": script,
+                "executionContextId": context,
+                "arguments": arguments,
+                "returnByValue": true,
+            });
             let timeout = if wait {
                 params["awaitPromise"] = true.into();
                 self.timeouts.quiet_cap + self.timeouts.call
             } else {
                 self.timeouts.call
             };
-            match self.call_within("Runtime.evaluate", params, timeout) {
+            match self.call_within("Runtime.callFunctionOn", params, timeout) {
                 Ok(answer) => {
                     let value = answer.pointer("/result/value")?;
                     return Some((
@@ -679,7 +744,7 @@ impl<W: Wire> CdpEngine<W> {
         let window = u64::try_from(self.timeouts.quiet_window.as_millis()).unwrap_or(u64::MAX);
         let cap = u64::try_from(self.timeouts.quiet_cap.as_millis()).unwrap_or(u64::MAX);
         let before = self.mutations;
-        if let Some((quiet, mutations)) = self.watch(&input::quiet_within(window, cap), true) {
+        if let Some((quiet, mutations)) = self.watch(input::QUIET_WITHIN, &[window, cap], true) {
             self.quiet_for_ms = Some(quiet);
             self.mutations = Some(mutations);
             if before == Some(mutations) && self.seen.navigated.is_none() {
@@ -1090,6 +1155,9 @@ impl<W: Wire> BrowserEngine for CdpEngine<W> {
 
     fn read(&mut self) -> Result<PageRead, EngineError> {
         self.pump();
+        if let Some(error) = self.let_go_error() {
+            return Err(error);
+        }
         if self.dialog.is_some() {
             return self.dialog_read();
         }
@@ -1102,6 +1170,9 @@ impl<W: Wire> BrowserEngine for CdpEngine<W> {
 
     fn perform(&mut self, command: &BrowserCommand) -> Result<(), EngineError> {
         self.pump();
+        if let Some(error) = self.let_go_error() {
+            return Err(error);
+        }
         self.outcome = None;
         self.refused = false;
         self.seen = Seen::default();
