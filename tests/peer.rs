@@ -158,6 +158,19 @@ fn macos_recheck_refuses_when_either_token_is_missing() {
 }
 
 #[test]
+fn recheck_refuses_first_facts_that_never_passed() {
+    // The same process both times, but the first read never passed: it
+    // must not be let through by a second read that does.
+    let first = mac_facts(CDHASH_REQUIREMENT, false);
+    let again = Facts {
+        code: mac_facts(CDHASH_REQUIREMENT, true).code,
+        ..first.clone()
+    };
+    let verdict = recheck(&first, &again, &mac_expected(CDHASH_REQUIREMENT));
+    assert_eq!(verdict, refused(Check::Requirement, Reason::Mismatch));
+}
+
+#[test]
 fn macos_recheck_still_decides_on_the_new_facts() {
     let first = mac_facts(CDHASH_REQUIREMENT, true);
     let again = mac_facts(CDHASH_REQUIREMENT, false);

@@ -452,8 +452,8 @@ pub fn decide(facts: &Facts, expected: &Expected) -> Verdict {
     }
 }
 
-/// Decides again on facts read after the first frame, and requires that they
-/// describe the same process as the facts read before it.
+/// Decides on the facts read before the first frame and again on those read
+/// after it, and requires that both describe the same process.
 ///
 /// On macOS the kernel names the peer by whichever process last used its
 /// socket, at the moment it is asked. A program could connect and write, then
@@ -464,6 +464,7 @@ pub fn decide(facts: &Facts, expected: &Expected) -> Verdict {
 #[must_use]
 pub fn recheck(first: &Facts, again: &Facts, expected: &Expected) -> Verdict {
     let same = || -> Result<(), Refusal> {
+        run_checks(first, expected)?;
         run_checks(again, expected)?;
         if let Expected::Macos { .. } = expected {
             same_fact(first.token, again.token, Check::Token)?;
