@@ -2326,8 +2326,7 @@ fn an_unsure_step_after_an_action_that_seemed_to_do_nothing_looks_again_before_a
     let last = seen
         .borrow()
         .last()
-        .map(ToString::to_string)
-        .unwrap_or_default();
+        .map_or_else(String::new, ToString::to_string);
     assert!(last.contains("Issue one"), "{last}");
 }
 
