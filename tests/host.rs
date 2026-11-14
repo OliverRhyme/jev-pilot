@@ -1637,6 +1637,53 @@ fn a_lock_held_on_the_audit_log_does_not_stall_the_host() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A host that holds the lock and never lets go (one stopped by a signal,
+/// say) does not stall the others: after about two seconds they write
+/// anyway, without rotating, and say the lock was not taken.
+#[test]
+fn a_lock_never_let_go_does_not_stall_the_host() {
+    use jev_pilot::browser::host::{append_audit, audit_host_start};
+    let dir = std::env::temp_dir().join(format!("jev-pilot-stuck-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    audit_files(&dir);
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join("audit.lock"))
+        .unwrap();
+    held.lock().unwrap();
+    let (done, finished) = std::sync::mpsc::channel();
+    let at = dir.clone();
+    std::thread::spawn(move || {
+        let appended = append_audit(&at, "{\"event\":\"x\"}\n", 1000).is_ok();
+        let started = Audit::HostStarted {
+            parent_pid: Some(7),
+            parent_exe: None,
+            refused: None,
+        };
+        let audited = audit_host_start(&at, &started, std::time::SystemTime::now()).is_ok();
+        let _ = done.send(appended && audited);
+    });
+    assert_eq!(
+        finished.recv_timeout(std::time::Duration::from_secs(10)),
+        Ok(true),
+        "written while the lock is held"
+    );
+    drop(held);
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(dir.join("audit.log"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["event"], "x");
+    assert_eq!(lines[1]["event"], "host_started");
+    for line in &lines {
+        assert_eq!(line["lock"], "not taken", "{line}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The host never makes the audit log's lock either: a missing one is
 /// refused, and an install made before it had one is set up again.
 #[test]

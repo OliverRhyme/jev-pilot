@@ -618,18 +618,55 @@ impl EchoTimer {
 /// # Errors
 /// When a file is missing or cannot be written.
 pub fn append_audit(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
-    let _lock = lock_audit(dir)?;
-    append_locked(dir, line, limit)
+    match lock_audit(dir)? {
+        Some(_lock) => append_locked(dir, line, limit),
+        None => append_unlocked(dir, line),
+    }
 }
 
-/// The hosts' lock on `dir`'s audit log, let go when the file closes.
-fn lock_audit(dir: &Path) -> io::Result<File> {
+/// How long a host tries for the lock before it writes without it.
+const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// The hosts' lock on `dir`'s audit log, let go when the file closes, or
+/// `None` when another host has held it for [`LOCK_WAIT`]: one stopped by a
+/// signal may hold it for ever, and must not stall the others.
+fn lock_audit(dir: &Path) -> io::Result<Option<File>> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
         .open(dir.join("audit.lock"))?;
-    lock.lock()?;
-    Ok(lock)
+    let started = std::time::Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(Some(lock)),
+            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < LOCK_WAIT => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
+}
+
+/// Append `line` without the lock: never rotating, since another host may
+/// be, and saying in the line that the lock was not taken.
+fn append_unlocked(dir: &Path, line: &str) -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).open(dir.join("audit.log"))?;
+    file.seek(io::SeekFrom::End(0))?;
+    file.write_all(unlocked(line).as_bytes())
+}
+
+/// `line`, an event in JSON, marked as written without the lock.
+fn unlocked(line: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(serde_json::Value::Object(mut event)) => {
+            event.insert("lock".into(), "not taken".into());
+            let mut line = serde_json::Value::Object(event).to_string();
+            line.push('\n');
+            line
+        }
+        _ => line.to_owned(),
+    }
 }
 
 /// Append `line`, rotating first when full, under the lock.
@@ -661,7 +698,10 @@ fn append_locked(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
 /// # Errors
 /// When a file is missing or cannot be written.
 pub fn audit_host_start(dir: &Path, started: &Audit, now: SystemTime) -> io::Result<()> {
-    let _lock = lock_audit(dir)?;
+    // Without the lock, the count cannot be kept: the start is written.
+    let Some(_lock) = lock_audit(dir)? else {
+        return append_unlocked(dir, &started.line(&utc(now)));
+    };
     let mut skipped = OpenOptions::new()
         .read(true)
         .write(true)
