@@ -1312,6 +1312,12 @@ pub fn apply(steps: &[Step], installer: &Installer, kind: InstallKind) -> io::Re
         }
         apply_one(step, installer, &mut said)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", describe(step))))?;
+        #[cfg(windows)]
+        if kind == InstallKind::Protected
+            && let Step::CreateDir { path, .. } = step
+        {
+            check_windows_folder(path)?;
+        }
     }
     Ok(said)
 }
@@ -1348,24 +1354,59 @@ pub fn trusted_owner(sid: &str) -> bool {
     )
 }
 
-/// On Windows, whether a folder of a protected install that is there
-/// already is owned by the system: one the owner made beforehand, in
+/// Why a Windows folder of a protected install, with file `attributes` and
+/// owned by the SID `owner`, is not safe to install into: it must be a
+/// plain folder, not a link or junction (a reparse point) that leads
+/// elsewhere, and owned by the system. One the owner made beforehand, in
 /// ProgramData for instance, would be the owner's to change.
-#[cfg(windows)]
-fn check_windows_folder(path: &Path) -> io::Result<()> {
-    if !path.exists() {
-        return Ok(());
+///
+/// # Errors
+/// Why it is not safe.
+pub fn windows_folder_verdict(path: &Path, attributes: u32, owner: &str) -> Result<(), String> {
+    const DIRECTORY: u32 = 0x10;
+    const REPARSE_POINT: u32 = 0x400;
+    if attributes & REPARSE_POINT != 0 {
+        return Err(format!(
+            "{} is a link or junction, so it may lead somewhere a program running as you can \
+             change: remove it and run the install again",
+            path.display()
+        ));
     }
-    let owner = jev_pilot_os::owner_sid(path)?;
-    if trusted_owner(&owner) {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
+    if attributes & DIRECTORY == 0 {
+        return Err(format!(
+            "{} is not a folder: remove it and run the install again",
+            path.display()
+        ));
+    }
+    if !trusted_owner(owner) {
+        return Err(format!(
             "{} is owned by {owner}, not an administrator, so a program running as you could \
              change what jev-pilot installs in it: remove it and run the install again",
             path.display()
-        )))
+        ));
     }
+    Ok(())
+}
+
+/// On Windows, whether a folder of a protected install, when it is there,
+/// is safe to install into ([`windows_folder_verdict`]). Asked before the
+/// install makes it and again after.
+#[cfg(windows)]
+fn check_windows_folder(path: &Path) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt as _;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let attributes = meta.file_attributes();
+    // Asked only of a plain folder, since asking follows a link.
+    let owner = if attributes & 0x400 == 0 {
+        jev_pilot_os::owner_sid(path)?
+    } else {
+        String::new()
+    };
+    windows_folder_verdict(path, attributes, &owner).map_err(io::Error::other)
 }
 
 /// What a step writes, whose folders must be safe.

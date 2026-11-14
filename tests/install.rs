@@ -1711,3 +1711,39 @@ fn a_windows_install_folder_must_be_owned_by_the_system() {
         assert!(!trusted_owner(sid), "{sid}");
     }
 }
+
+/// A Windows install folder, before the install makes it and after, must
+/// be a plain folder, not a link or junction (a reparse point) that leads
+/// elsewhere, and owned by the system.
+#[test]
+fn a_windows_install_folder_is_a_plain_folder_the_system_owns() {
+    use jev_pilot::browser::install::windows_folder_verdict;
+    const DIRECTORY: u32 = 0x10;
+    const REPARSE_POINT: u32 = 0x400;
+    let folder = Path::new(r"C:\ProgramData\jev-pilot");
+    assert_eq!(
+        windows_folder_verdict(folder, DIRECTORY, "S-1-5-32-544"),
+        Ok(())
+    );
+    assert_eq!(
+        windows_folder_verdict(folder, DIRECTORY | REPARSE_POINT, "S-1-5-32-544"),
+        Err(format!(
+            "{} is a link or junction, so it may lead somewhere a program running as you can \
+             change: remove it and run the install again",
+            folder.display()
+        ))
+    );
+    let owner = "S-1-5-21-1004336348-1177238915-682003330-1001";
+    assert_eq!(
+        windows_folder_verdict(folder, DIRECTORY, owner),
+        Err(format!(
+            "{} is owned by {owner}, not an administrator, so a program running as you \
+             could change what jev-pilot installs in it: remove it and run the install again",
+            folder.display()
+        ))
+    );
+    assert!(
+        windows_folder_verdict(folder, 0x20, "S-1-5-32-544").is_err(),
+        "a file"
+    );
+}
