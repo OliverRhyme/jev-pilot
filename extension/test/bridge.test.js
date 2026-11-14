@@ -594,3 +594,23 @@ test("an event that cannot be passed on does not stop the tab's later ones", asy
     ["Page.domContentEventFired"],
   );
 });
+
+test("a tab Chrome has not yet given a target id is looked up again before it is reported", async () => {
+  const { fake, bridge, posted, timers } = bridged();
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  posted.length = 0;
+  fake.state.tabs.set(12, { id: 12, url: "", pendingUrl: "https://github.com/x", title: "", groupId: -1, windowId: 1, openerTabId: 7 });
+  const reporting = fake.emit("tabs.onCreated", fake.state.tabs.get(12));
+  await settle();
+  // Chrome gives the tab its target a moment later.
+  fake.state.targets.set(12, "T12");
+  for (const timer of timers.splice(0)) {
+    timer.fn();
+  }
+  await reporting;
+  await settle();
+  assert.deepEqual(posted, [
+    { type: "tab_created", tab: 12, target: "T12", opener: 7, url: "https://github.com/x", title: "" },
+  ]);
+});

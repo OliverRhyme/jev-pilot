@@ -2868,3 +2868,30 @@ fn a_policy_that_forbids_debugging_ends_the_attach_saying_so() {
         .expect("refused");
     assert_eq!(error.to_string(), said);
 }
+
+/// A tab the extension opened without a target id cannot be named to the
+/// engine, so the create fails rather than naming it "".
+#[test]
+fn a_tab_opened_without_a_target_id_is_an_error() {
+    let (mut wire, _) = through(|request| {
+        if request["op"] == "create" {
+            return vec![json!({"type": "reply", "id": request["id"], "result": {"tab": 100}})];
+        }
+        signup_extension(request)
+    });
+    wire.send(
+        &json!({"id": 1, "method": "Target.createTarget", "params": {"url": "about:blank"}})
+            .to_string(),
+    )
+    .expect("sent");
+    let reply: Value = serde_json::from_str(
+        &wire
+            .receive(std::time::Duration::from_secs(1))
+            .expect("read")
+            .expect("a reply"),
+    )
+    .expect("JSON");
+    assert_eq!(reply["id"], 1, "{reply}");
+    assert!(reply["error"]["message"].is_string(), "{reply}");
+    assert!(reply.get("result").is_none(), "{reply}");
+}

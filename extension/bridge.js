@@ -11,6 +11,10 @@ export const GROUP = "jev-pilot";
 /** How long a tab with no opener waits for Chrome to say what opened it. */
 const OPENER_WAIT_MS = 500;
 
+/** How often, and how many times, a new tab's target id is looked for. */
+const TARGET_WAIT_MS = 100;
+const TARGET_TRIES = 5;
+
 /** The debugger protocol version the extension asks Chrome for. */
 const DEBUGGER_VERSION = "1.3";
 
@@ -71,8 +75,19 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
   const say = async (type) =>
     post(protocol.hello({ version, userAgent, paused: await paused(), policy: await policyNow() }, type));
 
-  const targetOf = async (tabId) =>
+  const targetNow = async (tabId) =>
     (await chrome.debugger.getTargets()).find((t) => t.tabId === tabId && t.type === "page")?.id;
+
+  /** A tab's target id, looked for again for a while: Chrome gives a new tab one a moment after it opens. */
+  const targetOf = async (tabId) => {
+    for (let tried = 1; ; tried += 1) {
+      const target = await targetNow(tabId);
+      if (target !== undefined || tried >= TARGET_TRIES) {
+        return target;
+      }
+      await new Promise((resolve) => setTimer(resolve, TARGET_WAIT_MS));
+    }
+  };
 
   const groups = async () => new Set((await chrome.tabGroups.query({ title: GROUP })).map((g) => g.id));
 
