@@ -310,3 +310,74 @@ at 0.57 and 0.68, one of them under the default floor; band 1 named the row at
 at 0.99 and 0.91. On goals whose row was already on screen band 0 was a little
 sharper: the fourth result at 0.86 against 0.69, Star at 0.77 against 0.63.
 `BAND_VIEWPORTS` stays at one viewport.
+
+## 2026-11-14 — Browser, attach mode on GitHub (the owner's Chrome, stable, signed in)
+
+Goal: star the jev-pilot repository, then unstar it, with
+`--open https://github.com/OliverRhyme/jev-pilot` so the run had a tab of its
+own, and the accept line "The repository's star button reads Star, not
+Starred". Two runs, each started by clicking Allow on Chrome's "Allow remote
+debugging?" dialog.
+
+| run | ending | steps | what went wrong |
+|---|---|---|---|
+| 1 | `Finished(Achieved)`, having done nothing | 2 | the first read had no address and no rows; the accept line already held on the unstarred page |
+| 2 | `Uncertain` (no progress, 4 repeats) | 6 | Star was pressed; Unstar was refused at click time and never pressed |
+
+### 1. A tab opened for the run was read before it had loaded
+
+The tab was created at its address and attached at once, so the first read
+came before the navigation committed: no address and no rows, and the run
+asked what to do. A run's tab is now created blank and sent to its address
+through the same settled navigation a `navigate` step uses.
+
+### 2. The accept line held before the run had done anything
+
+"The star button reads Star" is as true before starring as after unstarring,
+and the run ended achieved at step 2 without touching the page. With a plan,
+the accept lines now end a run only once it has acted.
+
+### 3. A redrawn button read as covered
+
+Once a star lands, GitHub redraws its star button and its count with new
+nodes. The click-time check could no longer find the node it had read and
+reported "something else covers it", so Unstar was refused. When the node read
+is gone, the engine now clicks the one control at that point with the same
+role and name, and otherwise refuses with "the row was replaced since the page
+was read". Real Chrome's replies for this are in `tests/fixtures/cdp/replaced/`.
+
+### 4. A refused tap armed the guard against repeating it
+
+The repeat guard turned the next two choices of Unstar into waits, though no
+tap had been made, and the run ran out of patience with the repository still
+starred. A tap refused at click time no longer counts as an action taken.
+
+### 5. A click on Allow for every connection
+
+Every connection raised Chrome's dialog, with Cancel focused, and nothing
+remembered the answer. A run connects once, but over MCP every tool call is a
+connection of its own, so an agent looking at a page and then starting a run
+needs the owner at the keyboard for each. That cost is what the jev-pilot
+extension removes: it is installed once, as an administrator, and a run then
+needs no click.
+
+## 2026-11-15 — Browser, extension mode acceptance (to be run)
+
+The runs that accept extension mode, each pass or fail, with its transcript
+under `notes/acceptance/`:
+
+0. Install on the Mac: `sudo jev-pilot extension install`, the profile
+   approved, the extension loaded unpacked from the root-owned folder.
+   `jev-pilot extension status` reports a protected install, the bridge
+   connected and the policy in force; Claude in Chrome still works.
+1. Star, then unstar, on GitHub with zero clicks.
+2. The same pair after a Chrome restart, and after a reboot.
+3. The same pair through MCP, with `browser: {mode: "extension"}`.
+4. The checks hold: a copy run from `~/Downloads`, a script speaking the
+   protocol, a user-level host manifest, an edit to the extension folder,
+   pause, Cancel on the bar, a site off the list, `--tab` outside the group,
+   and a second run.
+5. Linux (Ubuntu) and Windows 11: the install, the pair, and the first two
+   checks.
+
+Not yet run.

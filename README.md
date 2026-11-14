@@ -41,7 +41,8 @@ One program, `jev-pilot`, prebuilt for macOS (Apple silicon and Intel), Linux
 | Command | What it does |
 | --- | --- |
 | `jev-pilot "<goal>"` | Observes the screen, asks Jev, and drives the device. |
-| `jev-pilot --browser attach\|fresh "<goal>"` | The same, in a Chrome tab. See [A web browser](#a-web-browser). |
+| `jev-pilot --browser extension\|fresh\|attach "<goal>"` | The same, in a Chrome tab. See [A web browser](#a-web-browser). |
+| `sudo jev-pilot extension install` | Sets up the bridge to Chrome's jev-pilot extension, once per machine. See [The jev-pilot extension](#the-jev-pilot-extension). |
 | `jev-pilot mcp` | Serves the Model Context Protocol over stdio, so an agent can start runs and answer their questions. Each tool call runs this same program, so the server and the command line cannot drift apart. |
 
 ### 1. Install jev-pilot
@@ -196,12 +197,14 @@ Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%jev-pilot%mcp%'" | Inv
 With Rust 1.98 or newer, from a clone:
 
 ```console
-$ cargo install --path . --features mcp,browser --locked
+$ cargo install --path . --features mcp,browser,extension --locked
 ```
 
 This installs into `~/.cargo/bin` instead. Leave off `mcp` for a build without
 the server; it brings an async runtime nothing else needs. Leave off `browser`
-for a build that drives phones only. The prebuilt releases have both.
+(and `extension`, which needs it) for a build that drives phones only, or
+`extension` alone for a browser build without the bridge to Chrome's
+extension. The prebuilt releases have all three.
 
 ### Releasing
 
@@ -357,14 +360,27 @@ somebody's phone with nothing watching it and nothing able to answer it.
 argument in place of `device` (`mode`, `tab`, `open`, `channel`, `endpoint`,
 `chrome`, `headless`), and `start_run` takes `urls` in place of `app`; each
 becomes the command line's flag, and a call naming both a device and a browser
-is refused. A browser run is named `browser:attach:<channel>` or
-`browser:fresh`, beside device serials, so the rule of one run per target still
-holds and a browser run never blocks a phone run. Every tool call is its own
-connection, so in attach mode each one needs its own click on Allow; a look
-waits forty seconds for it, because a client gives up long before the command
-line's two minutes. The server's instructions tell the client never to retry a
-refused attach. Stopping a fresh run closes its browser and removes its
-profile.
+is refused. A browser run is named `browser:extension`,
+`browser:attach:<channel>` or `browser:fresh`, beside device serials, so the
+rule of one run per target still holds and a browser run never blocks a phone
+run.
+
+`mode: "extension"` is the one to use for the owner's own Chrome. It becomes
+`--browser extension --sites-only`, and nothing waits for a click: the owner
+set the extension up once, and its policy decides which sites and tabs a run
+may have. The server refuses a [development install](#a-development-install)
+unless it was started with `JEV_PILOT_ALLOW_DEV_BRIDGE=1`, and says so in the
+refusal, because another agent would read straight past the warning a run
+prints for one. Its instructions tell the client what to pass on to the owner
+when the extension is not set up, is paused, refuses a site, or is asked for
+a tab outside the "jev-pilot" group, and never to retry a refused identity
+check.
+
+Attach mode is kept below it as the fallback. Every tool call is its own
+connection, so each one needs its own click on Allow; a look waits forty
+seconds for it, because a client gives up long before the command line's two
+minutes. The server's instructions tell the client never to retry a refused
+attach. Stopping a fresh run closes its browser and removes its profile.
 
 **When a run cannot decide, the client answers it** — on its own turn, through
 the result of the call it is already waiting on. The model holding the
@@ -447,7 +463,7 @@ iOS does not, so an iOS catalog never offers one.
 |---|---|---|---|
 | Android | UIAutomator dump | Back, Home, App switcher | Drives a physical Pixel 8 Pro end to end |
 | iOS | XCUITest | Home, App switcher | **Unverified against hardware** — see below |
-| Browser | Accessibility tree + layout, over the DevTools Protocol | Back | Reads and acts on Chrome for Testing 153; attach mode not yet run against an everyday Chrome |
+| Browser | Accessibility tree + layout, over the DevTools Protocol | Back | Reads and acts on Chrome for Testing 157 in fresh mode, and on an everyday Chrome in attach mode, where a click on Allow for every connection led to the extension; extension mode is tested against recorded conversations and awaits its first runs |
 
 ### iOS caveat
 
@@ -462,16 +478,260 @@ real hierarchy dump, not as a finished counterpart.
 
 `--browser` drives a tab of Chrome (or Chrome for Testing, or Chromium) with
 the same loop, the same desk and the same rules: code lists what the page
-allows, and Jev picks one. It needs a build with the `browser` feature, which
-the prebuilt releases have.
+allows, and Jev picks one. It needs a build with the `browser` feature, and
+extension mode the `extension` feature; the prebuilt releases have both.
 
-The engine speaks the Chrome DevTools Protocol itself, over one websocket to
-127.0.0.1. Each step reads the tab's accessibility tree and its layout (boxes,
-paint order, which elements have click listeners) and joins them into a page
-read; the Browser platform turns that into rows, just as the Android reader
-turns a UIAutomator dump into rows.
+The engine speaks the Chrome DevTools Protocol itself. Each step reads the
+tab's accessibility tree and its layout (boxes, paint order, which elements
+have click listeners) and joins them into a page read; the Browser platform
+turns that into rows, just as the Android reader turns a UIAutomator dump into
+rows. The same messages go either over one websocket to 127.0.0.1 or through
+the jev-pilot extension's `chrome.debugger`, and nothing above the transport
+knows which.
 
-### Two ways to reach a browser
+### Three ways to reach a browser
+
+| Mode | What it drives | What it asks of you |
+| --- | --- | --- |
+| `--browser extension` | Your own Chrome, signed in as you, through the jev-pilot extension | Nothing per run, after a one-time install as an administrator |
+| `--browser fresh` | A browser started for the run, on a throwaway profile | Nothing |
+| `--browser attach` | Your own Chrome, over remote debugging | A click on Allow for every connection |
+
+Use the extension for your own Chrome. Attach mode is the fallback for a
+Chrome without it.
+
+### The jev-pilot extension
+
+**`--browser extension`** drives the Chrome you already have open through a
+small extension that ships inside jev-pilot. A run speaks to it over a local
+socket (a named pipe on Windows) to a native messaging host that Chrome
+starts, which is the installed jev-pilot itself. Nobody clicks anything during
+a run: what a run may do is set once, by an administrator, in the extension's
+policy.
+
+You see every run:
+
+- a notification as it starts: "jev-pilot is driving <site>: <goal>";
+- Chrome's "started debugging this browser" bar. Pressing Cancel on it lets go
+  of every tab at once, and the run ends saying so;
+- the run's tabs, in a tab group named "jev-pilot";
+- the extension's toolbar button. Its badge shows "!" when the bridge is
+  missing, and its popup shows the bridge's state, the browser, whether the
+  install is protected or a development one, the current run, the policy, and
+  a pause switch.
+
+The pause switch refuses every new tab, attach and command until you turn it
+off, and a run that meets it stops with "jev-pilot is paused in Chrome: resume
+it from the extension's toolbar button". It is a convenience, not a security
+control. A run never closes one of your tabs, and when it ends, however it
+ends, the extension lets go of every tab it held.
+
+#### Installing it
+
+Once per machine, as an administrator, after installing jev-pilot itself:
+
+```console
+$ sudo jev-pilot extension install           # macOS and Linux
+```
+
+```powershell
+jev-pilot extension install                  # Windows, from a prompt run as administrator
+```
+
+The install copies the running jev-pilot where only an administrator can
+write, pins its identity, writes the extension's files and its `policy.json`
+(keeping an existing one), registers the host with every Chromium-family
+browser it finds (Chrome stable, beta, dev and canary, Chromium, Edge and
+Brave), turns off user-level native messaging hosts, creates the audit log's
+folder, and prints what it changed. Native messaging hosts you already had at
+user level (Claude in Chrome's, for example) are copied to system level first,
+so they keep working, and `uninstall` puts them back.
+
+| | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| jev-pilot (also the host) | `/usr/local/libexec/jev-pilot/jev-pilot`, setgid `jev-pilot`, re-signed with the hardened runtime | `/usr/local/libexec/jev-pilot/jev-pilot`, setgid `jev-pilot` | `%ProgramFiles%\jev-pilot\jev-pilot.exe` |
+| What each end expects of the other (`install.json`) | `/Library/Application Support/jev-pilot/` | `/etc/jev-pilot/` | `%ProgramFiles%\jev-pilot\` |
+| The extension and its `policy.json` | `/Library/Application Support/jev-pilot/extension/` | `/usr/local/share/jev-pilot/extension/` | `%ProgramFiles%\jev-pilot\extension\` |
+| User-level hosts turned off by | a configuration profile you approve once | `/etc/opt/chrome/policies/managed/jev-pilot.json` and each other browser's | `HKLM\SOFTWARE\Policies\Google\Chrome` and each other browser's |
+| Audit log | `/Library/Logs/jev-pilot/` | `/var/log/jev-pilot/` | `%ProgramData%\jev-pilot\audit\` |
+
+**On macOS**, Chrome honours the setting that turns user-level hosts off only
+as a mandatory policy, which on a Mac nobody manages means a configuration
+profile. The install writes one and opens it: approve it in System Settings ›
+General › Device Management. Until you do, `jev-pilot extension status` says
+"Chrome still accepts user-level native hosts", and a program running as you
+could register a host of its own under jev-pilot's name. With the profile in
+place, Chrome says it is
+"managed by your organization"; that is the profile, and it sets nothing else.
+
+**Then, in Chrome**, once:
+
+1. Open `chrome://extensions` and turn on Developer mode.
+2. Choose "Load unpacked" and pick the extension folder the install printed
+   (the table above).
+3. Run `jev-pilot extension status`. It says what is installed, how well it is
+   protected, whether Chrome's policy is in place, the allowed sites, and
+   whether the bridge answers.
+
+**Developer mode must stay on.** Since Chrome 134 an unpacked extension runs
+only with Developer mode on; switch it off and the extension is disabled at
+the next start, and runs say "Chrome is not running with the jev-pilot
+extension". Chrome reminds you that Developer mode is on when it starts. An
+unpacked extension's files are not checked by Chrome against anything, which
+is why the folder they are loaded from is one only an administrator can
+write.
+
+`sudo jev-pilot extension uninstall` (or elevated on Windows) removes what the
+install made and restores the hosts it moved; on macOS it tells you to remove
+the profile in System Settings.
+
+#### Upgrading
+
+`jev-pilot update` replaces the copy on your `PATH`, but the bridge serves only
+the installed copy, so an upgrade needs the admin command again:
+
+```console
+$ jev-pilot update
+$ sudo jev-pilot extension install
+```
+
+Installing again updates everything in place and re-pins the new binary's
+identity. Chrome picks up the new extension by itself: the host sees the newer
+files and the extension reloads, at most once per version, so there is nothing
+to press in `chrome://extensions`. Until you install again, a run says "this
+jev-pilot is <v>, the installed one is <w>: run the install again" and goes on
+with the installed copy, which is the one any `--browser extension` run hands
+itself to.
+
+#### What a run may do: the policy
+
+`policy.json` lives in the admin-owned extension folder, and the extension
+reads it for every request it checks. Nothing a run sends, and nothing in
+Chrome's storage, can change it. The popup shows it, read-only.
+
+```console
+$ sudo jev-pilot extension policy sites add https://github.com
+$ sudo jev-pilot extension policy sites add "https://*.example.com"
+$ sudo jev-pilot extension policy sites remove https://github.com
+$ sudo jev-pilot extension policy owner-tabs group    # or never
+```
+
+- **Sites.** A run may open, attach to and navigate to only the listed
+  origins; `https://*.example.com` covers the subdomains of example.com. An
+  empty list, the default, allows any `http(s)` site. A tab the run holds that
+  goes anywhere else is let go of at once, and the run ends with "the tab went
+  to <origin>, which is not on the allowed sites".
+- **Tabs.** A run may take the tabs it opened and tabs those opened. With
+  `owner-tabs group`, the default, `--tab` may also take a tab of yours that you
+  have put in the "jev-pilot" tab group yourself; anything else is refused with
+  "put that tab in the 'jev-pilot' tab group first, so the run may use it".
+  With `owner-tabs never`, a run uses only tabs it opened.
+- **Always:** only the DevTools methods the engine uses (no Network, Storage,
+  Fetch, or `Runtime.evaluate`), page script only when it is byte for byte one
+  of the engine's own fixed scripts, and only `http(s)` pages and
+  `about:blank`: never `chrome:`, `chrome-extension:`, `file:`, `devtools:`,
+  `view-source:` or the Web Store.
+
+#### How the bridge is protected
+
+A run hands a page's text to Jev and acts on your signed-in sessions, so the
+bridge is built so that only the installed jev-pilot can use it. Five layers:
+
+1. **The local channel.** A Unix socket of mode 0600, in a folder of mode 0700
+   that is yours (`~/Library/Application Support/jev-pilot/run/` on macOS;
+   `$XDG_RUNTIME_DIR/jev-pilot/`, else `~/.local/state/jev-pilot/run/`, on
+   Linux), or on Windows a named pipe whose
+   access list admits only you and the system and refuses remote clients.
+   Other users, other machines and web pages cannot connect. Any program
+   running as you still could, which is what the next layers are for.
+2. **Which program is at the other end.** Each end asks the OS about the
+   other. On macOS, the peer's audit token and its code signature, checked
+   against the requirement pinned at install. On Linux, the peer's kernel
+   credentials: only a process started from the root-owned setgid binary has
+   the `jev-pilot` group, and that also makes it impossible for a program
+   running as you to trace it or preload code into it. On Windows, the pipe's
+   client or server process, its image path under Program Files, and that
+   image's SHA-256 (or Authenticode signer, for a signed build). Every run also
+   echoes a nonce the host hands it, and on macOS, where the kernel names the
+   peer when asked rather than when it connected, the host checks again once
+   the first frame is read. A refusal names the check that failed, and the
+   host logs it.
+3. **An admin-owned install.** The binary, the extension's files, its policy
+   and the host registration are where only an administrator can write, so a
+   program running as you cannot rewrite what the checks compare against. The
+   policy turning off user-level hosts stops it registering its own host under
+   jev-pilot's name, which Chrome would otherwise prefer.
+4. **Per-run limits.** The policy above, enforced by the extension.
+5. **The audit log, and what you see.** Every run is written down, and every
+   run raises a notification, Chrome's debugging bar and the tab group.
+
+The two refusals mean different things. "something other than the installed
+jev-pilot answered on the bridge (…); nothing was sent" is the run refusing the
+host: something is squatting on the channel. "the bridge only serves the
+installed jev-pilot at … (…)" is the host refusing the run. Neither is worth
+retrying.
+
+#### What it cannot protect against
+
+**The front door, on every OS.** A program running as you can start the
+genuine, installed jev-pilot with a goal and sites of its own choosing, and
+every check passes, because it *is* jev-pilot. Telling your agent from malware
+would need you present, which running with no click rules out. What bounds it:
+such a run gets only what any run gets (Jev choosing among offered rows,
+`navigate` only to the addresses it names, the allowed sites, the tab rules,
+and no cookies, storage, network or script of its own), it raises a
+notification, and on macOS and Linux it is written to a log it cannot erase.
+
+**macOS** gives the most. Without a prompt, a program running as you cannot
+drive the screen, read it, script Chrome or read Chrome's cookie key, and the
+layers above keep the bridge from being a way round those. It can still write
+to Chrome's profile folder, which Chrome protects only weakly; that threat
+exists with or without jev-pilot.
+
+**Linux.** Under X11 any client can already send input to Chrome and read the
+screen, so the bridge adds little to what such a program has; Wayland needs a
+portal prompt. Without the setgid install, a distribution whose Yama
+`ptrace_scope` defaults to 0 (Debian, and Fedora 44 and earlier) lets a
+program running as you trace jev-pilot. No Linux secret store hides a secret
+from code running as you, which is why the bridge holds none.
+
+**Windows.** A process running as you at the same integrity level can open
+another of your processes, inject code into it, and send input to its windows;
+Google says as much of Chrome itself. So on Windows the checks stop a program
+that speaks the protocol directly, or a copied or patched jev-pilot, but not
+one that injects into the genuine jev-pilot or into Chrome. Windows has no
+setgid, so the audit log is one you, and anything running as you, can edit.
+
+#### The audit log
+
+The host appends one JSON line for each run started (the time, the run's pid,
+its parent's pid and program, the goal, the addresses, and the identity
+check's result), each tab attached and site visited, each run ended and how,
+and each connection refused and which check failed it. It rotates the log at
+4 MiB and keeps three old ones. `jev-pilot extension log` shows it.
+
+On macOS and Linux the log's folder belongs to root and the `jev-pilot` group,
+so only the setgid jev-pilot can add to it: you can read it, and nothing
+running as you can alter it.
+
+#### A development install
+
+```console
+$ jev-pilot extension install --dev
+```
+
+For working on jev-pilot itself: no administrator, everything in a folder of
+yours (`~/Library/Application Support/jev-pilot/dev/` on macOS,
+`~/.local/share/jev-pilot/dev/` on Linux, `%LOCALAPPDATA%\jev-pilot\dev\` on
+Windows), the binary's hash pinned in a file you can write, no setgid group,
+and the host registered at user level. Load the extension from that folder in
+the same way. It is not protected against other programs running as you, and
+it says so everywhere it shows: "development install: not protected against
+other programs running as you", in `status`, in every run's header, and in the
+popup. The MCP server refuses one unless it was started with
+`JEV_PILOT_ALLOW_DEV_BRIDGE=1`.
+
+### A fresh browser
 
 **`--browser fresh`** starts a browser for the run on a new, empty profile, and
 closes it and deletes the profile when the run ends. Nobody is asked anything,
@@ -482,14 +742,19 @@ installs Chrome for Testing and prints its path. `--headless` runs it without a
 window.
 
 Ctrl-C closes a fresh run's browser and deletes its profile before the run
-exits; in attach mode it only lets go of Chrome and closes nothing. If a fresh
-run is killed outright, its profile is removed the next time a fresh run
-starts. When an MCP client stops a run, the server removes it at once, along
-with the browser.
+exits; in extension and attach mode it only lets go of Chrome and closes
+nothing. If a fresh run is killed outright, its profile is removed the next
+time a fresh run starts. When an MCP client stops a run, the server removes it
+at once, along with the browser.
+
+### Attach mode, the fallback
 
 **`--browser attach`** drives the Chrome you already have open, signed in as
-you. Turn on remote debugging first, at `chrome://inspect/#remote-debugging`
-(Chrome 144 or later). Then:
+you, without the extension. It was the first way to reach an everyday Chrome,
+and running it is what led to the extension: Chrome asks for every
+connection, and a click per tool call is too many for an agent. Turn on remote
+debugging first, at `chrome://inspect/#remote-debugging` (Chrome 144 or
+later). Then:
 
 - **Chrome asks every time.** Each connection raises "Allow remote debugging?",
   and nothing remembers the answer. Cancel is the focused button, so pressing
@@ -505,14 +770,14 @@ you. Turn on remote debugging first, at `chrome://inspect/#remote-debugging`
 - `--channel beta|dev|canary` attaches to another channel's Chrome, and
   `--endpoint ws://…` skips finding it.
 - `--sites-only` lists your tabs by id and site alone, with no titles or
-  paths. The MCP server passes it on every attach call.
+  paths. The MCP server passes it on every extension and attach call.
 
 ### Choosing the tab, and where the run may go
 
 | Flag | Meaning |
 | --- | --- |
-| `--tab <id\|text>` | Drive an existing tab: by its id, or the one tab whose address contains the text. `jev-pilot devices --browser attach` lists the tabs and their ids. Without it, a browser with a single tab drives that tab. |
-| `--open <url>` | Open a new tab at the address and drive it. In fresh mode it loads in the browser's first tab. Not with `--tab`. |
+| `--tab <id\|text>` | Drive an existing tab: by its id, or the one tab whose address contains the text. `jev-pilot devices --browser extension` (or `attach`) lists the tabs and their ids. Without it, a browser with a single tab drives that tab. Through the extension, a tab of yours must be in the "jev-pilot" tab group first. |
+| `--open <url>` | Open a new tab at the address and drive it. In fresh mode it loads in the browser's first tab; through the extension it opens in the "jev-pilot" group of your last focused window. Not with `--tab`. |
 | `--url <url>` | Another address `navigate` may go to; repeatable. The `--open` address is always one. This is what `--app` is to a phone, and `--app` and `--device` are refused alongside `--browser`. |
 
 `observe` and `devices` take the same flags. `observe`'s list of operations
@@ -543,21 +808,21 @@ run with `--url` offers it whenever a supplied address is not the current one.
   attached, so a page that will not answer is reported as possibly blocked by
   one.
 - **Tabs.** Tabs the run opens, and tabs those open, belong to the run, and
-  `switch_tab` can move to them. Other tabs are never described. In attach
-  mode no tab the run did not open is closed.
+  `switch_tab` can move to them. Other tabs are never described. In extension
+  and attach mode no tab the run did not open is closed.
 
 ### Privacy
 
-In attach mode the page text of the tab being driven goes to TypeSafe with
-each step, exactly as screen text does on a phone, and that tab may be signed
-in to your accounts. Only the tabs the run started on or opened are described;
-your other tabs never are. Over MCP, `devices` in attach mode and the error for
-a tab that could not be chosen name each tab by its id and its site alone
-(github.com), with no title and no path; the command line, run by hand in a
-terminal, lists them in full. Password values are never read. Words you supply
-are typed only after the endpoint has shown it is Chrome, and page script runs
-only for the engine's own fixed jobs (choosing a `<select>` option, watching
-for the page to go quiet), never with text from the model.
+In extension and attach mode the page text of the tab being driven goes to
+TypeSafe with each step, exactly as screen text does on a phone, and that tab
+may be signed in to your accounts. Only the tabs the run started on or opened
+are described; your other tabs never are. Over MCP, `devices` in extension and
+attach mode and the error for a tab that could not be chosen name each tab by
+its id and its site alone (github.com), with no title and no path; the command
+line, run by hand in a terminal, lists them in full. Password values are never
+read. Words you supply are typed only after the endpoint has shown it is Chrome,
+and page script runs only for the engine's own fixed jobs (choosing a `<select>`
+option, watching for the page to go quiet), never with text from the model.
 
 ## Credentials
 
@@ -581,7 +846,14 @@ nothing else uses them. The `browser` feature adds `tungstenite`, with no TLS an
 no async runtime: every browser endpoint is a local websocket, and the DevTools
 messages are written by hand rather than generated for the whole protocol. It
 also adds `ctrlc`, so that Ctrl-C closes a fresh browser and removes its
-profile. No Appium, no WebDriverAgent client, no `mobile-use`. The Android
+profile. The `extension` feature adds `interprocess` for the local socket or
+named pipe, `sha2` for pinned hashes, and per OS what asks it about the other
+end of the channel: `nix` and `rustix` on Unix, `security-framework` and
+`core-foundation` on macOS, and `widestring` on Windows. On macOS and Windows
+it also adds `jev-pilot-os`, a small crate of this workspace and the only
+place `unsafe` is allowed, around the few OS calls no safe crate offers
+(which image another process runs and who signed it, on Windows; `setregid`,
+on macOS). No Appium, no WebDriverAgent client, no `mobile-use`. The Android
 adapter shells out to `adb` directly.
 
 Turn `http` off and the crate builds requests for you to send with whatever

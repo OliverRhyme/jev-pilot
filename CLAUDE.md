@@ -16,7 +16,7 @@ CI (`.github/workflows/ci.yml`) runs these, and a change should pass all of them
 
 ```sh
 cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings   # also on Windows
 cargo test --all-features
 RUSTDOCFLAGS=-D warnings cargo doc --no-deps --all-features
 
@@ -24,13 +24,20 @@ RUSTDOCFLAGS=-D warnings cargo doc --no-deps --all-features
 cargo check --lib --no-default-features
 cargo check --lib --no-default-features --features android   # likewise ios, http
 cargo check --lib --no-default-features --features browser
+cargo check --lib --no-default-features --features extension # on macOS, Linux and Windows
+
+# the Chrome extension's tests (Node 24, no packages); the glob is needed, a folder is not
+# taken as one
+node --test 'extension/test/*.test.js'
 ```
 
 - One test file: `cargo test --all-features --test pilot`. One test: add its name as a filter,
   e.g. `cargo test --all-features --test adb text_with_shell`.
-- `tests/mcp.rs` is gated by `#![cfg(feature = "mcp")]`, and `tests/cdp.rs`, `tests/browser.rs`,
-  `tests/session.rs` and `tests/page.rs` by `#![cfg(feature = "browser")]`, so a plain
-  `cargo test` skips them without saying so. Use `--all-features`.
+- `tests/mcp.rs` is gated by `#![cfg(feature = "mcp")]`; `tests/cdp.rs`, `tests/browser.rs`,
+  `tests/session.rs`, `tests/page.rs`, `tests/bridge.rs` and `tests/packaged.rs` by
+  `#![cfg(feature = "browser")]`; and `tests/host.rs`, `tests/install.rs` and `tests/peer.rs` by
+  `#![cfg(feature = "extension")]`. A plain `cargo test` skips them without saying so. Use
+  `--all-features`.
 - `.cargo/config.toml` sets `build.warnings = "deny"`: any warning fails the local build too.
   `missing_docs = "deny"` means every public item needs a doc comment. Clippy `pedantic` is on.
 - The MSRV is 1.98 (edition 2024), and CI checks it. A change that raises it counts as a minor
@@ -41,13 +48,18 @@ cargo check --lib --no-default-features --features browser
   dumps in `tests/fixtures/`. DevTools traffic is checked as JSON messages over a scripted wire;
   `tests/fixtures/cdp/` holds a real Chrome's replies (how to record them again is at the top of
   `tests/cdp.rs`), and `tests/fixtures/browser/` holds page reads for the Browser platform.
+  `tests/fixtures/extension/` holds recorded bridge conversations (its `README.md` gives the
+  format); `tests/cdp.rs` replays them from the run's side and `extension/test/` from the
+  extension's, and `JEV_PILOT_RECORD=1` records them again.
 - Running against hardware: `cargo run -- "<goal>"` (the `jev-pilot` binary; `--help` shows the
   flags), plus `cargo run -- observe`, `devices`, `helper [install]`. You need `TYPESAFE_API_KEY`
   or `TYPESAFE_API_KEY_FILE` (see `.env.example`) and an attached Android device.
 - Running against a browser: `cargo run --features browser -- observe --browser fresh --headless
   --open <url>` needs no key and no sign-in (Chrome for Testing, Chromium or Chrome; `--chrome`
-  names one). `--browser attach` drives the owner's own Chrome and asks them to click Allow on
-  every connection; leave it to them.
+  names one). `--browser extension` and `--browser attach` drive the owner's own Chrome; leave
+  both to them. Extension mode needs `jev-pilot extension install` (as an administrator, or
+  `--dev` for a user-owned install that is not protected), and attach mode asks them to click
+  Allow on every connection.
 - MCP server: `cargo run --features mcp -- mcp` (the `mcp` subcommand of the one binary).
 
 ## Architecture
@@ -102,7 +114,8 @@ screen, and the loop does not know which it is driving.
   written by hand over one blocking `tungstenite` websocket (no CDP crate, no async runtime).
   The feature also brings `ctrlc`: on Ctrl-C, `main.rs` hands what to undo
   (`launch::Interrupted`) to a handler thread, because the run may be blocked on the browser or
-  the model. A fresh run's browser is closed and its profile removed; an attach run only detaches.
+  the model. A fresh run's browser is closed and its profile removed; an attach or extension run
+  only lets go.
   - `engine`: the `BrowserEngine` trait (read, perform a `BrowserCommand`, outcome, tabs) and
     `CdpEngine`. Clicks are checked when made: same document as the read (node keys carry a
     document number), scrolled into view if off screen, and hit-tested with
@@ -118,17 +131,61 @@ screen, and the loop does not know which it is driving.
     failure; `launch` starts a fresh browser on a throwaway profile that holds a file lock for as
     long as its run lives, so a profile whose lock is free belongs to a run that has gone;
     `device` is `BrowserDevice`, the `Device` over any engine.
+  - `bridge` is the protocol between a run, the host and the extension (message types, framing,
+    size limits, the nonce handshake, the pinned extension ID and its manifest `key`);
+    `extension` translates CDP to bridge frames and back, and `ExtensionWire` is a `Wire` over any
+    byte stream, so `CdpEngine` drives a tab through the extension with no change to the reader,
+    the hit test or the catalog. Both are pure. `packaged::FILES` is every file of `extension/`,
+    embedded with `include_bytes!`.
+- **Extension mode** (feature `extension`, `--browser extension`): the owner's Chrome through the
+  jev-pilot extension, with no click per run.
+  - `browser::host` is the native messaging host Chrome starts (`jev-pilot` enters host mode when
+    its first argument is the extension's origin): a pure `Relay` state machine, the local channel
+    (a Unix socket, or a named pipe on Windows, through `interprocess`), and the audit log.
+    `browser::install` plans the install as steps (tested as values, like `adb.rs`), carries them
+    out, and reads `install.json`; a `--browser extension` run execs the installed copy, because
+    only that copy passes the host's check.
+  - `peer` gathers facts about the program at the other end of the channel from the OS (macOS
+    audit token and code signature, Linux `SO_PEERCRED` and the setgid group, Windows pipe pid,
+    image path and hash or Authenticode signer), and a pure `decide` compares them with what the
+    install pinned.
+  - `jev-pilot-os` (a workspace member) is the only crate that may use `unsafe`, for the few OS
+    calls no safe crate offers (Windows `QueryFullProcessImageNameW`, `WinVerifyTrust` and
+    friends; macOS `setregid`). Each such call sits in a function that allows `unsafe` for itself
+    alone, every `unsafe` block carries a `// SAFETY:` comment (`undocumented_unsafe_blocks` is
+    denied), and it exposes only safe functions. The main crate keeps `unsafe_code = "forbid"`.
+    Its code is Windows- and macOS-only, which is why CI also runs clippy on Windows.
 - **`mcp`** (feature `mcp`, subcommand `jev-pilot mcp`, built on `rmcp`): every tool runs the
   `jev-pilot` binary instead of driving the loop in-process, so the MCP server and the CLI cannot
-  drift apart. A run is keyed by its device serial, or `browser:attach:<channel>` /
-  `browser:fresh`, which allows one run per target. Stopping a run kills its process, so the
+  drift apart. A run is keyed by its device serial, or `browser:extension`,
+  `browser:attach:<channel>` or `browser:fresh`, which allows one run per target. Extension mode
+  maps to `--browser extension --sites-only`, and a development install is refused unless the
+  server's environment has `JEV_PILOT_ALLOW_DEV_BRIDGE=1`. Stopping a run kills its process, so the
   server then removes the fresh profile and browser it left (`launch::reap_run`). `start_run` and
   `answer_run` block for up to about 45s and return the run's question, its ending, or "still
   working". The server does not use sampling (see the README for why).
 - **`cli`**: a hand-written argument parser (no clap). Parsing is kept separate from execution so
   it can be tested. The browser flags parse into an optional `BrowserTarget` on `Run`, `Observe`
   and `Devices`; `main.rs` connects once (attach mode raises Chrome's prompt on every handshake,
-  so it never probes or retries), checks the endpoint is Chrome, and runs the same loop.
+  so it never probes or retries), checks the endpoint is Chrome, and runs the same loop. The
+  `extension` subcommand (`install [--dev]`, `status`, `uninstall`, `log`, `policy sites
+  add|remove <origin>`, `policy owner-tabs group|never`) and host mode parse into their own
+  `Invocation`s.
+
+## The Chrome extension (`extension/`)
+
+An MV3 extension in plain ES modules, with no build step and no npm packages: `manifest.json`
+(its `key` pins the ID in `browser::bridge`, and its `version` is the crate's), the service worker
+(the `chrome.*` glue), the pure `policy.js`, `protocol.js`, `bridge.js` and `connection.js`, the
+popup, the icons, and the default `policy.json`. `scripts.json` is the page-script allow list and
+must equal `input::PAGE_SCRIPTS`. The binary embeds every file but `test/` through
+`browser::packaged`, and the install writes them to an admin-owned folder.
+
+`extension/test/` runs under `node --test` against a fake `chrome` object; it covers every policy
+rule, the protocol module, and every recorded conversation in `tests/fixtures/extension/`.
+`tests/packaged.rs` fails if a file under `extension/` (other than `test/`) is missing from
+`packaged::FILES`, or if `scripts.json` differs from the engine's scripts. Adding a file to the
+extension means adding it to `src/browser/packaged.rs`.
 
 ## The Android helper (`helper/`)
 

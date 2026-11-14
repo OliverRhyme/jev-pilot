@@ -631,3 +631,152 @@ fn the_readme_and_the_guidance_agree_on_tab_listings() {
         jev_pilot::mcp::TABS_OVER_MCP
     );
 }
+
+/// The extension drives the owner's own Chrome with no click per call, so a
+/// look waits for nobody; its tabs reach another agent, so they are named by
+/// site alone.
+#[test]
+fn the_extension_is_driven_by_site_with_no_wait() {
+    assert_eq!(
+        line(
+            "observe",
+            &json!({"browser": {"mode": "extension", "tab": "7"}})
+        ),
+        [
+            "observe",
+            "--browser",
+            "extension",
+            "--sites-only",
+            "--tab",
+            "7"
+        ]
+    );
+    assert_eq!(
+        line("devices", &json!({"browser": {"mode": "extension"}})),
+        ["devices", "--browser", "extension", "--sites-only"]
+    );
+    let run = line(
+        "start_run",
+        &json!({
+            "goal": "Star the repository",
+            "browser": {"mode": "extension", "open": "https://github.com/OliverRhyme/jev-pilot"},
+        }),
+    );
+    assert_eq!(
+        &run[..6],
+        [
+            "--browser",
+            "extension",
+            "--sites-only",
+            "--open",
+            "https://github.com/OliverRhyme/jev-pilot",
+            "--"
+        ]
+    );
+    assert!(!run.contains(&"--allow-wait".to_owned()), "{run:?}");
+}
+
+/// The extension serves one run at a time, whichever channel's Chrome it is
+/// in.
+#[test]
+fn an_extension_run_is_named_browser_extension() {
+    assert_eq!(
+        run_key(&json!({"browser": {"mode": "extension"}})),
+        "browser:extension"
+    );
+    assert_eq!(
+        busy_with("browser:extension", &["browser:extension"]),
+        Some("browser:extension".to_owned())
+    );
+    assert_eq!(
+        busy_with("browser:extension", &["browser:attach:stable"]),
+        None
+    );
+}
+
+/// A development install is not protected against other programs running as
+/// the owner, so another agent may drive Chrome through one only when whoever
+/// started the server said so.
+#[cfg(feature = "extension")]
+#[test]
+fn a_development_install_is_refused_unless_the_server_allows_it() {
+    use jev_pilot::browser::install::{ALLOW_DEV_BRIDGE, InstallKind};
+    use jev_pilot::mcp::development_refusal;
+
+    let through = json!({"browser": {"mode": "extension"}});
+    let said = development_refusal(&through, Some(InstallKind::Development), None)
+        .expect("refused without the variable");
+    assert!(said.contains("development install"), "{said}");
+    assert!(said.contains(&format!("{ALLOW_DEV_BRIDGE}=1")), "{said}");
+    assert!(
+        development_refusal(&through, Some(InstallKind::Development), Some("0")).is_some(),
+        "only 1 allows it"
+    );
+    assert_eq!(
+        development_refusal(&through, Some(InstallKind::Development), Some("1")),
+        None
+    );
+    assert_eq!(
+        development_refusal(&through, Some(InstallKind::Protected), None),
+        None
+    );
+    assert_eq!(
+        development_refusal(&through, None, None),
+        None,
+        "with nothing installed, the run itself says how to set it up"
+    );
+    for other in [
+        json!({"browser": {"mode": "attach"}}),
+        json!({"browser": {"mode": "fresh"}}),
+        json!({"device": "abc123"}),
+    ] {
+        assert_eq!(
+            development_refusal(&other, Some(InstallKind::Development), None),
+            None,
+            "{other}"
+        );
+    }
+}
+
+/// The instructions put the extension first, and tell the client what to say
+/// to the owner for each way it can stop a run; attach mode follows as the
+/// fallback, with its click on Allow.
+#[test]
+fn the_guidance_leads_with_the_extension() {
+    use rmcp::ServerHandler as _;
+    let guidance = jev_pilot::mcp::Pilot::new()
+        .get_info()
+        .instructions
+        .expect("instructions")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let at = |said: &str| {
+        guidance
+            .find(said)
+            .unwrap_or_else(|| panic!("the guidance lacks {said:?}"))
+    };
+    assert!(at("`mode` 'extension'") < at("`mode` 'attach'"));
+    for said in [
+        "one-time",
+        "no click",
+        "sudo jev-pilot extension install",
+        "resume it from the extension's toolbar button",
+        "sudo jev-pilot extension policy sites add",
+        "put that tab in the 'jev-pilot' tab group first",
+        "JEV_PILOT_ALLOW_DEV_BRIDGE=1",
+        "browser:extension",
+        "click Allow",
+    ] {
+        at(said);
+    }
+    let identity = &guidance[at("something other than the installed jev-pilot")..];
+    assert!(
+        identity
+            .chars()
+            .take(300)
+            .collect::<String>()
+            .contains("never retry"),
+        "a refused identity check is never retried: {identity}"
+    );
+}
