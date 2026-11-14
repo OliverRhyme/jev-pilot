@@ -97,6 +97,11 @@ pub trait BrowserEngine {
     /// What the last command did, as the engine saw it.
     fn outcome(&self) -> Option<&str>;
 
+    /// Whether the last command was refused at click time and never made.
+    fn refused(&self) -> bool {
+        false
+    }
+
     /// How long the page had gone without a DOM change at the last read.
     fn quiet_for_ms(&self) -> Option<u64> {
         None
@@ -230,6 +235,8 @@ pub struct CdpEngine<W: Wire> {
     seen: Seen,
     /// Each row of the last read, by node key: its role and its name.
     rows: HashMap<Box<str>, (Box<str>, String)>,
+    /// Whether the last command was refused at click time.
+    refused: bool,
 }
 
 impl<W: Wire> CdpEngine<W> {
@@ -270,6 +277,7 @@ impl<W: Wire> CdpEngine<W> {
             world: None,
             seen: Seen::default(),
             rows: HashMap::new(),
+            refused: false,
         };
         // Listed before discovery starts, because discovery reports every tab
         // already open as if it had just been created, opener and all.
@@ -824,6 +832,7 @@ impl<W: Wire> CdpEngine<W> {
         let Some(parts) = KeyParts::parse(node) else {
             self.outcome =
                 Some("the tap was not made: the row is not one this browser read".into());
+            self.refused = true;
             return Ok(());
         };
         let described = self.call("DOM.describeNode", json!({"backendNodeId": parts.backend}));
@@ -841,11 +850,13 @@ impl<W: Wire> CdpEngine<W> {
             // that is covered is not one a person could change.
             if let Err(reason) = self.aim(at, node)? {
                 self.outcome = Some(format!("nothing was chosen: {reason}").into());
+                self.refused = true;
                 return Ok(());
             }
             let Some(object) = self.object(parts.backend)? else {
                 self.outcome =
                     Some("the tap was not made: the row is no longer on the page".into());
+                self.refused = true;
                 return Ok(());
             };
             let answer = self.call(
@@ -863,6 +874,7 @@ impl<W: Wire> CdpEngine<W> {
         }
         if let Err(reason) = self.press(at, node)? {
             self.outcome = Some(format!("the tap was not made: {reason}").into());
+            self.refused = true;
             return Ok(());
         }
         for event in input::select_all() {
@@ -894,6 +906,7 @@ impl<W: Wire> CdpEngine<W> {
             BrowserCommand::Press { at, node } => {
                 if let Err(reason) = self.press(*at, node)? {
                     self.outcome = Some(format!("the tap was not made: {reason}").into());
+                    self.refused = true;
                 }
             }
             BrowserCommand::Fill { at, node, text } => self.fill(*at, node, text)?,
@@ -1090,6 +1103,7 @@ impl<W: Wire> BrowserEngine for CdpEngine<W> {
     fn perform(&mut self, command: &BrowserCommand) -> Result<(), EngineError> {
         self.pump();
         self.outcome = None;
+        self.refused = false;
         self.seen = Seen::default();
         match self.run(command) {
             Ok(()) => {
@@ -1109,6 +1123,10 @@ impl<W: Wire> BrowserEngine for CdpEngine<W> {
 
     fn outcome(&self) -> Option<&str> {
         self.outcome.as_deref()
+    }
+
+    fn refused(&self) -> bool {
+        self.refused
     }
 
     fn quiet_for_ms(&self) -> Option<u64> {

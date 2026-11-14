@@ -2330,3 +2330,55 @@ fn an_unsure_step_after_an_action_that_seemed_to_do_nothing_looks_again_before_a
         .unwrap_or_default();
     assert!(last.contains("Issue one"), "{last}");
 }
+
+/// A page whose first tap is refused at click time, as a browser refuses a
+/// tap on a row it finds replaced or covered, and whose screen never changes.
+#[derive(Default)]
+struct RefusesFirstTap {
+    taps: u32,
+}
+
+impl Device for RefusesFirstTap {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        Ok(screen_of(&["Unstar", "1 star"]))
+    }
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        if matches!(command, Command::Tap(_)) {
+            self.taps += 1;
+        }
+        Ok(())
+    }
+    fn refused(&mut self) -> bool {
+        self.taps == 1
+    }
+}
+
+/// A tap that was refused was never made, so choosing it again is not a
+/// repeat to be waited out. Measured on GitHub: Unstar was refused once,
+/// and the guard against repeating then turned the next two tries into
+/// waits, so it was never pressed.
+#[test]
+fn a_refused_action_chosen_again_is_tried_again() {
+    let mut pilot = Pilot::new(
+        RefusesFirstTap::default(),
+        Scripted::new(vec![
+            answer("tap", Some("A1"), 0.9, 0.2),
+            answer("tap", Some("A1"), 0.9, 0.2),
+            answer("done", None, 0.99, 0.97),
+        ]),
+        &Android,
+    );
+
+    let ending = pilot
+        .pursue("Unstar the repository")
+        .expect("the run completes");
+
+    assert_eq!(ending, Ending::Finished(Outcome::Achieved));
+    assert_eq!(pilot.device().taps, 2, "the refused tap was tried again");
+    assert_eq!(
+        pilot.actions_taken(),
+        1,
+        "a refused tap is not an action taken"
+    );
+}

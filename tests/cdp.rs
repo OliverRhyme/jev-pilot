@@ -907,6 +907,7 @@ fn a_row_redrawn_as_an_identical_copy_is_clicked() {
 
     assert_eq!(clicks(&script), 3);
     assert_eq!(engine.outcome(), None);
+    assert!(!engine.refused());
     assert_eq!(
         script.params_of("Accessibility.getPartialAXTree"),
         [json!({"backendNodeId": 5, "fetchRelatives": true})]
@@ -932,6 +933,7 @@ fn a_row_replaced_by_another_control_is_refused_as_replaced() {
         engine.outcome(),
         Some("the tap was not made: the row was replaced since the page was read")
     );
+    assert!(engine.refused(), "a refused tap says so");
 }
 
 /// Two nodes at the point that both look like the row cannot say which one it

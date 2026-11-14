@@ -1940,7 +1940,16 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                         continue;
                     }
                     self.device.perform(&command).map_err(RunError::Device)?;
-                    self.acted = self.acted.saturating_add(1);
+                    // A command the device refused was never made: choosing
+                    // it again is not a repeat, and it is not an action taken.
+                    // Measured on GitHub: Unstar was refused once, and the
+                    // guard against repeating turned the next two tries into
+                    // waits, so it was never pressed.
+                    if self.device.refused() {
+                        last_sent = None;
+                    } else {
+                        self.acted = self.acted.saturating_add(1);
+                    }
                     if let Act::Tap(row) = &act
                         && let Ok(pressed) = snapshot.resolve(*row)
                     {

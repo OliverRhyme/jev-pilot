@@ -81,7 +81,9 @@ screen, and the loop does not know which it is driving.
   browser-only commands `Press`/`Fill` (a point plus the engine's opaque node key), `Navigate`,
   `SwitchTab` and `Dialog` are answered with an `Unsupported` error by the phone adapters.
   `Device::outcome()` (defaulted to `None`) says what the last command did; the pilot puts it in
-  the next step's previous action and in the transcript.
+  the next step's previous action and in the transcript. `Device::refused()` (defaulted to `false`)
+  says a browser refused the command at click time: it was never made, so it is neither a repeat
+  nor an action taken.
   `adb.rs` shells out to `adb`, and its argument building (remote shell quoting, the ASCII limit of
   `input text`) is pure. `helper.rs` handles the on-device accessibility helper (about 50ms per
   read, against about 2.5s for `uiautomator dump`). The reader is chosen once per run, because a
