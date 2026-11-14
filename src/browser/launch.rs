@@ -19,12 +19,48 @@ use std::time::{Duration, Instant};
 /// random part.
 pub const PROFILE_PREFIX: &str = "jev-pilot-fresh-";
 
-/// The file a running run holds locked in its profile folder.
+/// What a profile's lock file is called after the profile's own name.
+const LOCK_SUFFIX: &str = ".lock";
+
+/// The file a running run holds locked beside its profile folder.
 ///
 /// The operating system lets go of the lock when the process ends however it
 /// ends, so a folder whose lock can be taken belongs to a run that is gone,
-/// such as one killed outright, and the next fresh run removes it.
-const LOCK_FILE: &str = "jev-pilot.lock";
+/// such as one killed outright, and the next fresh run removes it. It sits
+/// beside the folder rather than in it because Windows will not rename or
+/// remove a folder holding a file that is open.
+fn lock_of(dir: &Path) -> PathBuf {
+    let mut path = dir.as_os_str().to_owned();
+    path.push(LOCK_SUFFIX);
+    PathBuf::from(path)
+}
+
+/// The profile folder a lock file belongs to.
+fn profile_of(lock: &Path) -> Option<PathBuf> {
+    let name = lock.file_name()?.to_str()?.strip_suffix(LOCK_SUFFIX)?;
+    Some(lock.with_file_name(name))
+}
+
+/// Remove a folder, trying `tries` times a tenth of a second apart, since a
+/// browser just ended can hold its files for a moment longer. `true` once it
+/// is gone.
+fn remove_patiently(dir: &Path, tries: u32) -> bool {
+    for _ in 0..tries {
+        if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Remove a profile's lock file, once its folder is gone; while the folder
+/// is there, the lock is what lets the next sweep find it.
+fn remove_lock(dir: &Path, removed: bool) {
+    if removed {
+        let _ = std::fs::remove_file(lock_of(dir));
+    }
+}
 
 /// Where the browser's process id is kept, for removing a leftover browser
 /// along with its folder.
@@ -162,7 +198,7 @@ impl core::error::Error for LaunchError {}
 pub struct Fresh {
     child: Child,
     dir: PathBuf,
-    _lock: File,
+    lock: Option<File>,
 }
 
 impl Fresh {
@@ -192,7 +228,9 @@ impl Fresh {
         let child = match child {
             Ok(child) => child,
             Err(error) => {
-                let _ = std::fs::remove_dir_all(&dir);
+                let removed = std::fs::remove_dir_all(&dir).is_ok();
+                drop(lock);
+                remove_lock(&dir, removed);
                 return Err(LaunchError::Spawn {
                     binary: binary.to_owned(),
                     error,
@@ -203,7 +241,7 @@ impl Fresh {
         let mut fresh = Self {
             child,
             dir,
-            _lock: lock,
+            lock: Some(lock),
         };
         let port = fresh.wait_for_endpoint(wait)?;
         Ok((fresh, port))
@@ -260,39 +298,35 @@ impl Drop for Fresh {
             let _ = self.child.wait();
         }
         // The browser's helpers can hold files for a moment after it exits.
-        for _ in 0..20 {
-            if std::fs::remove_dir_all(&self.dir).is_ok() || !self.dir.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        let removed = remove_patiently(&self.dir, 20);
+        drop(self.lock.take());
+        remove_lock(&self.dir, removed);
     }
 }
 
 /// Make a fresh profile folder under `temp`, holding its lock.
 ///
-/// Made and locked under a name the sweep does not look at, then renamed, so
-/// it never appears unlocked: a fresh run starting at the same moment would
-/// otherwise take it for a dead run's and remove it. The lock goes with the
-/// open file, so it holds across the rename.
+/// The lock file beside it is made and locked first, so the folder never
+/// appears unlocked: a fresh run starting at the same moment would otherwise
+/// take it for a dead run's and remove it.
 ///
 /// # Errors
-/// Returns the I/O error when the folder cannot be made, locked or renamed.
+/// Returns the I/O error when the lock or the folder cannot be made, or the
+/// lock cannot be taken.
 pub fn make_profile(temp: &Path) -> std::io::Result<(PathBuf, File)> {
     let name = format!("{}-{:08x}", std::process::id(), random_word());
-    let making = temp.join(format!(".making-{PROFILE_PREFIX}{name}"));
     let dir = temp.join(format!("{PROFILE_PREFIX}{name}"));
-    std::fs::create_dir_all(&making)?;
-    let locked = File::create(making.join(LOCK_FILE)).and_then(|lock| {
-        lock.try_lock()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        std::fs::rename(&making, &dir)?;
-        Ok(lock)
-    });
-    match locked {
-        Ok(lock) => Ok((dir, lock)),
+    let lock_path = lock_of(&dir);
+    let lock = File::create_new(&lock_path)?;
+    let made = lock
+        .try_lock()
+        .map_err(|e| std::io::Error::other(e.to_string()))
+        .and_then(|()| std::fs::create_dir(&dir));
+    match made {
+        Ok(()) => Ok((dir, lock)),
         Err(error) => {
-            let _ = std::fs::remove_dir_all(&making);
+            drop(lock);
+            let _ = std::fs::remove_file(&lock_path);
             Err(error)
         }
     }
@@ -305,11 +339,9 @@ pub fn sweep_leftovers(temp: &Path) {
         return;
     };
     for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(PROFILE_PREFIX)
-        {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(PROFILE_PREFIX) && name.ends_with(LOCK_SUFFIX) {
             clear_if_abandoned(&entry.path());
         }
     }
@@ -330,32 +362,34 @@ pub fn reap_run(temp: &Path, run: u32) -> usize {
     };
     entries
         .flatten()
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&mine))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(&mine) && name.ends_with(LOCK_SUFFIX)
+        })
         .filter(|entry| clear_if_abandoned(&entry.path()))
         .count()
 }
 
-/// Remove a fresh profile, and the browser started on it, if the run that
-/// made it has gone. `true` when it was removed.
-fn clear_if_abandoned(dir: &Path) -> bool {
-    let Ok(lock) = File::open(dir.join(LOCK_FILE)) else {
+/// Remove the fresh profile a lock file belongs to, the browser started on
+/// it, and then the lock, if the run that made it has gone. `true` when it
+/// was removed.
+fn clear_if_abandoned(lock_path: &Path) -> bool {
+    let Some(dir) = profile_of(lock_path) else {
+        return false;
+    };
+    let Ok(lock) = File::open(lock_path) else {
         return false;
     };
     if lock.try_lock().is_err() {
         return false;
     }
     let ended = std::fs::read_to_string(dir.join(PID_FILE))
-        .is_ok_and(|pid| end_leftover_browser(pid.trim(), dir));
+        .is_ok_and(|pid| end_leftover_browser(pid.trim(), &dir));
+    let removed = remove_patiently(&dir, if ended { 30 } else { 1 });
     drop(lock);
-    // A browser just ended can hold its files for a moment longer.
-    let tries = if ended { 30 } else { 1 };
-    for _ in 0..tries {
-        if std::fs::remove_dir_all(dir).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    false
+    remove_lock(&dir, removed);
+    removed
 }
 
 /// End a leftover browser by its process id, but only if that process is
@@ -429,15 +463,12 @@ impl Interrupted {
         while browser_running(&pid, dir) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
+        // Where it cannot be ended (no `ps`, as on Windows), it can only be
+        // waited for, so the folder is tried for as long as a run's own
+        // clean-up tries it.
         let ended = end_leftover_browser(&pid, dir);
-        // A browser just ended can hold its files for a moment longer.
-        let tries = if ended { 30 } else { 5 };
-        for _ in 0..tries {
-            if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        let removed = remove_patiently(dir, if ended { 30 } else { 20 });
+        remove_lock(dir, removed);
     }
 }
 

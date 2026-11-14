@@ -533,7 +533,8 @@ fn browser_runs_keep_one_run_per_target() {
 /// Stopping a run ends its process outright, so a fresh run's browser and
 /// profile outlive it unless the server clears them. Only the stopped run's
 /// profiles are touched: the folder name carries the run's process id, and a
-/// profile whose lock is still held belongs to a run that is alive.
+/// profile whose lock is still held belongs to a run that is alive. The lock
+/// is a file beside the folder, and goes with it.
 #[cfg(feature = "browser")]
 #[test]
 fn stopping_a_run_clears_the_fresh_profile_it_left() {
@@ -545,7 +546,8 @@ fn stopping_a_run_clears_the_fresh_profile_it_left() {
     let profile = |name: &str| {
         let dir = temp.join(format!("{PROFILE_PREFIX}{name}"));
         std::fs::create_dir_all(dir.join("Default")).expect("a profile folder");
-        let lock = File::create(dir.join("jev-pilot.lock")).expect("a lock file");
+        let lock =
+            File::create(temp.join(format!("{PROFILE_PREFIX}{name}.lock"))).expect("a lock file");
         (dir, lock)
     };
     let (left, _) = profile("4242-0000aaaa");
@@ -558,6 +560,12 @@ fn stopping_a_run_clears_the_fresh_profile_it_left() {
 
     assert_eq!(cleared, 1);
     assert!(!left.exists(), "the stopped run's profile is removed");
+    assert!(
+        !temp
+            .join(format!("{PROFILE_PREFIX}4242-0000aaaa.lock"))
+            .exists(),
+        "and its lock with it"
+    );
     assert!(
         alive.exists(),
         "a profile still locked belongs to a live run"
