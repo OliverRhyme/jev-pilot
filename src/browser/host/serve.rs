@@ -95,19 +95,7 @@ pub fn serve(
     stdin: impl Read + Send + 'static,
     mut stdout: impl Write,
 ) -> io::Result<()> {
-    // The install makes these, and the host never does.
-    for name in ["audit.log", "audit.lock", "audit.skipped"] {
-        let file = config.audit_dir.join(name);
-        if !file.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "the audit log {} is missing: run the install again",
-                    file.display()
-                ),
-            ));
-        }
-    }
+    audit_files_there(&config.audit_dir)?;
     if another_serves(&config) {
         send_to_chrome(&mut stdout, &Message::Elsewhere)?;
         return Ok(());
@@ -202,6 +190,24 @@ pub fn serve(
     }
     if let Place::Socket(path) = &config.place {
         let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+/// Whether the audit log's files are in `dir`: the install makes them, and
+/// the host never does.
+fn audit_files_there(dir: &Path) -> io::Result<()> {
+    for name in ["audit.log", "audit.lock", "audit.skipped"] {
+        let file = dir.join(name);
+        if !file.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "the audit log {} is missing: run the install again",
+                    file.display()
+                ),
+            ));
+        }
     }
     Ok(())
 }
