@@ -29,6 +29,21 @@ tungstenite = { version = "0.30", optional = true, default-features = false, fea
 # Ctrl-C in a fresh run closes the browser and removes its profile, from a
 # thread of its own while the run is blocked.
 ctrlc = { version = "3.5", optional = true }
+# The extension bridge's local socket or named pipe, and what the OS says about
+# the program at its other end.
+interprocess = { version = "2.4.8", optional = true }
+sha2 = { version = "0.11.1", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.3", optional = true, default-features = false, features = ["socket", "poll"] }
+rustix = { version = "1.1.6", optional = true, default-features = false, features = ["std", "process"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3.7.0", optional = true }
+core-foundation = { version = "0.10.1", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+jev-pilot-os = { path = "jev-pilot-os", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
@@ -53,6 +68,18 @@ mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
 # over one local websocket. Off by default like `mcp`: a library user who only
 # drives phones pays nothing for it.
 browser = ["dep:tungstenite", "dep:ctrlc"]
+# Driving the owner's own Chrome through a jev-pilot extension, over a local
+# socket or named pipe whose other end each side identifies through the OS.
+extension = [
+    "browser",
+    "dep:interprocess",
+    "dep:sha2",
+    "dep:nix",
+    "dep:rustix",
+    "dep:security-framework",
+    "dep:core-foundation",
+    "dep:jev-pilot-os",
+]
 
 # docs.rs renders every feature, and marks which items need which.
 # The server is a binary of its own, and only exists when its feature is on.
@@ -62,6 +89,9 @@ path = "src/main.rs"
 
 # Released as prebuilt binaries even though it is never published to
 # crates.io; without this, `publish = false` hides it from `dist`.
+[workspace]
+members = [".", "jev-pilot-os"]
+
 [package.metadata.dist]
 dist = true
 
