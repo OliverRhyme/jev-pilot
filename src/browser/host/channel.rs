@@ -413,24 +413,34 @@ impl Read for RunStream {
 impl Drop for RunStream {
     /// Let go of the channel, and stop the reader: a pipe's wait is
     /// cancelled only while it waits, so the run asks until the reader has
-    /// gone.
+    /// gone, and the pipe is let go of with it. A reader still there after
+    /// a second is left to a thread that keeps asking, rather than to hold
+    /// the pipe for good.
     fn drop(&mut self) {
         self.closing.store(true, Ordering::SeqCst);
         let Some(reader) = self.reader.take() else {
             return;
         };
+        // Frames still coming are not wanted: a reader waiting to hand one
+        // over gives up.
+        let (_, nothing) = mpsc::sync_channel(0);
+        drop(std::mem::replace(&mut self.frames, nothing));
         for _ in 0..200 {
             hang_up(&self.stream, false);
-            // Frames still coming are not wanted.
-            while self.frames.try_recv().is_ok() {}
             if reader.is_finished() {
-                break;
+                let _ = reader.join();
+                return;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        if reader.is_finished() {
+        let stream = self.stream.clone();
+        std::thread::spawn(move || {
+            while !reader.is_finished() {
+                hang_up(&stream, false);
+                std::thread::sleep(Duration::from_millis(50));
+            }
             let _ = reader.join();
-        }
+        });
     }
 }
 
