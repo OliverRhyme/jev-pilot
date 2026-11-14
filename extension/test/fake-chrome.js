@@ -35,6 +35,38 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
     return tab;
   };
 
+  /** A native messaging port, as connectNative gives one. */
+  const port = () => {
+    const portListeners = { message: [], disconnect: [] };
+    const made = {
+      sent: [],
+      disconnected: false,
+      postMessage: (message) => made.sent.push(message),
+      disconnect: () => {
+        made.disconnected = true;
+      },
+      onMessage: { addListener: (fn) => portListeners.message.push(fn) },
+      onDisconnect: { addListener: (fn) => portListeners.disconnect.push(fn) },
+      /** The host sends `message`. */
+      receive: async (message) => {
+        for (const fn of portListeners.message) {
+          await fn(message);
+        }
+      },
+      /** The host goes, with Chrome's reason in `lastError`. */
+      drop: async (why) => {
+        chrome.runtime.lastError = why === undefined ? undefined : { message: why };
+        for (const fn of portListeners.disconnect) {
+          await fn(made);
+        }
+        chrome.runtime.lastError = undefined;
+      },
+    };
+    state.ports.push(made);
+    return made;
+  };
+  state.ports = [];
+
   const chrome = {
     runtime: {
       getManifest: () => ({ version }),
@@ -42,8 +74,9 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
       reload: () => calls.push(["runtime.reload"]),
       connectNative: (name) => {
         calls.push(["runtime.connectNative", name]);
-        return state.port;
+        return port();
       },
+      lastError: undefined,
       onStartup: event("runtime.onStartup"),
       onInstalled: event("runtime.onInstalled"),
       onMessage: event("runtime.onMessage"),
@@ -157,6 +190,7 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
     },
     action: {
       setBadgeText: async (details) => calls.push(["action.setBadgeText", details]),
+      setBadgeBackgroundColor: async (details) => calls.push(["action.setBadgeBackgroundColor", details]),
     },
   };
 
