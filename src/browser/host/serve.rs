@@ -366,6 +366,11 @@ fn serve_run(
             refuse("nonce: not echoed in time".into());
             return;
         }
+        // Not a frame of the bridge: refused, and audited.
+        Err(e @ (FrameError::Truncated | FrameError::TooLargeToRead { .. })) => {
+            refuse(format!("nonce: echo malformed: {e}"));
+            return;
+        }
         // Closed before echoing: a check that a host answers, or a run that
         // gave up. Nothing to audit.
         Ok(None) | Err(_) => {

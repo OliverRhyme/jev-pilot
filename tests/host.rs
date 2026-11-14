@@ -1334,6 +1334,48 @@ mod serving {
         assert_eq!(events[0]["check"], "nonce: not echoed in time");
     }
 
+    /// An echo that is not a frame of the bridge (one claiming more than
+    /// the bridge reads, or cut off part way) is refused, and audited.
+    #[test]
+    fn a_malformed_echo_is_refused_and_audited() {
+        let malformed = |events: &[serde_json::Value]| {
+            events
+                .iter()
+                .filter(|e| {
+                    e["check"]
+                        .as_str()
+                        .is_some_and(|c| c.starts_with("nonce: echo malformed: "))
+                })
+                .count()
+        };
+        let first = place();
+        let mut host = host_at(&first, Arc::new(Vouched));
+        let mut huge = raw(&first);
+        assert_eq!(first_frame(&mut huge)["type"], "nonce");
+        huge.write_all(&[0xff, 0xff, 0xff, 0x7f]).expect("writes");
+        let refused = first_frame(&mut huge);
+        assert_eq!(refused["type"], "refused");
+        let check = refused["check"].as_str().expect("a check");
+        assert!(check.starts_with("nonce: echo malformed: "), "{check}");
+        drop(huge);
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("ends cleanly");
+        assert_eq!(malformed(&audit_events(&host.audit)), 1);
+
+        let second = place();
+        let mut host = host_at(&second, Arc::new(Vouched));
+        let mut cut = raw(&second);
+        assert_eq!(first_frame(&mut cut)["type"], "nonce");
+        cut.write_all(&[40, 0, 0, 0, b'{']).expect("writes");
+        drop(cut);
+        let audit = host.audit.clone();
+        wait_for("the cut echo audited", || {
+            malformed(&audit_events(&audit)) == 1
+        });
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("ends cleanly");
+    }
+
     /// The host checks the run again after its echo: a run whose facts have
     /// changed by then (on macOS, another process used the socket) is
     /// refused, and audited.
