@@ -1878,3 +1878,89 @@ fn a_frame_that_cannot_be_read_is_counted() {
     assert_eq!(read.unreadable_frames, 1);
     assert!(read.nodes.iter().all(|n| &*n.frame != signup::CHILD_FRAME));
 }
+
+// --- a tab let go of ---
+
+/// Chrome lets go of the driven tab: the owner pressed Cancel on its
+/// debugging bar, the tab closed or went somewhere extensions may not drive,
+/// or the extension let go of it for leaving the allowed sites. The run is
+/// told which, and every call after fails at once, sending nothing.
+#[test]
+fn a_tab_let_go_of_ends_every_call_with_the_reason() {
+    for (reason, said) in [
+        (
+            json!({"reason": "canceled_by_user"}),
+            "you pressed Cancel on Chrome's 'started debugging' bar; jev-pilot let go of every tab",
+        ),
+        (
+            json!({"reason": "target_closed"}),
+            "the tab was closed, or went to a page extensions may not drive",
+        ),
+        (
+            // Chrome's own event, in attach mode, gives no reason.
+            json!({}),
+            "the tab was closed, or went to a page extensions may not drive",
+        ),
+        (
+            json!({"reason": "left_allowed_sites", "url": "https://elsewhere.test/account?x=1"}),
+            "the tab went to https://elsewhere.test, which is not on the allowed sites",
+        ),
+        (
+            json!({"reason": "render_process_gone"}),
+            "Chrome let go of the tab: render_process_gone",
+        ),
+    ] {
+        let (script, mut engine) = engine_after_read();
+        let mut params = reason.clone();
+        params["sessionId"] = SESSION.into();
+        params["targetId"] = signup::TARGET.into();
+        script.event(&json!({"method": "Target.detachedFromTarget", "params": params}));
+
+        let first = engine.read().expect_err("let go of");
+        assert_eq!(first.to_string(), said, "{reason}");
+        script.clear_sent();
+        let again = engine
+            .perform(&BrowserCommand::Submit)
+            .expect_err("still let go of");
+        assert_eq!(again.to_string(), said, "{reason}");
+        assert!(
+            script.sent().is_empty(),
+            "nothing is sent after: {:?}",
+            script.methods()
+        );
+    }
+}
+
+/// A call waiting for its reply when the tab is let go of ends then, rather
+/// than when its wait runs out.
+#[test]
+fn a_call_in_flight_ends_when_its_tab_is_let_go_of() {
+    let (script, mut engine) = engine_after_read();
+    script.answer(
+        "Page.getFrameTree",
+        Answer::EventsThen(
+            vec![json!({"method": "Target.detachedFromTarget", "params": {"sessionId": SESSION, "targetId": signup::TARGET, "reason": "target_closed"}})],
+            Box::new(Answer::Silence),
+        ),
+    );
+    let started = std::time::Instant::now();
+    let error = engine.read().expect_err("let go of");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        error.to_string(),
+        "the tab was closed, or went to a page extensions may not drive"
+    );
+}
+
+/// Another tab's session being let go of leaves the driven tab as it was.
+#[test]
+fn another_session_let_go_of_leaves_the_tab_alone() {
+    let (script, mut engine) = engine_after_read();
+    script.event(&json!({"method": "Target.detachedFromTarget", "params": {"sessionId": "OTHER", "targetId": "T2", "reason": "target_closed"}}));
+    script_read(&script);
+    engine.read().expect("still reads");
+}
