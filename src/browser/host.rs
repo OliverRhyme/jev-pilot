@@ -13,7 +13,7 @@
 pub mod channel;
 mod serve;
 
-pub use serve::{Serve, append_audit, serve};
+pub use serve::{Diagnostics, Serve, append_audit, serve};
 
 use std::time::SystemTime;
 

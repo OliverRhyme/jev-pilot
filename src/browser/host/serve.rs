@@ -2,7 +2,7 @@
 //! the local channel and one per run, all telling the [`Relay`] what
 //! happened, and the relay's answers carried out on the calling thread.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -20,6 +20,16 @@ use crate::peer::{Expected, PeerCheck, Verdict, decide, recheck};
 
 /// How long a run has to echo the nonce.
 const ECHO_WAIT: Duration = Duration::from_secs(10);
+
+/// How long a write to a run may wait before the run is taken as gone.
+const SEND_WAIT: Duration = Duration::from_secs(3);
+
+/// The first wait after a failed accept, and the longest.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
+const ACCEPT_BACKOFF_MOST: Duration = Duration::from_secs(5);
+
+/// How many events may wait for the relay.
+const EVENTS_QUEUED: usize = 256;
 
 /// How often the host looks at the installed version.
 const INSTALL_CHECK: Duration = Duration::from_secs(30);
@@ -45,6 +55,8 @@ pub struct Serve {
     pub extension_on_disk: Option<String>,
     /// The installed jev-pilot's version, read again from time to time.
     pub installed_version: Box<dyn Fn() -> Option<String> + Send>,
+    /// Where the host notes what went wrong, apart from the audit log.
+    pub diagnostics: Option<Diagnostics>,
 }
 
 impl core::fmt::Debug for Serve {
@@ -80,6 +92,16 @@ pub fn serve(
     stdin: impl Read + Send + 'static,
     mut stdout: impl Write,
 ) -> io::Result<()> {
+    let log = config.audit_dir.join("audit.log");
+    if !log.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "the audit log {} is missing: run the install again",
+                log.display()
+            ),
+        ));
+    }
     if another_serves(&config) {
         send_to_chrome(&mut stdout, &Message::Elsewhere)?;
         return Ok(());
@@ -88,7 +110,9 @@ pub fn serve(
         let _ = std::fs::remove_file(path);
     }
     let listener = listen(&config.place)?;
-    let (events, heard) = mpsc::channel();
+    // Bounded, so a host that falls behind holds Chrome back rather than
+    // queueing without end.
+    let (events, heard) = mpsc::sync_channel(EVENTS_QUEUED);
     let stop = Arc::new(AtomicBool::new(false));
 
     read_chrome(stdin, events.clone());
@@ -98,47 +122,58 @@ pub fn serve(
         config.expected.clone(),
         events.clone(),
         stop.clone(),
+        config.diagnostics.clone(),
     );
     watch_install(config.installed_version, events);
 
     let mut relay = Relay::new(&config.version, config.extension_on_disk);
     let mut runs: HashMap<RunId, Arc<Stream>> = HashMap::new();
+    let mut pending: VecDeque<Input> = VecDeque::new();
     'serving: for event in heard {
-        let input = match event {
+        match event {
             Event::Joined(run, stream) => {
+                let _ = stream.set_send_timeout(Some(SEND_WAIT));
                 runs.insert(run, stream);
                 continue;
             }
-            Event::Input(input) => input,
-        };
-        if let Input::RunGone { run } = &input {
-            runs.remove(run);
+            Event::Input(input) => pending.push_back(input),
         }
-        for output in relay.handle(input) {
-            match output {
-                Output::ToExtension(message) => {
-                    if send_to_chrome(&mut stdout, &message).is_err() {
-                        break 'serving;
+        while let Some(input) = pending.pop_front() {
+            if let Input::RunGone { run } = &input {
+                runs.remove(run);
+            }
+            for output in relay.handle(input) {
+                match output {
+                    Output::ToExtension(message) => {
+                        if send_to_chrome(&mut stdout, &message).is_err() {
+                            break 'serving;
+                        }
                     }
-                }
-                Output::ToRun { run, message } => {
-                    if let Some(stream) = runs.get(&run) {
-                        let _ = send_to_run(stream, &message);
+                    Output::ToRun { run, message } => {
+                        // A run that stops reading is taken as gone once a
+                        // write has waited SEND_WAIT, so it cannot hold up the
+                        // extension or the other runs.
+                        if let Some(stream) = runs.get(&run)
+                            && send_to_run(stream, &message).is_err()
+                        {
+                            hang_up(stream);
+                            pending.push_back(Input::RunGone { run });
+                        }
                     }
-                }
-                Output::Close { run } => {
-                    if let Some(stream) = runs.remove(&run) {
-                        hang_up(&stream);
+                    Output::Close { run } => {
+                        if let Some(stream) = runs.remove(&run) {
+                            hang_up(&stream);
+                        }
                     }
+                    Output::Audit(audit) => {
+                        let _ = append_audit(
+                            &config.audit_dir,
+                            &audit.line(&utc(SystemTime::now())),
+                            AUDIT_LIMIT,
+                        );
+                    }
+                    Output::Exit => break 'serving,
                 }
-                Output::Audit(audit) => {
-                    let _ = append_audit(
-                        &config.audit_dir,
-                        &audit.line(&utc(SystemTime::now())),
-                        AUDIT_LIMIT,
-                    );
-                }
-                Output::Exit => break 'serving,
             }
         }
     }
@@ -206,7 +241,7 @@ fn listen(place: &Place) -> io::Result<Listener> {
 }
 
 /// Read Chrome's frames from `stdin` until it closes.
-fn read_chrome(mut stdin: impl Read + Send + 'static, events: mpsc::Sender<Event>) {
+fn read_chrome(mut stdin: impl Read + Send + 'static, events: mpsc::SyncSender<Event>) {
     std::thread::spawn(move || {
         loop {
             let input = match bridge::decode(&mut stdin, ByteOrder::Native) {
@@ -236,17 +271,33 @@ fn accept_runs(
     listener: Listener,
     check: Arc<dyn PeerCheck + Send + Sync>,
     expected: Expected,
-    events: mpsc::Sender<Event>,
+    events: mpsc::SyncSender<Event>,
     stop: Arc<AtomicBool>,
+    diagnostics: Option<Diagnostics>,
 ) {
     std::thread::spawn(move || {
         let mut next: RunId = 0;
+        let mut backoff = ACCEPT_BACKOFF;
         for stream in listener.incoming() {
             if stop.load(Ordering::SeqCst) {
                 return;
             }
-            let Ok(stream) = stream else {
-                continue;
+            let stream = match stream {
+                Ok(stream) => {
+                    backoff = ACCEPT_BACKOFF;
+                    stream
+                }
+                // Noted, and tried again more slowly each time, rather than
+                // spun on: on Windows each run needs a new instance of the
+                // pipe, and making one can fail.
+                Err(e) => {
+                    if let Some(diagnostics) = &diagnostics {
+                        diagnostics.note(&format!("accepting a run failed: {e}"));
+                    }
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(ACCEPT_BACKOFF_MOST);
+                    continue;
+                }
             };
             next += 1;
             let (run, check, expected, events) =
@@ -263,7 +314,7 @@ fn serve_run(
     stream: Stream,
     check: &dyn PeerCheck,
     expected: &Expected,
-    events: &mpsc::Sender<Event>,
+    events: &mpsc::SyncSender<Event>,
 ) {
     let stream = Arc::new(stream);
     let send = |input| {
@@ -335,7 +386,10 @@ fn serve_run(
 }
 
 /// Look at the installed version from time to time.
-fn watch_install(installed: Box<dyn Fn() -> Option<String> + Send>, events: mpsc::Sender<Event>) {
+fn watch_install(
+    installed: Box<dyn Fn() -> Option<String> + Send>,
+    events: mpsc::SyncSender<Event>,
+) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(INSTALL_CHECK);
@@ -381,29 +435,72 @@ fn hang_up(stream: &Stream) {
     let _ = stream;
 }
 
-/// Append `line` to `dir`'s `audit.log`, first rotating it to `audit.log.1`
-/// (and so on, keeping three) when it has reached `limit` bytes.
+/// Append `line` to `dir`'s `audit.log`, first rotating it into
+/// `audit.log.1` (and so on, keeping three) when it has reached `limit`
+/// bytes.
+///
+/// The install makes all four files, root's with the `jev-pilot` group and
+/// mode 0664, so only a member of the group (the setgid host) may write
+/// them, and the owner, not root, cannot remove or replace them. They are
+/// never made here, since a file the host made would be the owner's: a
+/// missing one is an error. Rotation copies within them and truncates, so
+/// they keep their owner and mode.
 ///
 /// # Errors
-/// When the log cannot be written.
+/// When a file is missing or cannot be written.
 pub fn append_audit(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
-    std::fs::create_dir_all(dir)?;
     let log = dir.join("audit.log");
-    if std::fs::metadata(&log).is_ok_and(|m| m.len() >= limit) {
+    let mut file = OpenOptions::new().read(true).append(true).open(&log)?;
+    if file.metadata()?.len() >= limit {
         for n in (1..AUDIT_KEPT).rev() {
-            let _ = std::fs::rename(
-                dir.join(format!("audit.log.{n}")),
-                dir.join(format!("audit.log.{}", n + 1)),
-            );
+            let from = std::fs::read(dir.join(format!("audit.log.{n}")))?;
+            overwrite(&dir.join(format!("audit.log.{}", n + 1)), &from)?;
         }
-        std::fs::rename(&log, dir.join("audit.log.1"))?;
+        overwrite(&dir.join("audit.log.1"), &std::fs::read(&log)?)?;
+        file.set_len(0)?;
     }
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o664);
+    file.write_all(line.as_bytes())
+}
+
+/// Replace what an existing file holds.
+fn overwrite(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
+    file.write_all(contents)
+}
+
+/// The host's diagnostics: a file beside the socket, apart from the audit
+/// log, that never grows past its bound. When full, it starts again.
+#[derive(Debug, Clone)]
+pub struct Diagnostics {
+    file: PathBuf,
+    limit: u64,
+}
+
+impl Diagnostics {
+    /// Diagnostics in `file`, kept under about `limit` bytes.
+    #[must_use]
+    pub fn new(file: PathBuf, limit: u64) -> Self {
+        Self { file, limit }
     }
-    options.open(&log)?.write_all(line.as_bytes())
+
+    /// Note `what`, stamped with the time. Best effort: a note that cannot
+    /// be written is dropped.
+    pub fn note(&self, what: &str) {
+        let full = std::fs::metadata(&self.file).is_ok_and(|m| m.len() >= self.limit);
+        let mut options = OpenOptions::new();
+        options.create(true);
+        if full {
+            options.write(true).truncate(true);
+        } else {
+            options.append(true);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        if let Ok(mut file) = options.open(&self.file) {
+            let _ = writeln!(file, "{} {what}", utc(SystemTime::now()));
+        }
+    }
 }

@@ -163,11 +163,13 @@ pub fn pipe_name(sid: &str) -> String {
     format!(r"\\.\pipe\jev-pilot-{sid}")
 }
 
-/// The pipe's access rights for its user: `FILE_GENERIC_READ` (0x120089),
-/// and `FILE_GENERIC_WRITE` (0x120116) without `FILE_APPEND_DATA` (0x4),
-/// which on a pipe is `FILE_CREATE_PIPE_INSTANCE` and would let any program
-/// of the user's add an instance of its own and take connections.
-const PIPE_USER_RIGHTS: u32 = 0x0012_0089 | (0x0012_0116 & !0x4);
+/// The pipe's access rights for its user: `FILE_GENERIC_READ` (0x120089)
+/// and `FILE_GENERIC_WRITE` (0x120116). Write includes
+/// `FILE_CREATE_PIPE_INSTANCE` (`FILE_APPEND_DATA`, 0x4), which the host
+/// needs to make an instance of the pipe for each run. A program running as
+/// the user can then add an instance of its own and take a connection; each
+/// run checks the host before it sends anything, which is what defeats it.
+const PIPE_USER_RIGHTS: u32 = 0x0012_0089 | 0x0012_0116;
 
 /// The pipe's security descriptor, as SDDL.
 ///
@@ -175,8 +177,7 @@ const PIPE_USER_RIGHTS: u32 = 0x0012_0089 | (0x0012_0116 & !0x4);
 /// - network (`NU`) and anonymous (`AN`) logons denied everything, first,
 ///   because an access check stops at the first entry that decides;
 /// - SYSTEM allowed everything;
-/// - the user allowed read and write (`0x12019b`), without the right to
-///   create instances.
+/// - the user allowed read and write (`0x12019f`).
 ///
 /// The default descriptor would give Everyone read access, and an empty one
 /// (`SecurityDescriptor::new()`) gives everyone everything.

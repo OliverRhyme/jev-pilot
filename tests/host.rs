@@ -692,16 +692,17 @@ mod channel {
         assert_eq!(pipe_name(SID), format!(r"\\.\pipe\jev-pilot-{SID}"));
         // Deny network and anonymous logons first (an access check stops at
         // the first ACE that decides), then all to SYSTEM, and to the user
-        // read and write without FILE_CREATE_PIPE_INSTANCE (0x4), so no
-        // program of the user's can add an instance of its own.
+        // read and write. Write includes FILE_CREATE_PIPE_INSTANCE (0x4):
+        // the host makes a new instance for each run, which needs it. A
+        // program of the user's may then add an instance too, which is why
+        // each run checks the host before it sends anything.
         assert_eq!(
             pipe_sddl(SID),
-            format!("D:P(D;;GA;;;NU)(D;;GA;;;AN)(A;;GA;;;SY)(A;;0x12019b;;;{SID})")
+            format!("D:P(D;;GA;;;NU)(D;;GA;;;AN)(A;;GA;;;SY)(A;;0x12019f;;;{SID})")
         );
-        let mask = 0x0012_019b_u32;
-        assert_eq!(mask & 0x4, 0, "no FILE_CREATE_PIPE_INSTANCE");
+        let mask = 0x0012_019f_u32;
         assert_eq!(mask & 0x0012_0089, 0x0012_0089, "FILE_GENERIC_READ");
-        assert_eq!(mask & 0x2, 0x2, "FILE_WRITE_DATA");
+        assert_eq!(mask & 0x0012_0116, 0x0012_0116, "FILE_GENERIC_WRITE");
     }
 }
 
@@ -720,6 +721,7 @@ mod run_side {
     /// A place of this test's own on the local channel.
     pub(crate) fn place() -> Place {
         static NEXT: AtomicU32 = AtomicU32::new(0);
+        super::watchdog();
         let unique = format!(
             "jev-pilot-host-{}-{}",
             std::process::id(),
@@ -1015,6 +1017,7 @@ mod serving {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&audit);
+        super::audit_files(&audit);
         let config = Serve {
             place: place.clone(),
             expected: expected(),
@@ -1023,6 +1026,7 @@ mod serving {
             version: "0.4.0".into(),
             extension_on_disk: Some("0.4.0".into()),
             installed_version: Box::new(|| Some("0.4.0".into())),
+            diagnostics: None,
         };
         let stdout = out.clone();
         let done = std::thread::spawn(move || serve(config, stdin, stdout));
@@ -1162,6 +1166,70 @@ mod serving {
             .collect()
     }
 
+    /// A host whose audit log is missing does not serve.
+    #[test]
+    fn a_host_without_its_audit_log_does_not_serve() {
+        let place = place();
+        let (stdin, _writer) = std::io::pipe().unwrap();
+        let audit = std::env::temp_dir().join(format!("jev-pilot-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&audit);
+        let config = Serve {
+            place: place.clone(),
+            expected: expected(),
+            check: Arc::new(Vouched),
+            audit_dir: audit.clone(),
+            version: "0.4.0".into(),
+            extension_on_disk: None,
+            installed_version: Box::new(|| None),
+            diagnostics: None,
+        };
+        let error = serve(config, stdin, Out::default()).expect_err("refused");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the audit log {} is missing: run the install again",
+                audit.join("audit.log").display()
+            )
+        );
+        assert!(
+            Stream::connect(place.name().unwrap()).is_err(),
+            "nothing listens"
+        );
+    }
+
+    /// A run that stops reading does not hold the host up: after a while
+    /// it is taken as gone, and the host still leaves with Chrome.
+    #[test]
+    fn a_run_that_stops_reading_does_not_hold_the_host_up() {
+        let place = place();
+        let mut host = host_at(&place, Arc::new(Vouched));
+        let run = run_at(&place, "x").expect("the run connects");
+        wait_for("run_started", || {
+            host.out
+                .messages()
+                .iter()
+                .any(|m| m["type"] == "run_started")
+        });
+        let mut stdin = host.stdin.take().expect("stdin");
+        let page = json!({"type": "cdp", "tab": 7, "method": "Page.x",
+                          "params": {"pad": "p".repeat(256 << 10)}});
+        let started = Instant::now();
+        for _ in 0..64 {
+            stdin
+                .write_all(&frame_native(&page))
+                .expect("the host reads");
+        }
+        drop(stdin);
+        host.done.join().unwrap().expect("ends cleanly");
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(host.out.messages().iter().any(|m| m["type"] == "release"));
+        drop(run);
+    }
+
     /// The host checks a connection before it reads anything from it: one
     /// that fails is told so where a nonce would have been.
     #[test]
@@ -1282,6 +1350,7 @@ fn the_audit_log_is_rotated_by_size() {
     use jev_pilot::browser::host::append_audit;
     let dir = std::env::temp_dir().join(format!("jev-pilot-rotate-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    audit_files(&dir);
     // Each line is 7 bytes, so the log reaches the limit every two lines.
     for n in 0..10 {
         append_audit(&dir, &format!("line {n}\n"), 10).expect("appends");
@@ -1292,5 +1361,84 @@ fn the_audit_log_is_rotated_by_size() {
     assert_eq!(read("audit.log.2").as_deref(), Some("line 4\nline 5\n"));
     assert_eq!(read("audit.log.3").as_deref(), Some("line 2\nline 3\n"));
     assert_eq!(read("audit.log.4"), None, "the oldest is dropped");
+    // Rotated by copying within the files the install made, so they keep
+    // their owner and mode.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for name in ["audit.log", "audit.log.1", "audit.log.2", "audit.log.3"] {
+            let mode = std::fs::metadata(dir.join(name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o664, "{name}");
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The host's diagnostics go to a file beside the socket that never grows
+/// past its bound: when full, it starts again.
+#[test]
+fn the_diagnostics_file_is_bounded() {
+    use jev_pilot::browser::host::Diagnostics;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-diag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("host.log");
+    let diagnostics = Diagnostics::new(file.clone(), 100);
+    for n in 0..50 {
+        diagnostics.note(&format!("accepting a run failed: attempt {n}"));
+    }
+    let text = std::fs::read_to_string(&file).expect("written");
+    assert!(text.len() <= 100 + 80, "{} bytes", text.len());
+    assert!(text.contains("attempt 49"), "{text}");
+    assert!(
+        text.lines()
+            .all(|l| l.ends_with(|c: char| c.is_ascii_digit()))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The audit log's files as an install makes them: all four, mode 0664.
+fn audit_files(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    for name in ["audit.log", "audit.log.1", "audit.log.2", "audit.log.3"] {
+        std::fs::write(dir.join(name), "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o664))
+                .unwrap();
+        }
+    }
+}
+
+/// The host never makes the audit log: one it would make would be the
+/// owner's, and the owner could then rewrite it. A missing log is refused.
+#[test]
+fn a_missing_audit_log_is_refused_not_made() {
+    use jev_pilot::browser::host::append_audit;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-noaudit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(append_audit(&dir, "line\n", 10).is_err());
+    assert!(!dir.exists(), "the directory is not made");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(append_audit(&dir, "line\n", 10).is_err());
+    assert!(!dir.join("audit.log").exists(), "the log is not made");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Ends these tests, failing, if they run past two minutes: a socket or
+/// pipe that never answers fails the run instead of hanging it. They take
+/// about a second.
+fn watchdog() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(120));
+            eprintln!("the host tests ran past two minutes: a socket or pipe is stuck");
+            std::process::exit(101);
+        });
+    });
 }

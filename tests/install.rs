@@ -5,7 +5,17 @@
 #![cfg(feature = "extension")]
 
 use jev_pilot::browser::discover::Os;
-use jev_pilot::browser::install::{InstallKind, InstallRecord, Layout, host_manifest};
+use jev_pilot::browser::install::{
+    InstallKind, InstallRecord, Layout, SystemFolders, host_manifest,
+};
+
+/// Where Windows keeps Program Files and ProgramData on a usual machine.
+fn folders() -> SystemFolders {
+    SystemFolders {
+        program_files: r"C:\Program Files".into(),
+        program_data: r"C:\ProgramData".into(),
+    }
+}
 use jev_pilot::cli::OwnerTabs;
 use jev_pilot::peer::{Expected, LinuxPin, MacosPin, Sha256Digest, WindowsPin};
 use serde_json::json;
@@ -30,7 +40,7 @@ const WINDOWS: &[(&str, &str)] = &[
 #[test]
 fn a_protected_install_puts_everything_where_only_an_administrator_writes() {
     assert_eq!(
-        Layout::protected(Os::MacOs, &env(&[])),
+        Layout::protected(Os::MacOs, &folders()),
         Layout {
             binary: "/usr/local/libexec/jev-pilot/jev-pilot".into(),
             install_json: "/Library/Application Support/jev-pilot/install.json".into(),
@@ -40,7 +50,7 @@ fn a_protected_install_puts_everything_where_only_an_administrator_writes() {
         }
     );
     assert_eq!(
-        Layout::protected(Os::Linux, &env(&[])),
+        Layout::protected(Os::Linux, &folders()),
         Layout {
             binary: "/usr/local/libexec/jev-pilot/jev-pilot".into(),
             install_json: "/etc/jev-pilot/install.json".into(),
@@ -50,7 +60,7 @@ fn a_protected_install_puts_everything_where_only_an_administrator_writes() {
         }
     );
     assert_eq!(
-        Layout::protected(Os::Windows, &env(WINDOWS)),
+        Layout::protected(Os::Windows, &folders()),
         Layout {
             binary: r"C:\Program Files\jev-pilot\jev-pilot.exe".into(),
             install_json: r"C:\Program Files\jev-pilot\install.json".into(),
@@ -59,10 +69,19 @@ fn a_protected_install_puts_everything_where_only_an_administrator_writes() {
             host_manifest: r"C:\Program Files\jev-pilot\dev.jevpilot.bridge.json".into(),
         }
     );
-    // Without the variables, Windows's own defaults.
+    // Where Windows keeps them, as the system says: never from the
+    // environment, which a program running as the owner can change.
+    let moved = SystemFolders {
+        program_files: r"D:\Apps".into(),
+        program_data: r"D:\Data".into(),
+    };
     assert_eq!(
-        Layout::protected(Os::Windows, &env(&[])).binary,
-        PathBuf::from(r"C:\Program Files\jev-pilot\jev-pilot.exe")
+        Layout::protected(Os::Windows, &moved).binary,
+        PathBuf::from(r"D:\Apps\jev-pilot\jev-pilot.exe")
+    );
+    assert_eq!(
+        Layout::protected(Os::Windows, &moved).audit_log,
+        PathBuf::from(r"D:\Data\jev-pilot\audit")
     );
 }
 
@@ -518,7 +537,7 @@ fn macos_turns_off_user_level_hosts_with_a_configuration_profile() {
 
 // --- the install, as a plan of steps ---
 
-use jev_pilot::browser::install::{Owner, Step, UserHosts, plan};
+use jev_pilot::browser::install::{Existing, Owner, RegistryHost, Step, UserHosts, plan};
 
 const EXE: &str = "/Users/o/.jev-pilot/bin/jev-pilot";
 
@@ -537,7 +556,7 @@ fn files_written(steps: &[Step]) -> Vec<PathBuf> {
 /// root's; user-level hosts are copied, then turned off by policy.
 #[test]
 fn a_protected_linux_install_plan() {
-    let layout = Layout::protected(Os::Linux, &env(&[]));
+    let layout = Layout::protected(Os::Linux, &folders());
     let user =
         PathBuf::from("/home/o/.config/google-chrome/NativeMessagingHosts/com.example.x.json");
     let steps = plan(
@@ -549,6 +568,7 @@ fn a_protected_linux_install_plan() {
             from: user.clone(),
             to: PathBuf::from(CHROME_LINUX).join("com.example.x.json"),
         }]),
+        &Existing::default(),
     );
     let binary = PathBuf::from("/usr/local/libexec/jev-pilot/jev-pilot");
     assert_eq!(steps[0], Step::EnsureGroup);
@@ -642,13 +662,14 @@ fn a_protected_linux_install_plan() {
 /// is made setgid, and the profile is opened for the owner to approve.
 #[test]
 fn a_protected_macos_install_plan() {
-    let layout = Layout::protected(Os::MacOs, &env(&[]));
+    let layout = Layout::protected(Os::MacOs, &folders());
     let steps = plan(
         Os::MacOs,
         InstallKind::Protected,
         &layout,
         Path::new(EXE),
         &UserHosts::Files(vec![]),
+        &Existing::default(),
     );
     let binary = PathBuf::from("/usr/local/libexec/jev-pilot/jev-pilot");
     let sign = steps
@@ -688,17 +709,18 @@ fn a_protected_macos_install_plan() {
 /// under HKLM too.
 #[test]
 fn a_protected_windows_install_plan() {
-    let layout = Layout::protected(Os::Windows, &env(WINDOWS));
+    let layout = Layout::protected(Os::Windows, &folders());
     let steps = plan(
         Os::Windows,
         InstallKind::Protected,
         &layout,
         Path::new(r"C:\Users\o\.jev-pilot\bin\jev-pilot.exe"),
-        &UserHosts::Registry(vec![(
-            r"SOFTWARE\Google\Chrome\NativeMessagingHosts".into(),
-            "com.example.x".into(),
-            PathBuf::from(r"C:\Users\o\x.json"),
-        )]),
+        &UserHosts::Registry(vec![RegistryHost {
+            key: r"SOFTWARE\Google\Chrome\NativeMessagingHosts".into(),
+            name: "com.example.x".into(),
+            manifest: PathBuf::from(r"C:\Users\owner\x.json"),
+        }]),
+        &Existing::default(),
     );
     assert!(!steps.contains(&Step::EnsureGroup));
     let manifest = PathBuf::from(r"C:\Program Files\jev-pilot\dev.jevpilot.bridge.json");
@@ -726,7 +748,7 @@ fn a_protected_windows_install_plan() {
         "/t".into(),
         "REG_SZ".into(),
         "/d".into(),
-        r"C:\Users\o\x.json".into(),
+        r"C:\Users\owner\x.json".into(),
         "/f".into(),
         "/reg:64".into(),
     ];
@@ -756,6 +778,7 @@ fn a_development_install_plan() {
         &layout,
         Path::new("/home/o/.jev-pilot/bin/jev-pilot"),
         &UserHosts::Register(user_dirs),
+        &Existing::default(),
     );
     assert!(!steps.contains(&Step::EnsureGroup));
     assert!(
@@ -802,7 +825,7 @@ fn the_cdhash_is_read_from_codesigns_report() {
 #[test]
 fn uninstalling_undoes_the_install() {
     use jev_pilot::browser::install::uninstall_plan;
-    let layout = Layout::protected(Os::Linux, &env(&[]));
+    let layout = Layout::protected(Os::Linux, &folders());
     let moved = PathBuf::from(CHROME_LINUX).join("com.example.x.json");
     let record = InstallRecord {
         version: "0.4.0".into(),
@@ -814,7 +837,7 @@ fn uninstalling_undoes_the_install() {
         },
         moved_hosts: vec![moved.clone()],
     };
-    let steps = uninstall_plan(Os::Linux, &layout, &record);
+    let steps = uninstall_plan(Os::Linux, &layout, &record, &[]);
     let removed: Vec<&Path> = steps
         .iter()
         .filter_map(|s| match s {
@@ -839,11 +862,12 @@ fn uninstalling_undoes_the_install() {
 
     let mac = uninstall_plan(
         Os::MacOs,
-        &Layout::protected(Os::MacOs, &env(&[])),
+        &Layout::protected(Os::MacOs, &folders()),
         &InstallRecord {
             expected: mac_expected(),
             ..record.clone()
         },
+        &[],
     );
     assert!(
         mac.iter()
@@ -852,13 +876,14 @@ fn uninstalling_undoes_the_install() {
 
     let windows = uninstall_plan(
         Os::Windows,
-        &Layout::protected(Os::Windows, &env(WINDOWS)),
+        &Layout::protected(Os::Windows, &folders()),
         &InstallRecord {
             moved_hosts: vec![PathBuf::from(
                 r"HKLM\SOFTWARE\Google\Chrome\NativeMessagingHosts\com.example.x",
             )],
             ..record
         },
+        &[],
     );
     assert!(windows.contains(&Step::Reg(reg_delete_policy(
         r"SOFTWARE\Policies\Google\Chrome"
@@ -876,7 +901,7 @@ fn uninstalling_undoes_the_install() {
 use jev_pilot::browser::install::{Found, Status, status_lines};
 
 fn found(kind: InstallKind) -> Found {
-    let layout = Layout::protected(Os::MacOs, &env(&[]));
+    let layout = Layout::protected(Os::MacOs, &folders());
     Found {
         record: InstallRecord {
             version: "0.4.0".into(),
@@ -991,6 +1016,7 @@ fn a_development_install_with_no_browser_says_so() {
         &layout,
         Path::new(EXE),
         &UserHosts::Register(vec![]),
+        &Existing::default(),
     );
     assert!(
         steps.contains(&Step::Tell(
@@ -1001,23 +1027,306 @@ fn a_development_install_with_no_browser_says_so() {
     );
 }
 
-/// Installing again does the same, in place: the same steps, a policy that
-/// keeps the owner's sites, a profile with the same UUIDs.
+/// Installing again, over an install that had copied the owner's hosts,
+/// keeps the earlier copies in install.json, so uninstalling can still
+/// remove them; and keeps a policy.json the owner has edited.
 #[test]
-fn installing_again_plans_the_same_install() {
-    for os in [Os::MacOs, Os::Linux, Os::Windows] {
-        let layout = Layout::protected(os, &env(WINDOWS));
-        let hosts = UserHosts::Files(vec![]);
-        assert_eq!(
-            plan(os, InstallKind::Protected, &layout, Path::new(EXE), &hosts),
-            plan(os, InstallKind::Protected, &layout, Path::new(EXE), &hosts),
-            "{os:?}"
-        );
-    }
+fn installing_again_keeps_what_the_earlier_install_moved() {
+    let layout = Layout::protected(Os::Linux, &folders());
+    let earlier = PathBuf::from(CHROME_LINUX).join("com.example.earlier.json");
+    let now = HostCopy {
+        from: "/home/owner/.config/google-chrome/NativeMessagingHosts/com.example.now.json".into(),
+        to: PathBuf::from(CHROME_LINUX).join("com.example.now.json"),
+    };
+    let existing = Existing {
+        moved_hosts: vec![earlier.clone(), now.to.clone()],
+        user_host_dirs: vec![],
+    };
+    let steps = plan(
+        Os::Linux,
+        InstallKind::Protected,
+        &layout,
+        Path::new(EXE),
+        &UserHosts::Files(vec![now.clone()]),
+        &existing,
+    );
+    let Some(Step::Record { moved_hosts, .. }) = steps.last() else {
+        panic!("ends with the record");
+    };
+    assert_eq!(moved_hosts, &vec![earlier, now.to]);
+
     let once = policy_for_install(None, InstallKind::Protected);
     let edited = with_site(&once, "https://github.com", true);
     assert_eq!(
         policy_for_install(Some(edited.clone()), InstallKind::Protected),
         edited
     );
+}
+
+/// The user-writable development install is read only when no protected
+/// install exists: a protected install.json that cannot be read is an
+/// error, not a reason to trust the owner's own.
+#[test]
+fn only_a_missing_protected_install_falls_back_to_a_development_one() {
+    use jev_pilot::browser::install::find_installed;
+    let home = Path::new("/home/owner");
+    let protected = Layout::protected(Os::Linux, &folders()).install_json;
+    let dev = Layout::development(Os::Linux, home, &env(&[]));
+    let record = serde_json::to_string(&InstallRecord {
+        version: "0.4.0".into(),
+        kind: InstallKind::Development,
+        expected: Expected::Linux {
+            uid: 1000,
+            path: dev.binary.clone(),
+            pin: LinuxPin::DevelopmentSha256(Sha256Digest::from_bytes([7; 32])),
+        },
+        moved_hosts: vec![],
+    })
+    .unwrap();
+    let reading = |protected_error: std::io::ErrorKind| {
+        let protected = protected.clone();
+        let dev = dev.install_json.clone();
+        let record = record.clone();
+        move |path: &Path| -> std::io::Result<String> {
+            if path == protected {
+                Err(protected_error.into())
+            } else if path == dev {
+                Ok(record.clone())
+            } else {
+                Err(std::io::ErrorKind::NotFound.into())
+            }
+        }
+    };
+    let found = find_installed(
+        Os::Linux,
+        &folders(),
+        home,
+        &env(&[]),
+        &reading(std::io::ErrorKind::NotFound),
+    )
+    .expect("read")
+    .expect("found");
+    assert_eq!(found.record.kind, InstallKind::Development);
+    assert!(
+        find_installed(
+            Os::Linux,
+            &folders(),
+            home,
+            &env(&[]),
+            &reading(std::io::ErrorKind::PermissionDenied)
+        )
+        .is_err()
+    );
+}
+
+// --- the owner's own hosts, moved safely ---
+
+/// jev-pilot's own name, in any case, is never taken for one of the
+/// owner's hosts: macOS and Windows compare names without regard to case,
+/// and a copy would overwrite jev-pilot's own manifest.
+#[test]
+fn a_host_named_like_jev_pilots_in_any_case_is_not_copied() {
+    let user = PathBuf::from(
+        "/Users/owner/Library/Application Support/Google/Chrome/NativeMessagingHosts",
+    );
+    let found = [
+        (
+            user.join("Dev.JevPilot.Bridge.json"),
+            PathBuf::from(CHROME_MAC),
+        ),
+        (
+            user.join("DEV.JEVPILOT.BRIDGE.JSON"),
+            PathBuf::from(CHROME_MAC),
+        ),
+    ];
+    assert_eq!(host_copies(&found, &|_| false), []);
+    let output = "HKEY_CURRENT_USER\\SOFTWARE\\Google\\Chrome\\NativeMessagingHosts\\DEV.JEVPILOT.BRIDGE\r\n    (Default)    REG_SZ    C:\\x.json\r\n";
+    assert_eq!(reg_hosts_in(output), []);
+}
+
+/// The owner's hosts are copied before jev-pilot's own manifest is
+/// written, so jev-pilot's is the last word in every folder.
+#[test]
+fn the_owners_hosts_are_copied_before_jev_pilots_manifest_is_written() {
+    let layout = Layout::protected(Os::MacOs, &folders());
+    let copy = HostCopy {
+        from: "/Users/owner/Library/Application Support/Google/Chrome/NativeMessagingHosts/x.json"
+            .into(),
+        to: PathBuf::from(CHROME_MAC).join("x.json"),
+    };
+    let steps = plan(
+        Os::MacOs,
+        InstallKind::Protected,
+        &layout,
+        Path::new(EXE),
+        &UserHosts::Files(vec![copy.clone()]),
+        &Existing::default(),
+    );
+    let copied = steps
+        .iter()
+        .position(|s| *s == Step::CopyHost(copy.clone()))
+        .unwrap();
+    let ours = steps
+        .iter()
+        .position(|s| matches!(s, Step::WriteFile { path, .. } if *path == PathBuf::from(CHROME_MAC).join("dev.jevpilot.bridge.json")))
+        .unwrap();
+    assert!(copied < ours);
+}
+
+/// What is copied of an owner's host is its manifest, read and written
+/// again: one that is not a host manifest named as its file is refused.
+#[test]
+fn only_a_host_manifest_named_as_its_file_is_copied() {
+    use jev_pilot::browser::install::manifest_to_copy;
+    let good = r#"{"name": "com.example.x", "description": "x", "path": "/opt/x/host",
+                   "type": "stdio", "allowed_origins": ["chrome-extension://abc/"]}"#;
+    let copied = manifest_to_copy(good, "com.example.x").expect("a manifest");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&copied).unwrap(),
+        serde_json::from_str::<serde_json::Value>(good).unwrap()
+    );
+    for (text, stem) in [
+        (good, "com.example.other"),
+        (
+            r#"{"name": "com.example.x", "path": "relative/host", "type": "stdio"}"#,
+            "com.example.x",
+        ),
+        (
+            r#"{"name": "com.example.x", "type": "stdio"}"#,
+            "com.example.x",
+        ),
+        ("root:x:0:0:root:/root:/bin/sh", "passwd"),
+        ("[1, 2]", "x"),
+    ] {
+        assert!(manifest_to_copy(text, stem).is_err(), "{text}");
+    }
+}
+
+/// A host file is read without following a link, and only when it is the
+/// owner's own regular file of a manifest's size.
+#[cfg(unix)]
+#[test]
+fn a_linked_or_foreign_host_file_is_not_read() {
+    use jev_pilot::browser::install::read_owners_host;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-hosts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let me = rustix::process::getuid().as_raw();
+    let real = dir.join("com.example.x.json");
+    std::fs::write(
+        &real,
+        r#"{"name": "com.example.x", "path": "/opt/x/host", "type": "stdio"}"#,
+    )
+    .unwrap();
+    assert!(read_owners_host(&real, me).is_ok());
+    assert!(
+        read_owners_host(&real, me + 1).is_err(),
+        "another user's file"
+    );
+    let link = dir.join("com.example.y.json");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert!(read_owners_host(&link, me).is_err(), "a link");
+    let big = dir.join("com.example.big.json");
+    std::fs::write(&big, vec![b' '; 1 << 20]).unwrap();
+    assert!(read_owners_host(&big, me).is_err(), "too large");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// On Windows, a host already registered for the machine under the same
+/// name is a vendor's own, and is left alone.
+#[test]
+fn a_host_already_registered_for_the_machine_is_left_alone() {
+    use jev_pilot::browser::install::registry_hosts_to_copy;
+    let host = |name: &str| RegistryHost {
+        key: r"SOFTWARE\Google\Chrome\NativeMessagingHosts".into(),
+        name: name.into(),
+        manifest: PathBuf::from(r"C:\Users\owner\x.json"),
+    };
+    let found = vec![
+        host("com.vendor.x"),
+        host("com.example.y"),
+        host("Dev.JevPilot.Bridge"),
+    ];
+    assert_eq!(
+        registry_hosts_to_copy(found, &|h: &RegistryHost| h.name == "com.vendor.x"),
+        [host("com.example.y")]
+    );
+}
+
+/// A protected install removes a development install's user-level
+/// registrations, which Chrome would otherwise still prefer until the
+/// policy is in place.
+#[test]
+fn a_protected_install_removes_an_earlier_development_registration() {
+    let layout = Layout::protected(Os::MacOs, &folders());
+    let dir = PathBuf::from(
+        "/Users/owner/Library/Application Support/Google/Chrome/NativeMessagingHosts",
+    );
+    let steps = plan(
+        Os::MacOs,
+        InstallKind::Protected,
+        &layout,
+        Path::new(EXE),
+        &UserHosts::Files(vec![]),
+        &Existing {
+            moved_hosts: vec![],
+            user_host_dirs: vec![dir.clone()],
+        },
+    );
+    assert!(steps.contains(&Step::Remove {
+        path: dir.join("dev.jevpilot.bridge.json")
+    }));
+}
+
+/// Uninstalling a development install removes the user-level
+/// registrations it made.
+#[test]
+fn uninstalling_a_development_install_removes_its_registrations() {
+    use jev_pilot::browser::install::uninstall_plan;
+    let home = Path::new("/home/owner");
+    let layout = Layout::development(Os::Linux, home, &env(&[]));
+    let record = InstallRecord {
+        version: "0.4.0".into(),
+        kind: InstallKind::Development,
+        expected: Expected::Linux {
+            uid: 1000,
+            path: layout.binary.clone(),
+            pin: LinuxPin::DevelopmentSha256(Sha256Digest::from_bytes([7; 32])),
+        },
+        moved_hosts: vec![],
+    };
+    let dir = PathBuf::from("/home/owner/.config/google-chrome/NativeMessagingHosts");
+    let steps = uninstall_plan(Os::Linux, &layout, &record, std::slice::from_ref(&dir));
+    assert!(steps.contains(&Step::Remove {
+        path: dir.join("dev.jevpilot.bridge.json")
+    }));
+    assert!(steps.contains(&Step::Remove {
+        path: layout.binary.clone()
+    }));
+}
+
+/// The install makes the audit log's files, root's with the group, which
+/// the host appends to and never makes: so the owner can neither make nor
+/// rewrite them.
+#[test]
+fn a_protected_install_makes_the_audit_logs_files() {
+    let layout = Layout::protected(Os::Linux, &folders());
+    let steps = plan(
+        Os::Linux,
+        InstallKind::Protected,
+        &layout,
+        Path::new(EXE),
+        &UserHosts::Files(vec![]),
+        &Existing::default(),
+    );
+    for name in ["audit.log", "audit.log.1", "audit.log.2", "audit.log.3"] {
+        assert!(
+            steps.contains(&Step::CreateFile {
+                path: PathBuf::from("/var/log/jev-pilot").join(name),
+                mode: 0o664,
+                owner: Owner::RootGroup,
+            }),
+            "{name}"
+        );
+    }
 }

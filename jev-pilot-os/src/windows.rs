@@ -25,10 +25,14 @@ use windows_sys::Win32::Security::{
     GetTokenInformation, PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows_sys::Win32::UI::Shell::{
+    FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_System, SHGetKnownFolderPath,
 };
 
 /// Another process, opened only to ask about it.
@@ -179,6 +183,51 @@ pub fn final_path(file: &File) -> io::Result<PathBuf> {
         }
         capacity = length;
     }
+}
+
+/// A folder Windows keeps for the whole machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownFolder {
+    /// Program Files.
+    ProgramFiles,
+    /// ProgramData.
+    ProgramData,
+    /// System32.
+    System,
+}
+
+/// Where `folder` is, as the system says, not as the environment says: a
+/// process inherits its environment from whoever started it, and a program
+/// running as the user can change the user's.
+///
+/// # Errors
+///
+/// When Windows cannot say.
+#[allow(unsafe_code)]
+pub fn known_folder(folder: KnownFolder) -> io::Result<PathBuf> {
+    let id = match folder {
+        KnownFolder::ProgramFiles => FOLDERID_ProgramFiles,
+        KnownFolder::ProgramData => FOLDERID_ProgramData,
+        KnownFolder::System => FOLDERID_System,
+    };
+    let mut path: *mut u16 = ptr::null_mut();
+    // SAFETY: `id` is a valid GUID that outlives the call; a null token
+    // asks for the folder as this process sees it; `path` is a valid place
+    // for the pointer to the string the call allocates.
+    let status = unsafe { SHGetKnownFolderPath(&raw const id, 0, ptr::null_mut(), &raw mut path) };
+    let result = if status == 0 {
+        // SAFETY: the call succeeded, so `path` is a NUL-terminated wide
+        // string that stays valid until it is freed below.
+        let wide = unsafe { nul_terminated(path) };
+        Ok(PathBuf::from(OsString::from_wide(wide)))
+    } else {
+        Err(io::Error::from_raw_os_error(status))
+    };
+    // SAFETY: the string was allocated by SHGetKnownFolderPath, which says
+    // to free it with CoTaskMemFree whether it succeeded or not; it is not
+    // used after this.
+    unsafe { CoTaskMemFree(path.cast()) };
+    result
 }
 
 /// The string form of the SID of the user this process runs as, for a named

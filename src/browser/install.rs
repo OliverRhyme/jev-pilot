@@ -11,6 +11,7 @@
 //! protected against other programs running as the owner.
 
 use std::fmt::Write as _;
+use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -48,6 +49,44 @@ fn binary_name(os: Os) -> &'static str {
     }
 }
 
+/// Where Windows keeps Program Files and ProgramData for the whole
+/// machine. On other systems they are not used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemFolders {
+    /// Program Files.
+    pub program_files: String,
+    /// ProgramData.
+    pub program_data: String,
+}
+
+impl SystemFolders {
+    /// Where the system says they are on Windows: from the known folders,
+    /// never from the environment, which a program running as the owner
+    /// can change for Chrome and so for the host it starts.
+    ///
+    /// # Errors
+    /// When Windows cannot say.
+    #[cfg(windows)]
+    pub fn of_this_system() -> io::Result<Self> {
+        use jev_pilot_os::{KnownFolder, known_folder};
+        let text = |f| known_folder(f).map(|p| p.to_string_lossy().into_owned());
+        Ok(Self {
+            program_files: text(KnownFolder::ProgramFiles)?,
+            program_data: text(KnownFolder::ProgramData)?,
+        })
+    }
+
+    /// Not used on this system.
+    #[cfg(not(windows))]
+    #[must_use]
+    pub fn of_this_system() -> Self {
+        Self {
+            program_files: String::new(),
+            program_data: String::new(),
+        }
+    }
+}
+
 /// Where an install puts each of its files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
@@ -68,7 +107,7 @@ impl Layout {
     /// A protected install's layout: every file where only an administrator
     /// can write.
     #[must_use]
-    pub fn protected(os: Os, env: &dyn Fn(&str) -> Option<String>) -> Self {
+    pub fn protected(os: Os, folders: &SystemFolders) -> Self {
         let manifest = manifest_name();
         match os {
             Os::MacOs => {
@@ -89,14 +128,14 @@ impl Layout {
                 host_manifest: join(os, "/etc/jev-pilot", &[&manifest]),
             },
             Os::Windows => {
-                let files = env("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into());
-                let data = env("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into());
+                let files = &folders.program_files;
+                let data = &folders.program_data;
                 Self {
-                    binary: join(os, &files, &["jev-pilot", binary_name(os)]),
-                    install_json: join(os, &files, &["jev-pilot", "install.json"]),
-                    extension: join(os, &files, &["jev-pilot", "extension"]),
-                    audit_log: join(os, &data, &["jev-pilot", "audit"]),
-                    host_manifest: join(os, &files, &["jev-pilot", &manifest]),
+                    binary: join(os, files, &["jev-pilot", binary_name(os)]),
+                    install_json: join(os, files, &["jev-pilot", "install.json"]),
+                    extension: join(os, files, &["jev-pilot", "extension"]),
+                    audit_log: join(os, data, &["jev-pilot", "audit"]),
+                    host_manifest: join(os, files, &["jev-pilot", &manifest]),
                 }
             }
         }
@@ -418,7 +457,7 @@ pub fn host_copies(found: &[(PathBuf, PathBuf)], exists: &dyn Fn(&Path) -> bool)
         .filter_map(|(from, system)| {
             let name = from.file_name()?.to_str()?;
             // Chrome reads `<host name>.json`, exactly.
-            if name == ours || from.extension().is_none_or(|e| e != "json") {
+            if name.eq_ignore_ascii_case(&ours) || from.extension().is_none_or(|e| e != "json") {
                 return None;
             }
             let to = system.join(name);
@@ -428,6 +467,73 @@ pub fn host_copies(found: &[(PathBuf, PathBuf)], exists: &dyn Fn(&Path) -> bool)
             })
         })
         .collect()
+}
+
+/// Which of the owner's hosts registered under HKCU to register under HKLM
+/// too: not jev-pilot's own, whatever its case, and not one the machine
+/// already has under that name, which is a vendor's own.
+#[must_use]
+pub fn registry_hosts_to_copy(
+    found: Vec<RegistryHost>,
+    at_machine_level: &dyn Fn(&RegistryHost) -> bool,
+) -> Vec<RegistryHost> {
+    found
+        .into_iter()
+        .filter(|host| !host.name.eq_ignore_ascii_case(HOST_NAME) && !at_machine_level(host))
+        .collect()
+}
+
+/// The largest host manifest an install copies.
+#[cfg(unix)]
+const HOST_MANIFEST_LIMIT: u64 = 64 << 10;
+
+/// An owner's host manifest, to be copied to system level: parsed as one,
+/// named as its file (`stem`), with an absolute `path`, and written out
+/// again rather than copied byte for byte.
+///
+/// # Errors
+/// When it is not such a manifest.
+pub fn manifest_to_copy(text: &str, stem: &str) -> Result<String, String> {
+    let manifest: Value =
+        serde_json::from_str(text).map_err(|e| format!("not a host manifest: {e}"))?;
+    let object = manifest.as_object().ok_or("not a host manifest")?;
+    if object.get("name").and_then(Value::as_str) != Some(stem) {
+        return Err(format!("its name is not {stem}"));
+    }
+    let path = object
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("it names no program")?;
+    if !(Path::new(path).is_absolute() || path.starts_with('/')) {
+        return Err(format!("its program {path} is not an absolute path"));
+    }
+    serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())
+}
+
+/// An owner's host file, read without following a link, when it is a
+/// regular file of `uid`'s no larger than a manifest is.
+///
+/// # Errors
+/// When it is a link, not a regular file, another user's, too large, or
+/// cannot be read.
+#[cfg(unix)]
+pub fn read_owners_host(path: &Path, uid: u32) -> io::Result<String> {
+    use std::io::Read as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.uid() != uid || meta.len() > HOST_MANIFEST_LIMIT {
+        return Err(io::Error::other(format!(
+            "{} is not a host manifest of yours",
+            path.display()
+        )));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
 }
 
 /// The registry keys, under HKLM or HKCU, that hold host registrations on
@@ -526,7 +632,7 @@ pub fn reg_hosts_in(output: &str) -> Vec<(String, PathBuf)> {
         let Some(value) = line.split("REG_SZ").nth(1).map(str::trim) else {
             continue;
         };
-        if let Some(host) = name.take().filter(|n| n != HOST_NAME) {
+        if let Some(host) = name.take().filter(|n| !n.eq_ignore_ascii_case(HOST_NAME)) {
             hosts.push((host, PathBuf::from(value)));
         }
     }
@@ -638,6 +744,16 @@ pub enum Step {
         /// Its owner.
         owner: Owner,
     },
+    /// Create a file if it is missing, keeping what an existing one holds,
+    /// and give it its owner and permission bits.
+    CreateFile {
+        /// The file.
+        path: PathBuf,
+        /// Its permission bits.
+        mode: u32,
+        /// Its owner.
+        owner: Owner,
+    },
     /// Copy the running binary to where it is installed.
     CopyBinary {
         /// The running binary.
@@ -712,11 +828,34 @@ pub enum Step {
 pub enum UserHosts {
     /// macOS and Linux, protected: the manifests to copy to system level.
     Files(Vec<HostCopy>),
-    /// Windows, protected: the hosts registered under HKCU, by key, name
-    /// and manifest, to register under HKLM too.
-    Registry(Vec<(String, String, PathBuf)>),
+    /// Windows, protected: the hosts registered under HKCU, to register
+    /// under HKLM too.
+    Registry(Vec<RegistryHost>),
     /// A development install: the user-level folders to register in.
     Register(Vec<PathBuf>),
+}
+
+/// A host registered in the Windows registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryHost {
+    /// The key it is under, below the hive.
+    pub key: String,
+    /// Its name.
+    pub name: String,
+    /// Its manifest.
+    pub manifest: PathBuf,
+}
+
+/// What an install finds already there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Existing {
+    /// The owner's hosts an earlier install copied to system level, from
+    /// its install.json: kept in the new one, so uninstalling still removes
+    /// them.
+    pub moved_hosts: Vec<PathBuf>,
+    /// The owner's user-level host folders, where an earlier development
+    /// install may have registered.
+    pub user_host_dirs: Vec<PathBuf>,
 }
 
 /// `rel`, a path with `/` between its parts, under `base`, with `os`'s
@@ -735,6 +874,7 @@ pub fn plan(
     layout: &Layout,
     exe: &Path,
     user_hosts: &UserHosts,
+    existing: &Existing,
 ) -> Vec<Step> {
     let protected = kind == InstallKind::Protected;
     let mut planner = Planner {
@@ -745,23 +885,41 @@ pub fn plan(
     };
     planner.binary(layout, exe);
     planner.extension(layout, kind);
+    let mut moved_hosts = Vec::new();
+    if protected {
+        // Before jev-pilot's own manifest is written, so that it is the
+        // last word in every folder; and every move kept, earlier ones too.
+        planner.unregister_development(&existing.user_host_dirs);
+        moved_hosts.clone_from(&existing.moved_hosts);
+        for moved in planner.moved_hosts(user_hosts) {
+            if !moved_hosts.contains(&moved) {
+                moved_hosts.push(moved);
+            }
+        }
+    }
     planner.registration(layout, user_hosts);
-    let moved_hosts = if protected {
-        let moved = planner.moved_hosts(user_hosts);
+    if protected {
         planner.policy(layout);
-        moved
+    }
+    let (mode, owner) = if protected {
+        (0o775, Owner::RootGroup)
     } else {
-        Vec::new()
+        (0o700, Owner::User)
     };
     planner.steps.push(Step::CreateDir {
         path: layout.audit_log.clone(),
-        mode: if protected { 0o775 } else { 0o700 },
-        owner: if protected {
-            Owner::RootGroup
-        } else {
-            Owner::User
-        },
+        mode,
+        owner,
     });
+    // The host appends to these and never makes them: made here, they are
+    // root's, so the owner can neither make nor rewrite them.
+    for name in ["audit.log", "audit.log.1", "audit.log.2", "audit.log.3"] {
+        planner.steps.push(Step::CreateFile {
+            path: under(os, &layout.audit_log, name),
+            mode: if protected { 0o664 } else { 0o600 },
+            owner,
+        });
+    }
     planner.steps.push(Step::Record {
         path: layout.install_json.clone(),
         kind,
@@ -895,7 +1053,12 @@ impl Planner {
                 }
             }
             UserHosts::Registry(hosts) => {
-                for (key, name, manifest) in hosts {
+                for RegistryHost {
+                    key,
+                    name,
+                    manifest,
+                } in hosts
+                {
                     let target = format!(r"HKLM\{key}\{name}");
                     self.steps.push(Step::Reg(vec![
                         "add".into(),
@@ -914,6 +1077,21 @@ impl Planner {
             UserHosts::Register(_) => {}
         }
         moved
+    }
+
+    /// A development install's user-level registrations, which Chrome
+    /// would prefer to the system's until the policy is in place.
+    fn unregister_development(&mut self, user_host_dirs: &[PathBuf]) {
+        if self.os == Os::Windows {
+            for key in windows_host_keys() {
+                self.steps.push(Step::Reg(reg_delete_host("HKCU", key)));
+            }
+        }
+        for folder in user_host_dirs {
+            self.steps.push(Step::Remove {
+                path: folder.join(manifest_name()),
+            });
+        }
     }
 
     /// Chrome's policy, turning user-level hosts off.
@@ -989,6 +1167,7 @@ fn describe(step: &Step) -> String {
         Step::CopyBinary { to, .. } => format!("copying jev-pilot to {}", to.display()),
         Step::Sign { path } => format!("signing {}", path.display()),
         Step::CreateDir { path, .. }
+        | Step::CreateFile { path, .. }
         | Step::Remove { path }
         | Step::SetOwner { path, .. }
         | Step::WriteFile { path, .. }
@@ -1006,6 +1185,10 @@ fn apply_one(step: &Step, installer: &Installer, said: &mut Vec<String>) -> io::
         Step::EnsureGroup => ensure_group(said)?,
         Step::CreateDir { path, mode, owner } => {
             std::fs::create_dir_all(path)?;
+            set_owner(path, *owner, *mode)?;
+        }
+        Step::CreateFile { path, mode, owner } => {
+            OpenOptions::new().create(true).append(true).open(path)?;
             set_owner(path, *owner, *mode)?;
         }
         Step::CopyBinary { from, to } => {
@@ -1054,8 +1237,7 @@ fn apply_one(step: &Step, installer: &Installer, said: &mut Vec<String>) -> io::
             }
         }
         Step::CopyHost(copy) => {
-            std::fs::copy(&copy.from, &copy.to)?;
-            set_owner(&copy.to, Owner::Root, 0o644)?;
+            copy_host(copy, installer)?;
             said.push(format!(
                 "copied your host {} to {}",
                 copy.from.display(),
@@ -1078,17 +1260,7 @@ fn apply_one(step: &Step, installer: &Installer, said: &mut Vec<String>) -> io::
             kind,
             binary,
             moved_hosts,
-        } => {
-            let record = InstallRecord {
-                version: env!("CARGO_PKG_VERSION").into(),
-                kind: *kind,
-                expected: pin(*kind, binary, installer)?,
-                moved_hosts: moved_hosts.clone(),
-            };
-            write_file(path, serde_json::to_string_pretty(&record)?.as_bytes())?;
-            set_owner(path, owner_of(*kind), 0o644)?;
-            said.push(format!("pinned {} in {}", binary.display(), path.display()));
-        }
+        } => record(path, *kind, binary, moved_hosts, installer, said)?,
         Step::Remove { path } => {
             let gone = if path.is_dir() {
                 std::fs::remove_dir_all(path)
@@ -1104,6 +1276,56 @@ fn apply_one(step: &Step, installer: &Installer, said: &mut Vec<String>) -> io::
         Step::Tell(words) => said.push(words.clone()),
     }
     Ok(())
+}
+
+/// Pin the installed `binary` and write `install.json` at `path`.
+fn record(
+    path: &Path,
+    kind: InstallKind,
+    binary: &Path,
+    moved_hosts: &[PathBuf],
+    installer: &Installer,
+    said: &mut Vec<String>,
+) -> io::Result<()> {
+    let record = InstallRecord {
+        version: env!("CARGO_PKG_VERSION").into(),
+        kind,
+        expected: pin(kind, binary, installer)?,
+        moved_hosts: moved_hosts.to_vec(),
+    };
+    write_file(path, serde_json::to_string_pretty(&record)?.as_bytes())?;
+    set_owner(path, owner_of(kind), 0o644)?;
+    said.push(format!("pinned {} in {}", binary.display(), path.display()));
+    Ok(())
+}
+
+/// Copy an owner's host to system level: read safely, parsed as a
+/// manifest, written out again to a file that must not exist yet.
+#[cfg(unix)]
+fn copy_host(copy: &HostCopy, installer: &Installer) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Installer::Uid(uid) = installer else {
+        return Err(io::Error::other("a host copy needs the owner's uid"));
+    };
+    let text = read_owners_host(&copy.from, *uid)?;
+    let stem = copy
+        .from
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| io::Error::other("a host file without a name"))?;
+    let manifest = manifest_to_copy(&text, stem).map_err(io::Error::other)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&copy.to)?;
+    std::io::Write::write_all(&mut file, manifest.as_bytes())?;
+    set_owner(&copy.to, Owner::Root, 0o644)
+}
+
+#[cfg(not(unix))]
+fn copy_host(_: &HostCopy, _: &Installer) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
 }
 
 fn owner_of(kind: InstallKind) -> Owner {
@@ -1242,7 +1464,12 @@ fn pin(kind: InstallKind, binary: &Path, installer: &Installer) -> io::Result<Ex
 /// Everything uninstalling does: remove what the install made and the
 /// system copies of the owner's hosts, and turn user-level hosts back on.
 #[must_use]
-pub fn uninstall_plan(os: Os, layout: &Layout, record: &InstallRecord) -> Vec<Step> {
+pub fn uninstall_plan(
+    os: Os,
+    layout: &Layout,
+    record: &InstallRecord,
+    user_host_dirs: &[PathBuf],
+) -> Vec<Step> {
     let protected = record.kind == InstallKind::Protected;
     let mut steps = Vec::new();
     let hive = if protected { "HKLM" } else { "HKCU" };
@@ -1289,6 +1516,13 @@ pub fn uninstall_plan(os: Os, layout: &Layout, record: &InstallRecord) -> Vec<St
             )),
             _ => {}
         }
+    }
+    // A development install registered in these; a protected one may have
+    // been preceded by one that did.
+    for folder in user_host_dirs {
+        steps.push(Step::Remove {
+            path: folder.join(manifest_name()),
+        });
     }
     for path in [
         &layout.host_manifest,
@@ -1337,21 +1571,51 @@ pub struct Found {
 /// An `install.json` that cannot be read as one.
 pub fn find_installed(
     os: Os,
+    folders: &SystemFolders,
     home: &Path,
     env: &dyn Fn(&str) -> Option<String>,
-    read: &dyn Fn(&Path) -> Option<String>,
+    read: &dyn Fn(&Path) -> io::Result<String>,
 ) -> Result<Option<Found>, String> {
     for layout in [
-        Layout::protected(os, env),
+        Layout::protected(os, folders),
         Layout::development(os, home, env),
     ] {
-        if let Some(text) = read(&layout.install_json) {
+        // Only a missing file moves on to the next: one that cannot be read
+        // is not a reason to trust the owner's own development install.
+        let text = match read(&layout.install_json) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(format!(
+                    "{} cannot be read: {e}",
+                    layout.install_json.display()
+                ));
+            }
+        };
+        if let Some(text) = text {
             let record = serde_json::from_str(&text)
                 .map_err(|e| format!("{} cannot be read: {e}", layout.install_json.display()))?;
             return Ok(Some(Found { layout, record }));
         }
     }
     Ok(None)
+}
+
+/// The installed copy on this system, for the owner whose home is `home`:
+/// [`find_installed`] with the system's own folders and files.
+///
+/// # Errors
+/// When Windows cannot say where its folders are, or an `install.json`
+/// cannot be read.
+pub fn installed_on_this_system(home: &Path) -> Result<Option<Found>, String> {
+    #[cfg(windows)]
+    let folders = SystemFolders::of_this_system().map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    let folders = SystemFolders::of_this_system();
+    let env = |name: &str| std::env::var(name).ok();
+    find_installed(Os::current(), &folders, home, &env, &|path| {
+        std::fs::read_to_string(path)
+    })
 }
 
 /// What `jev-pilot extension status` looked at.

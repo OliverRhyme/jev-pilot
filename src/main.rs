@@ -1063,9 +1063,26 @@ mod bridge {
         std::fs::read_to_string(path).ok()
     }
 
+    fn read_install(path: &Path) -> std::io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+
+    /// Where Windows keeps Program Files and ProgramData, as the system
+    /// says.
+    #[cfg_attr(
+        not(windows),
+        allow(clippy::unnecessary_wraps, reason = "Windows can fail")
+    )]
+    fn folders() -> Result<install::SystemFolders, Error> {
+        #[cfg(windows)]
+        return Ok(install::SystemFolders::of_this_system()?);
+        #[cfg(not(windows))]
+        Ok(install::SystemFolders::of_this_system())
+    }
+
     /// The installed copy, or why there is none.
     fn installed() -> Result<Found, Error> {
-        install::find_installed(Os::current(), &home()?, &env, &read)?
+        install::find_installed(Os::current(), &folders()?, &home()?, &env, &read_install)?
             .ok_or_else(|| NOT_SET_UP.into())
     }
 
@@ -1200,6 +1217,8 @@ mod bridge {
         if let Place::Socket(path) = &place {
             prepare_socket_dir(path.parent().unwrap_or(path))?;
         }
+        let diagnostics = diagnostics_file(&place)
+            .map(|file| jev_pilot::browser::host::Diagnostics::new(file, DIAGNOSTICS_LIMIT));
         let layout = found.layout.clone();
         let install_json = layout.install_json.clone();
         let config = Serve {
@@ -1214,9 +1233,26 @@ mod bridge {
                 let record: install::InstallRecord = serde_json::from_str(&text).ok()?;
                 Some(record.version)
             }),
+            diagnostics,
         };
         serve(config, std::io::stdin(), std::io::stdout().lock())?;
         Ok(())
+    }
+
+    /// How large the host's diagnostics may grow before they start again.
+    const DIAGNOSTICS_LIMIT: u64 = 256 << 10;
+
+    /// Where the host notes what went wrong: beside the socket, or on
+    /// Windows, where the pipe has no folder, in the owner's local data.
+    fn diagnostics_file(place: &Place) -> Option<PathBuf> {
+        match place {
+            Place::Socket(path) => Some(path.with_file_name("host.log")),
+            Place::Pipe(_) => {
+                let dir = PathBuf::from(env("LOCALAPPDATA")?).join("jev-pilot");
+                std::fs::create_dir_all(&dir).ok()?;
+                Some(dir.join("host.log"))
+            }
+        }
     }
 
     /// The socket's directory: made if missing, the owner's and closed to
@@ -1317,10 +1353,28 @@ mod bridge {
                 Layout::development(os, &owner_home, &env),
             )
         } else {
-            (InstallKind::Protected, Layout::protected(os, &env))
+            (InstallKind::Protected, Layout::protected(os, &folders()?))
         };
         let hosts = user_hosts(os, kind, &owner_home)?;
-        let steps = install::plan(os, kind, &layout, &std::env::current_exe()?, &hosts);
+        // What an earlier install moved stays recorded, so uninstalling
+        // still removes it.
+        let moved_hosts = std::fs::read_to_string(&layout.install_json)
+            .ok()
+            .and_then(|text| serde_json::from_str::<install::InstallRecord>(&text).ok())
+            .map(|record| record.moved_hosts)
+            .unwrap_or_default();
+        let existing = install::Existing {
+            moved_hosts,
+            user_host_dirs: user_host_dirs(os, &owner_home),
+        };
+        let steps = install::plan(
+            os,
+            kind,
+            &layout,
+            &std::env::current_exe()?,
+            &hosts,
+            &existing,
+        );
         for line in install::apply(&steps, &installer)? {
             println!("{line}");
         }
@@ -1339,6 +1393,16 @@ mod bridge {
             layout.extension.display()
         );
         Ok(())
+    }
+
+    /// The owner's user-level host folders that exist, not followed
+    /// through a link.
+    fn user_host_dirs(os: Os, home: &Path) -> Vec<PathBuf> {
+        install::user_host_dirs(os, home)
+            .into_iter()
+            .map(|(user, _)| user)
+            .filter(|dir| std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()))
+            .collect()
     }
 
     /// The owner's user-level hosts, as the install deals with them.
@@ -1361,18 +1425,39 @@ mod bridge {
                 for (name, manifest) in
                     install::reg_hosts_in(&String::from_utf8_lossy(&output.stdout))
                 {
-                    found.push((key.to_owned(), name, manifest));
+                    found.push(install::RegistryHost {
+                        key: key.to_owned(),
+                        name,
+                        manifest,
+                    });
                 }
             }
-            return Ok(UserHosts::Registry(found));
+            // One the machine already has under that name is a vendor's.
+            let at_machine_level = |host: &install::RegistryHost| {
+                std::process::Command::new("reg")
+                    .args(["query", &format!(r"HKLM\{}\{}", host.key, host.name)])
+                    .output()
+                    .is_ok_and(|o| o.status.success())
+            };
+            return Ok(UserHosts::Registry(install::registry_hosts_to_copy(
+                found,
+                &at_machine_level,
+            )));
         }
+        // Only the owner's own folders and files, never through a link: the
+        // install copies them as root.
         let mut found = Vec::new();
         for (user, system) in install::user_host_dirs(os, home) {
+            if !std::fs::symlink_metadata(&user).is_ok_and(|m| m.is_dir()) {
+                continue;
+            }
             let Ok(entries) = std::fs::read_dir(&user) else {
                 continue;
             };
             for entry in entries.flatten() {
-                found.push((entry.path(), system.clone()));
+                if entry.file_type().is_ok_and(|t| t.is_file()) {
+                    found.push((entry.path(), system.clone()));
+                }
             }
         }
         Ok(UserHosts::Files(install::host_copies(&found, &|p| {
@@ -1382,7 +1467,7 @@ mod bridge {
 
     fn status() -> Result<(), Error> {
         let os = Os::current();
-        let found = install::find_installed(os, &home()?, &env, &read)?;
+        let found = install::find_installed(os, &folders()?, &home()?, &env, &read_install)?;
         let host_answers = match &found {
             Some(found) => host_answers(&place()?, &expected(found)?, &Native),
             None => false,
@@ -1429,8 +1514,13 @@ mod bridge {
         if found.record.kind == InstallKind::Protected && !is_admin()? {
             return Err(NEEDS_ADMIN.into());
         }
-        let (installer, _) = installer(found.record.kind == InstallKind::Development)?;
-        let steps = install::uninstall_plan(Os::current(), &found.layout, &found.record);
+        let (installer, owner_home) = installer(found.record.kind == InstallKind::Development)?;
+        let steps = install::uninstall_plan(
+            Os::current(),
+            &found.layout,
+            &found.record,
+            &user_host_dirs(Os::current(), &owner_home),
+        );
         for line in install::apply(&steps, &installer)? {
             println!("{line}");
         }

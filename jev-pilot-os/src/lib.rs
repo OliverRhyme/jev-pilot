@@ -20,6 +20,6 @@ mod windows;
 
 #[cfg(windows)]
 pub use windows::{
-    Process, Signer, authenticode_signer, current_session, current_user_sid, final_path,
-    is_elevated, process_image,
+    KnownFolder, Process, Signer, authenticode_signer, current_session, current_user_sid,
+    final_path, is_elevated, known_folder, process_image,
 };
