@@ -18,12 +18,45 @@ use crate::browser::transport::{Wire, WireError};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// How long a stream may wait for the next frame to start, as the wire
+/// last said. Shared between the wire and its stream: the wire sets it
+/// before each read, and a stream that keeps whole frames together waits
+/// that long only between frames.
+#[derive(Debug, Clone)]
+pub struct Pacer(Arc<AtomicU64>);
+
+impl Pacer {
+    /// A pacer that allows `wait` to begin with.
+    #[must_use]
+    pub fn new(wait: Duration) -> Self {
+        let pacer = Self(Arc::new(AtomicU64::new(0)));
+        pacer.set(wait);
+        pacer
+    }
+
+    /// Allow `wait` for the next frame to start.
+    pub fn set(&self, wait: Duration) {
+        let micros = u64::try_from(wait.as_micros()).unwrap_or(u64::MAX);
+        self.0.store(micros, Ordering::Relaxed);
+    }
+
+    /// How long the next frame may take to start.
+    #[must_use]
+    pub fn wait(&self) -> Duration {
+        Duration::from_micros(self.0.load(Ordering::Relaxed))
+    }
+}
 
 /// A run's connection to Chrome through the jev-pilot extension.
 #[derive(Debug)]
 pub struct ExtensionWire<S: Read + Write> {
     stream: S,
+    /// Told how long each read may wait, when the stream is paced.
+    pacer: Option<Pacer>,
     hello: Hello,
     host_version: String,
     translator: Translator,
@@ -54,6 +87,11 @@ impl<S: Read + Write> ExtensionWire<S> {
         parent: &Parent,
     ) -> Result<Self, ConnectError> {
         let first = read_message(&mut stream)?;
+        // A run that fails the host's check before the handshake is told so
+        // in place of a nonce.
+        if let Message::Refused { check } = first {
+            return Err(ConnectError::Refused { check });
+        }
         let Some(echo) = Nonce::echoing(&first, goal, sites, parent) else {
             return Err(ConnectError::NotTheHost {
                 why: "it did not open with a nonce".into(),
@@ -75,6 +113,7 @@ impl<S: Read + Write> ExtensionWire<S> {
                 }
                 Ok(Self {
                     stream,
+                    pacer: None,
                     translator: Translator::new(&hello),
                     hello,
                     host_version,
@@ -88,6 +127,15 @@ impl<S: Read + Write> ExtensionWire<S> {
                 why: "it answered the echo with something other than the bridge's state".into(),
             }),
         }
+    }
+
+    /// Pace the stream: before each read, the wire tells `pacer` how long
+    /// it may wait, so that a receive waits out its whole timeout and no
+    /// longer.
+    #[must_use]
+    pub fn paced_by(mut self, pacer: Pacer) -> Self {
+        self.pacer = Some(pacer);
+        self
     }
 
     /// What the extension said about itself and its browser.
@@ -122,8 +170,12 @@ impl<S: Read + Write> Wire for ExtensionWire<S> {
             if let Some(text) = self.waiting.pop_front() {
                 return Ok(Some(text));
             }
-            if Instant::now() >= deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
                 return Ok(None);
+            }
+            if let Some(pacer) = &self.pacer {
+                pacer.set(left);
             }
             let message = match read_message(&mut self.stream) {
                 Ok(message) => message,

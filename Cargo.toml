@@ -45,6 +45,8 @@ jev-pilot-os = { path = "jev-pilot-os", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 jev-pilot-os = { path = "jev-pilot-os", optional = true }
+# The named pipe's security descriptor, from SDDL, as interprocess takes it.
+widestring = { version = "1.2.1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
@@ -80,6 +82,7 @@ extension = [
     "dep:security-framework",
     "dep:core-foundation",
     "dep:jev-pilot-os",
+    "dep:widestring",
 ]
 
 # docs.rs renders every feature, and marks which items need which.

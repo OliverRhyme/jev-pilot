@@ -644,6 +644,7 @@ dependencies = [
  "tokio",
  "tungstenite",
  "ureq",
+ "widestring",
 ]
 
 [[package]]

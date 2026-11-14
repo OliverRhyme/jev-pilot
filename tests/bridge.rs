@@ -710,6 +710,23 @@ fn a_run_can_say_which_process_started_it() {
     );
 }
 
+/// A run that fails the host's check before the handshake is told so in
+/// place of a nonce, and sends nothing.
+#[test]
+fn a_run_refused_before_the_nonce_says_which_check() {
+    let channel =
+        Channel::new(&[json!({"type": "refused", "check": "uid: not the expected value"})]);
+    let sent = channel.handle();
+    let error = ExtensionWire::connect(channel, "", &[])
+        .err()
+        .expect("refused");
+    assert_eq!(
+        error.to_string(),
+        "the bridge only serves the installed jev-pilot (uid: not the expected value failed)"
+    );
+    assert_eq!(written_by(&sent), Vec::<serde_json::Value>::new());
+}
+
 /// A channel that does not open with a nonce is not the host, and the run
 /// sends it nothing.
 #[test]

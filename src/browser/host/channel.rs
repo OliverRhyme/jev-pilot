@@ -3,9 +3,17 @@
 //! open. The kernel keeps other users off it; which program of the owner's is
 //! at the other end is the business of [`crate::peer`].
 
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use interprocess::local_socket::traits::Stream as _;
+use interprocess::local_socket::{GenericFilePath, Name, Stream, ToFsName as _};
+
+use crate::browser::bridge::Parent;
 use crate::browser::discover::Os;
+use crate::browser::extension::{ConnectError, ExtensionWire, Pacer};
+use crate::peer::{Expected, PeerCheck, Refusal, Verdict, decide};
 
 /// The socket's file name, in [`socket_dir`].
 pub const SOCKET_NAME: &str = "bridge.sock";
@@ -175,4 +183,176 @@ const PIPE_USER_RIGHTS: u32 = 0x0012_0089 | (0x0012_0116 & !0x4);
 #[must_use]
 pub fn pipe_sddl(sid: &str) -> String {
     format!("D:P(D;;GA;;;NU)(D;;GA;;;AN)(A;;GA;;;SY)(A;;{PIPE_USER_RIGHTS:#x};;;{sid})")
+}
+
+/// Where the channel is: a socket's path, or a pipe's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    /// A Unix socket on a filesystem path.
+    Socket(PathBuf),
+    /// A Windows named pipe, `\\.\pipe\…`.
+    Pipe(String),
+}
+
+impl Place {
+    /// The place as `interprocess` names it.
+    ///
+    /// # Errors
+    /// When the path or name cannot be a local socket's name here.
+    pub fn name(&self) -> io::Result<Name<'_>> {
+        match self {
+            Self::Socket(path) => path.as_path().to_fs_name::<GenericFilePath>(),
+            Self::Pipe(name) => name.as_str().to_fs_name::<GenericFilePath>(),
+        }
+    }
+}
+
+/// How long the handshake may wait for each of the host's frames.
+const HANDSHAKE_WAIT: Duration = Duration::from_secs(10);
+
+/// The run's end of the channel, kept in step with its frames, whose
+/// little-endian length prefixes it reads as they pass.
+///
+/// Between frames, a read waits only as long as its [`Pacer`] allows, and
+/// says "nothing yet" ([`io::ErrorKind::WouldBlock`]) when nothing came.
+/// Once a frame has started, reads wait for the rest of it however long it
+/// takes, because giving up part way would leave the stream out of step.
+#[derive(Debug)]
+pub struct RunStream {
+    stream: Stream,
+    pacer: Pacer,
+    /// The length prefix of the frame being read, as far as it has come.
+    prefix: [u8; 4],
+    /// How many of its bytes have come.
+    prefix_read: usize,
+    /// How many bytes of the frame's message are still to come.
+    message_left: usize,
+}
+
+impl RunStream {
+    /// `stream`, kept in step, and the pacer that says how long to wait
+    /// between frames.
+    #[must_use]
+    pub fn new(stream: Stream) -> (Self, Pacer) {
+        let pacer = Pacer::new(HANDSHAKE_WAIT);
+        let run = Self {
+            stream,
+            pacer: pacer.clone(),
+            prefix: [0; 4],
+            prefix_read: 0,
+            message_left: 0,
+        };
+        (run, pacer)
+    }
+
+    fn between_frames(&self) -> bool {
+        self.prefix_read == 0 && self.message_left == 0
+    }
+}
+
+impl Read for RunStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let between = self.between_frames();
+        let wait = between.then(|| self.pacer.wait().max(Duration::from_millis(1)));
+        // A socket the other end has closed may refuse a timeout (macOS
+        // says EINVAL); the read below then reports the close.
+        let _ = self.stream.set_recv_timeout(wait);
+        // Read no further than the part of the frame being read, so the
+        // prefix and the message are each counted.
+        let limit = if self.message_left > 0 {
+            self.message_left
+        } else {
+            4 - self.prefix_read
+        };
+        let limit = limit.min(buf.len());
+        let n = match self.stream.read(&mut buf[..limit]) {
+            Ok(n) => n,
+            Err(e)
+                if between
+                    && matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+            {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            Err(e) => return Err(e),
+        };
+        if self.message_left > 0 {
+            self.message_left -= n;
+        } else {
+            self.prefix[self.prefix_read..self.prefix_read + n].copy_from_slice(&buf[..n]);
+            self.prefix_read += n;
+            if self.prefix_read == 4 {
+                self.prefix_read = 0;
+                self.message_left = u32::from_le_bytes(self.prefix) as usize;
+            }
+        }
+        Ok(n)
+    }
+}
+
+impl Write for RunStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+/// Why a run could not reach the host.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RunError {
+    /// Nothing is listening: Chrome is not running with the extension.
+    NoHost,
+    /// What answered failed the run's check of the host.
+    NotTheHost(Refusal),
+    /// The host turned the run away, or the handshake failed.
+    Connect(ConnectError),
+}
+
+impl core::fmt::Display for RunError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoHost => ConnectError::Absent.fmt(f),
+            Self::NotTheHost(refusal) => ConnectError::NotTheHost {
+                why: refusal.to_string().into(),
+            }
+            .fmt(f),
+            Self::Connect(e) => e.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for RunError {}
+
+/// Connect a run to the host at `place`: check with `check` that the host
+/// is the installed jev-pilot before anything is sent, then answer its
+/// nonce with the run's goal, sites and parent.
+///
+/// # Errors
+/// [`RunError`]: no host, a host that fails the check, or one that turns
+/// the run away.
+pub fn connect_run(
+    place: &Place,
+    expected: &Expected,
+    check: &dyn PeerCheck,
+    goal: &str,
+    sites: &[String],
+    parent: &Parent,
+) -> Result<ExtensionWire<RunStream>, RunError> {
+    let name = place.name().map_err(|_| RunError::NoHost)?;
+    let stream = Stream::connect(name).map_err(|_| RunError::NoHost)?;
+    if let Verdict::Refuse(refusal) = decide(&check.facts(&stream, expected), expected) {
+        return Err(RunError::NotTheHost(refusal));
+    }
+    let (stream, pacer) = RunStream::new(stream);
+    let wire = ExtensionWire::connect_as(stream, goal, sites, parent).map_err(RunError::Connect)?;
+    Ok(wire.paced_by(pacer))
 }

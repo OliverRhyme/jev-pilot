@@ -11,6 +11,9 @@
 //! run did.
 
 pub mod channel;
+mod serve;
+
+pub use serve::{Serve, append_audit, serve};
 
 use std::time::SystemTime;
 

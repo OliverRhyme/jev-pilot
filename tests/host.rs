@@ -664,3 +664,429 @@ mod channel {
         assert_eq!(mask & 0x2, 0x2, "FILE_WRITE_DATA");
     }
 }
+
+// --- the run's side of the channel ---
+
+mod run_side {
+    use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
+    use jev_pilot::browser::bridge::{self, ByteOrder, Message, Parent};
+    use jev_pilot::browser::host::channel::{Place, RunStream, connect_run};
+    use jev_pilot::peer::{Code, Expected, Facts, MacosPin, PeerCheck};
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// A place of this test's own on the local channel.
+    pub(crate) fn place() -> Place {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let unique = format!(
+            "jev-pilot-host-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        if cfg!(windows) {
+            Place::Pipe(format!(r"\\.\pipe\{unique}"))
+        } else {
+            Place::Socket(std::env::temp_dir().join(format!("{unique}.sock")))
+        }
+    }
+
+    fn listen(place: &Place) -> interprocess::local_socket::Listener {
+        ListenerOptions::new()
+            .name(place.name().expect("a name"))
+            .create_sync()
+            .expect("listens")
+    }
+
+    fn frame(message: &serde_json::Value) -> Vec<u8> {
+        bridge::encode(message.to_string().as_bytes(), ByteOrder::Little)
+    }
+
+    /// A frame as Chrome writes one to the host.
+    pub(crate) fn frame_native(message: &serde_json::Value) -> Vec<u8> {
+        bridge::encode(message.to_string().as_bytes(), ByteOrder::Native)
+    }
+
+    /// A frame that arrives in two halves, the second after longer than the
+    /// run waits for a frame to start, is still read whole: the wait applies
+    /// only between frames.
+    #[test]
+    fn a_frame_is_never_torn_by_the_wait_between_frames() {
+        let place = place();
+        let listener = listen(&place);
+        let writer = std::thread::spawn(move || {
+            let mut host = listener.accept().expect("accepts");
+            let whole = frame(&json!({"type": "absent"}));
+            host.write_all(&whole[..6]).expect("writes");
+            std::thread::sleep(Duration::from_millis(300));
+            host.write_all(&whole[6..]).expect("writes");
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        let stream = Stream::connect(place.name().expect("a name")).expect("connects");
+        let (mut run, pacer) = RunStream::new(stream);
+        pacer.set(Duration::from_millis(50));
+        let message = bridge::decode(&mut run, ByteOrder::Little)
+            .expect("read whole")
+            .expect("a frame");
+        assert_eq!(message, br#"{"type":"absent"}"#);
+
+        // Between frames, nothing within the wait is "nothing yet".
+        let started = Instant::now();
+        let mut byte = [0u8; 1];
+        let error = run.read(&mut byte).expect_err("nothing yet");
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() < Duration::from_millis(250));
+        writer.join().expect("the host thread");
+    }
+
+    /// Facts that pass against `expected`, whatever the stream.
+    pub(crate) struct Vouched;
+
+    impl PeerCheck for Vouched {
+        fn facts(&self, _: &Stream, expected: &Expected) -> Facts {
+            let Expected::Macos { uid, path, pin } = expected else {
+                panic!("the tests pin macOS facts");
+            };
+            Facts {
+                uid: Some(*uid),
+                pid: Some(1),
+                path: Some(path.clone()),
+                token: Some([0; 8]),
+                code: Some(Code::Requirement {
+                    pin: pin.clone(),
+                    satisfied: true,
+                }),
+                ..Facts::default()
+            }
+        }
+    }
+
+    /// Facts the OS could not give.
+    pub(crate) struct Unknown;
+
+    impl PeerCheck for Unknown {
+        fn facts(&self, _: &Stream, _: &Expected) -> Facts {
+            Facts::default()
+        }
+    }
+
+    pub(crate) fn expected() -> Expected {
+        Expected::Macos {
+            uid: 501,
+            path: "/usr/local/libexec/jev-pilot/jev-pilot".into(),
+            pin: MacosPin::Cdhash([1; 20]),
+        }
+    }
+
+    fn ready() -> serde_json::Value {
+        json!({"type": "ready", "protocol": 1, "extension_version": "0.4.0",
+               "product": "Chrome/158.0.7400.12", "paused": false,
+               "policy": {"sites": []}, "host_version": "0.4.0"})
+    }
+
+    /// The run checks the host before anything is sent, then answers its
+    /// nonce with the run's goal, sites and parent.
+    #[test]
+    fn a_run_connects_to_a_verified_host() {
+        let place = place();
+        let listener = listen(&place);
+        let host = std::thread::spawn(move || {
+            let mut run = listener.accept().expect("accepts");
+            run.write_all(&frame(&json!({"type": "nonce", "nonce": "cd".repeat(32)})))
+                .expect("writes");
+            let echo = bridge::decode(&mut run, ByteOrder::Little)
+                .expect("reads")
+                .expect("an echo");
+            run.write_all(&frame(&ready())).expect("writes");
+            serde_json::from_slice::<Message>(&echo).expect("a message")
+        });
+        let parent = Parent {
+            pid: Some(77),
+            exe: Some("/bin/zsh".into()),
+        };
+        let wire = connect_run(
+            &place,
+            &expected(),
+            &Vouched,
+            "Star the repository",
+            &["https://github.com".to_owned()],
+            &parent,
+        )
+        .expect("connects");
+        assert_eq!(wire.hello().product, "Chrome/158.0.7400.12");
+        assert_eq!(
+            host.join().expect("the host thread"),
+            Message::Echo {
+                nonce: "cd".repeat(32),
+                goal: "Star the repository".into(),
+                sites: vec!["https://github.com".into()],
+                parent_pid: Some(77),
+                parent_exe: Some("/bin/zsh".into()),
+            }
+        );
+    }
+
+    /// Something other than the installed host on the channel is told
+    /// nothing, and the run says which check failed.
+    #[test]
+    fn a_run_sends_nothing_to_a_host_that_fails_its_check() {
+        let place = place();
+        let listener = listen(&place);
+        let squatter = std::thread::spawn(move || {
+            let mut run = listener.accept().expect("accepts");
+            let mut heard = Vec::new();
+            let _ = run.read_to_end(&mut heard);
+            heard
+        });
+        let error = connect_run(&place, &expected(), &Unknown, "x", &[], &Parent::default())
+            .expect_err("refused");
+        assert_eq!(
+            error.to_string(),
+            "something other than the installed jev-pilot answered on the bridge (process id: \
+             not reported by the OS); nothing was sent"
+        );
+        assert_eq!(
+            squatter.join().expect("the squatter thread"),
+            Vec::<u8>::new()
+        );
+    }
+
+    /// No host listening is the extension not running.
+    #[test]
+    fn no_host_is_chrome_not_running_with_the_extension() {
+        let error = connect_run(
+            &place(),
+            &expected(),
+            &Vouched,
+            "x",
+            &[],
+            &Parent::default(),
+        )
+        .expect_err("no host");
+        assert_eq!(
+            error.to_string(),
+            "Chrome is not running with the jev-pilot extension: open Chrome; if it is open, \
+             check the extension is on in chrome://extensions with Developer mode on \
+             (`jev-pilot extension status` says more)"
+        );
+    }
+}
+
+// --- the host, end to end over an in-process channel ---
+
+mod serving {
+    use super::run_side::{Unknown, Vouched, expected, frame_native, place};
+    use interprocess::local_socket::{Stream, prelude::*};
+    use jev_pilot::browser::bridge::{self, ByteOrder, Parent};
+    use jev_pilot::browser::extension::ConnectError;
+    use jev_pilot::browser::host::channel::{Place, RunError, connect_run};
+    use jev_pilot::browser::host::{Serve, serve};
+    use jev_pilot::peer::PeerCheck;
+    use serde_json::json;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// What the host wrote to Chrome.
+    #[derive(Clone, Default)]
+    struct Out(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Out {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Out {
+        fn messages(&self) -> Vec<serde_json::Value> {
+            let bytes = self.0.lock().unwrap().clone();
+            let mut reader = &bytes[..];
+            let mut all = Vec::new();
+            while let Some(m) = bridge::decode(&mut reader, ByteOrder::Native).unwrap() {
+                all.push(serde_json::from_slice(&m).unwrap());
+            }
+            all
+        }
+    }
+
+    fn hello() -> serde_json::Value {
+        json!({"type": "hello", "protocol": 1, "extension_version": "0.4.0",
+               "product": "Chrome/158.0.7400.12", "paused": false, "policy": {"sites": []}})
+    }
+
+    struct Host {
+        stdin: Option<std::io::PipeWriter>,
+        out: Out,
+        audit: std::path::PathBuf,
+        done: std::thread::JoinHandle<std::io::Result<()>>,
+    }
+
+    fn host_at(place: &Place, check: Arc<dyn PeerCheck + Send + Sync>) -> Host {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let (stdin, mut writer) = std::io::pipe().unwrap();
+        writer.write_all(&frame_native(&hello())).unwrap();
+        let out = Out::default();
+        let audit = std::env::temp_dir().join(format!(
+            "jev-pilot-audit-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&audit);
+        let config = Serve {
+            place: place.clone(),
+            expected: expected(),
+            check,
+            audit_dir: audit.clone(),
+            version: "0.4.0".into(),
+            extension_on_disk: Some("0.4.0".into()),
+            installed_version: Box::new(|| Some("0.4.0".into())),
+        };
+        let stdout = out.clone();
+        let done = std::thread::spawn(move || serve(config, stdin, stdout));
+        Host {
+            stdin: Some(writer),
+            out,
+            audit,
+            done,
+        }
+    }
+
+    /// A run, once the host is listening and has heard the extension.
+    fn run_at(place: &Place, goal: &str) -> Result<impl Sized, RunError> {
+        let started = Instant::now();
+        loop {
+            match connect_run(place, &expected(), &Vouched, goal, &[], &Parent::default()) {
+                Err(RunError::NoHost | RunError::Connect(ConnectError::Absent))
+                    if started.elapsed() < Duration::from_secs(5) =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
+    }
+
+    fn wait_for(what: &str, done: impl Fn() -> bool) {
+        let started = Instant::now();
+        while !done() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "waiting for {what}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_run_is_relayed_and_released_and_the_host_leaves_with_chrome() {
+        let place = place();
+        let mut host = host_at(&place, Arc::new(Vouched));
+        let run = run_at(&place, "Star the repository").expect("the run connects");
+        wait_for("run_started", || {
+            host.out
+                .messages()
+                .iter()
+                .any(|m| m["type"] == "run_started")
+        });
+        drop(run);
+        wait_for("release", || {
+            host.out.messages().iter().any(|m| m["type"] == "release")
+        });
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("the host ends cleanly");
+
+        let sent: Vec<_> = host
+            .out
+            .messages()
+            .iter()
+            .map(|m| m["type"].clone())
+            .collect();
+        assert_eq!(sent, [json!("run_started"), json!("release")]);
+        if let Place::Socket(path) = &place {
+            assert!(!path.exists(), "the socket is removed");
+        }
+        let log = std::fs::read_to_string(host.audit.join("audit.log")).expect("an audit log");
+        let events: Vec<String> = log
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["event"].to_string())
+            .collect();
+        assert_eq!(events, [r#""run_started""#, r#""run_ended""#]);
+    }
+
+    /// The host checks a run before reading anything from it; a run that
+    /// fails is told which check, and the refusal is audited.
+    #[test]
+    fn a_run_that_fails_the_hosts_check_is_turned_away() {
+        let place = place();
+        let mut host = host_at(&place, Arc::new(Unknown));
+        let error = run_at(&place, "x").err().expect("refused");
+        assert_eq!(
+            error.to_string(),
+            "the bridge only serves the installed jev-pilot (process id: not reported by the OS \
+             failed)"
+        );
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("the host ends cleanly");
+        let log = std::fs::read_to_string(host.audit.join("audit.log")).expect("an audit log");
+        assert!(log.contains(r#""event":"refused""#), "{log}");
+    }
+
+    /// A second host finds the first serving, tells its own extension so,
+    /// and exits; the first carries on.
+    #[test]
+    fn a_second_host_steps_aside_for_one_already_serving() {
+        let place = place();
+        let mut first = host_at(&place, Arc::new(Vouched));
+        wait_for("the first host", || {
+            Stream::connect(place.name().unwrap()).is_ok()
+        });
+        let second = host_at(&place, Arc::new(Vouched));
+        second.done.join().unwrap().expect("steps aside cleanly");
+        assert_eq!(second.out.messages(), [json!({"type": "elsewhere"})]);
+        let run = run_at(&place, "x").expect("the first host still serves");
+        drop(run);
+        drop(first.stdin.take());
+        first.done.join().unwrap().expect("ends cleanly");
+    }
+
+    /// A socket left by a host that has gone is removed, and a new host
+    /// listens in its place.
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_socket_is_replaced() {
+        let place = place();
+        let Place::Socket(path) = &place else {
+            unreachable!()
+        };
+        drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+        assert!(path.exists(), "a stale socket file");
+        let mut host = host_at(&place, Arc::new(Vouched));
+        drop(run_at(&place, "x").expect("the new host serves"));
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("ends cleanly");
+    }
+}
+
+/// The audit log is rotated by size, three old logs kept.
+#[test]
+fn the_audit_log_is_rotated_by_size() {
+    use jev_pilot::browser::host::append_audit;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-rotate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // Each line is 7 bytes, so the log reaches the limit every two lines.
+    for n in 0..10 {
+        append_audit(&dir, &format!("line {n}\n"), 10).expect("appends");
+    }
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
+    assert_eq!(read("audit.log").as_deref(), Some("line 8\nline 9\n"));
+    assert_eq!(read("audit.log.1").as_deref(), Some("line 6\nline 7\n"));
+    assert_eq!(read("audit.log.2").as_deref(), Some("line 4\nline 5\n"));
+    assert_eq!(read("audit.log.3").as_deref(), Some("line 2\nline 3\n"));
+    assert_eq!(read("audit.log.4"), None, "the oldest is dropped");
+    let _ = std::fs::remove_dir_all(&dir);
+}
