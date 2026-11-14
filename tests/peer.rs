@@ -391,6 +391,22 @@ fn windows_refuses_a_signer_mismatch() {
 }
 
 #[test]
+fn windows_checks_the_path_before_the_signer() {
+    // Another program from the same publisher, signed with the same
+    // certificate, is still not the installed copy.
+    let facts = Facts {
+        path: Some(PathBuf::from(r"C:\Users\oliver\Downloads\other.exe")),
+        ..windows_facts(Code::Signer {
+            subject: SIGNER.to_owned(),
+        })
+    };
+    assert_eq!(
+        decide(&facts, &windows_expected(signer_pin())),
+        refused(Check::Path, Reason::Mismatch)
+    );
+}
+
+#[test]
 fn windows_refuses_a_hash_when_a_signer_is_pinned() {
     assert_eq!(
         decide(

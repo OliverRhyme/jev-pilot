@@ -465,6 +465,11 @@ pub enum WindowsPin {
     /// The SHA-256 of the installed image, for an unsigned build.
     Sha256(Sha256Digest),
     /// The Authenticode leaf signer's subject, for a signed release.
+    ///
+    /// Pin only what `authenticode_signer` reported for the installed image
+    /// (in the jev-pilot-os crate): the subject is compared as text, in the
+    /// form that function writes. A signer names a publisher, not one
+    /// program, so [`decide`] checks the installed path before it.
     Signer(String),
 }
 
@@ -655,8 +660,10 @@ impl fmt::Display for Verdict {
 ///
 /// The checks run in a fixed order, and the first that fails is the one
 /// named: the process, then the user, then the session (Windows), then the
-/// executable, then the code. A fact a check needs and the OS did not give is
-/// a refusal.
+/// executable, then the code. The executable's path comes before the code
+/// because a Developer ID or Authenticode signer vouches for a publisher,
+/// not for the installed copy. A fact a check needs and the OS did not give
+/// is a refusal.
 #[must_use]
 pub fn decide(facts: &Facts, expected: &Expected) -> Verdict {
     match run_checks(facts, expected) {

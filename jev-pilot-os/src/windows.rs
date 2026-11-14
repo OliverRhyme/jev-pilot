@@ -298,8 +298,10 @@ unsafe fn nul_terminated<'a>(text: *const u16) -> &'a [u16] {
 /// Who signed an image, as Authenticode verified it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signer {
-    /// The leaf certificate's subject, most significant part first
-    /// (`CN=…, O=…, C=…`).
+    /// The leaf certificate's subject, as CertGetNameStringW writes it for
+    /// CERT_NAME_RDN_TYPE with CERT_X500_NAME_STR and
+    /// CERT_NAME_STR_REVERSE_FLAG: the X.500 parts in reverse of their
+    /// encoded order, such as `CN=…, O=…, C=…`.
     pub subject: String,
 }
 

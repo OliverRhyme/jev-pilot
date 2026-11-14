@@ -87,11 +87,11 @@ extension = [
 name = "jev-pilot"
 path = "src/main.rs"
 
-# Released as prebuilt binaries even though it is never published to
-# crates.io; without this, `publish = false` hides it from `dist`.
 [workspace]
 members = [".", "jev-pilot-os"]
 
+# Released as prebuilt binaries even though it is never published to
+# crates.io; without this, `publish = false` hides it from `dist`.
 [package.metadata.dist]
 dist = true
 
