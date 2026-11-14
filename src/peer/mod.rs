@@ -355,7 +355,9 @@ impl MacosPin {
         match self {
             MacosPin::Cdhash(cdhash) => format!(r#"cdhash H"{}""#, Hex(cdhash)),
             MacosPin::DeveloperId { identifier, team } => format!(
-                r#"anchor apple generic and identifier "{}" and certificate leaf[subject.OU] = "{}""#,
+                // The Developer ID intermediate and leaf OIDs, so an Apple
+                // Development certificate of the same team does not pass.
+                r#"anchor apple generic and identifier "{}" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "{}""#,
                 identifier.0, team.0
             ),
         }

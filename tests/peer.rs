@@ -598,7 +598,7 @@ fn a_macos_pin_is_rendered_as_a_code_requirement() {
     );
     assert_eq!(
         team_pin().requirement(),
-        r#"anchor apple generic and identifier "dev.jevpilot.jev-pilot" and certificate leaf[subject.OU] = "ABCDE12345""#
+        r#"anchor apple generic and identifier "dev.jevpilot.jev-pilot" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "ABCDE12345""#
     );
     assert_eq!(
         MacosPin::from_cdhash_hex("32E719C23C33EB097271B746F2A09F3127B57E5A").unwrap(),
