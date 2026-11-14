@@ -1210,8 +1210,35 @@ mod bridge {
     }
 
     /// Host mode: Chrome started this program for the extension.
+    ///
+    /// The host is the genuine installed copy whoever starts it, so it first
+    /// checks that the program that started it is a browser, audits what it
+    /// found, and serves nothing otherwise: a program running as the owner
+    /// could otherwise start it on pipes of its own and pose as the
+    /// extension.
     pub fn host() -> Result<(), Error> {
+        use jev_pilot::browser::host::{AUDIT_LIMIT, Audit, append_audit, utc};
         let found = installed()?;
+        let parent = jev_pilot::peer::browser::browser_parent();
+        let started = Audit::HostStarted {
+            parent_pid: parent.pid,
+            parent_exe: parent.exe.as_ref().map(|e| e.display().to_string()),
+            refused: parent.verdict.clone().err(),
+        };
+        append_audit(
+            &found.layout.audit_log,
+            &started.line(&utc(std::time::SystemTime::now())),
+            AUDIT_LIMIT,
+        )?;
+        if let Err(why) = parent.verdict {
+            return Err(format!(
+                "the host serves only a browser, and what started it ({}) is not one: {why}",
+                parent
+                    .exe
+                    .map_or_else(|| "unknown".to_owned(), |e| e.display().to_string())
+            )
+            .into());
+        }
         let place = place()?;
         #[cfg(unix)]
         if let Place::Socket(path) = &place {

@@ -13,7 +13,7 @@
 pub mod channel;
 mod serve;
 
-pub use serve::{Diagnostics, Serve, append_audit, serve};
+pub use serve::{AUDIT_LIMIT, Diagnostics, Serve, append_audit, serve};
 
 use std::time::SystemTime;
 
@@ -139,6 +139,16 @@ pub enum Audit {
         /// closed the host's stdin), or `too_large`.
         how: String,
     },
+    /// The host started, and checked the program that started it.
+    HostStarted {
+        /// That program's process id, when the OS gave one.
+        parent_pid: Option<u32>,
+        /// Its executable, when the OS gave one.
+        parent_exe: Option<String>,
+        /// Why it is not a browser, when it is not; the host then serves
+        /// nothing.
+        refused: Option<String>,
+    },
     /// A connection was turned away by an identity check.
     Refused {
         /// Its process id, when the OS gave one.
@@ -172,6 +182,16 @@ impl Audit {
             Self::Refused { pid, check } => {
                 json!({"event": "refused", "pid": pid, "check": check})
             }
+            Self::HostStarted {
+                parent_pid,
+                parent_exe,
+                refused,
+            } => match refused {
+                None => json!({"event": "host_started", "parent_pid": parent_pid,
+                               "parent_exe": parent_exe, "browser": "accepted"}),
+                Some(why) => json!({"event": "host_started", "parent_pid": parent_pid,
+                                    "parent_exe": parent_exe, "browser": "refused", "why": why}),
+            },
         };
         value["time"] = Value::from(time);
         let mut line = value.to_string();

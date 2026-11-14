@@ -21,6 +21,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+pub mod browser;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

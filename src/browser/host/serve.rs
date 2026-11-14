@@ -34,9 +34,10 @@ const EVENTS_QUEUED: usize = 256;
 /// How often the host looks at the installed version.
 const INSTALL_CHECK: Duration = Duration::from_secs(30);
 
-/// The audit log's size before it is rotated, and how many old ones are
-/// kept.
-const AUDIT_LIMIT: u64 = 4 << 20;
+/// The audit log's size before it is rotated.
+pub const AUDIT_LIMIT: u64 = 4 << 20;
+
+/// How many old audit logs are kept.
 const AUDIT_KEPT: u32 = 3;
 
 /// What a host needs to serve.

@@ -554,6 +554,36 @@ fn each_audit_event_is_one_line_of_json() {
     );
 }
 
+/// Each start of the host is audited with the program that started it, and
+/// whether that was a browser.
+#[test]
+fn the_hosts_start_is_audited_with_its_parent() {
+    let at = "2026-11-15T09:30:00Z";
+    let line = |audit: Audit| -> serde_json::Value {
+        serde_json::from_str(&audit.line(at)).expect("JSON")
+    };
+    assert_eq!(
+        line(Audit::HostStarted {
+            parent_pid: Some(1234),
+            parent_exe: Some("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into()),
+            refused: None,
+        }),
+        json!({"time": at, "event": "host_started", "parent_pid": 1234,
+               "parent_exe": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+               "browser": "accepted"})
+    );
+    assert_eq!(
+        line(Audit::HostStarted {
+            parent_pid: Some(77),
+            parent_exe: Some("/usr/bin/python3".into()),
+            refused: Some("it is not Chrome signed by Google".into()),
+        }),
+        json!({"time": at, "event": "host_started", "parent_pid": 77,
+               "parent_exe": "/usr/bin/python3", "browser": "refused",
+               "why": "it is not Chrome signed by Google"})
+    );
+}
+
 #[test]
 fn audit_times_are_utc_to_the_second() {
     use jev_pilot::browser::host::utc;
