@@ -82,6 +82,46 @@ fn a_verified_run_takes_the_bridge_and_the_extension_is_told() {
     );
 }
 
+/// What the extension is told of a run always fits in one message to
+/// Chrome, whatever the length of its goal and sites.
+#[test]
+fn a_run_too_long_to_tell_the_extension_whole_is_told_in_part() {
+    let mut relay = connected();
+    let huge = Started {
+        pid: 4242,
+        goal: "g".repeat(2 << 20),
+        sites: vec![format!("https://{}.test", "s".repeat(4096)); 10_000],
+        parent_pid: None,
+        parent_exe: None,
+    };
+    let out = relay.handle(Input::RunVerified {
+        run: FIRST,
+        started: huge,
+    });
+    let told = out
+        .iter()
+        .find_map(|o| match o {
+            Output::ToExtension(m @ Message::RunStarted { .. }) => Some(m),
+            _ => None,
+        })
+        .expect("the extension is told");
+    let text = serde_json::to_vec(told).expect("JSON");
+    assert!(
+        text.len() < jev_pilot::browser::bridge::TO_CHROME_LIMIT,
+        "{} bytes",
+        text.len()
+    );
+    let Message::RunStarted { goal, sites, .. } = told else {
+        unreachable!()
+    };
+    assert!(
+        goal.starts_with("ggg") && goal.ends_with('…'),
+        "{}",
+        &goal[..10]
+    );
+    assert!(sites.len() < 10_000);
+}
+
 #[test]
 fn a_run_before_the_extension_has_connected_is_told_it_is_absent() {
     let mut relay = relay();

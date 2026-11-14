@@ -215,6 +215,13 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
 /// How much of a goal another run is shown.
 const GOAL_SHOWN: usize = 60;
 
+/// How much of a run the extension is told: its goal, how many of its
+/// sites, and how much of each. At most about 136 KiB in all, well within
+/// the 1 MiB a message to Chrome may be.
+const GOAL_TOLD: usize = 4096;
+const SITES_TOLD: usize = 64;
+const SITE_TOLD: usize = 2048;
+
 /// The host's behaviour: one verified run at a time, relayed to the
 /// extension.
 #[derive(Debug)]
@@ -344,10 +351,16 @@ impl Relay {
                     host_version: self.version.clone(),
                 },
             },
+            // Bounded, so the message always fits within what Chrome takes.
             Output::ToExtension(Message::RunStarted {
                 pid: started.pid,
-                goal: started.goal.clone(),
-                sites: started.sites.clone(),
+                goal: cut(&started.goal, GOAL_TOLD),
+                sites: started
+                    .sites
+                    .iter()
+                    .take(SITES_TOLD)
+                    .map(|site| cut(site, SITE_TOLD))
+                    .collect(),
             }),
             Output::Audit(Audit::RunStarted(started.clone())),
         ];
@@ -438,9 +451,14 @@ fn ended(pid: u32, how: &str) -> Output {
 
 /// The start of a goal, for another run to be shown.
 fn shortened(goal: &str) -> String {
-    match goal.char_indices().nth(GOAL_SHOWN) {
-        Some((cut, _)) => format!("{}…", &goal[..cut]),
-        None => goal.to_owned(),
+    cut(goal, GOAL_SHOWN)
+}
+
+/// The first `chars` characters of `text`, marked as cut when it was.
+fn cut(text: &str, chars: usize) -> String {
+    match text.char_indices().nth(chars) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_owned(),
     }
 }
 
