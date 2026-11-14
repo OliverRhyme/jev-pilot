@@ -2018,23 +2018,56 @@ fn a_read_samples_the_quiet_with_a_fixed_script() {
     assert_eq!(script.params_of("Runtime.evaluate"), Vec::<Value>::new());
 }
 
-/// One list holds every script the engine can send a page, for the
-/// extension's allow list to be checked against.
+/// Every script the engine sends a page is on the one list the extension's
+/// allow list is checked against: those in a read and a submit, and those in
+/// every recorded conversation through the extension.
 #[test]
-fn the_page_scripts_are_listed_in_one_place() {
-    assert_eq!(
-        input::PAGE_SCRIPTS,
-        [
-            input::CONTAINS,
-            input::SELECT_OPTION,
-            input::READ_VALUE,
-            input::QUIET_NOW,
-            input::QUIET_WITHIN,
-        ]
-    );
-    for script in input::PAGE_SCRIPTS {
-        assert!(script.trim_start().starts_with("function"), "{script}");
+fn every_script_the_engine_sends_is_on_the_list() {
+    let (script, mut engine) = engine_after_read();
+    script_read(&script);
+    engine.read().expect("reads");
+    script_settle(&script, 3);
+    engine.perform(&BrowserCommand::Submit).expect("performs");
+    let mut sent: Vec<String> = script
+        .params_of("Runtime.callFunctionOn")
+        .iter()
+        .filter_map(|c| c["functionDeclaration"].as_str().map(ToOwned::to_owned))
+        .collect();
+
+    let fixtures = format!("{}/tests/fixtures/extension", env!("CARGO_MANIFEST_DIR"));
+    for entry in std::fs::read_dir(&fixtures).expect("the recordings") {
+        let path = entry.expect("an entry").path();
+        // The refusals recording sends a script that is not the engine's on
+        // purpose, to be refused.
+        if path.extension().and_then(|e| e.to_str()) != Some("json")
+            || path.file_stem().and_then(|e| e.to_str()) == Some("refusals")
+        {
+            continue;
+        }
+        let frames: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("JSON");
+        for frame in frames.as_array().into_iter().flatten() {
+            let request = &frame["frame"];
+            if frame["from"] == "run"
+                && request["method"] == "Runtime.callFunctionOn"
+                && let Some(declaration) = request["params"]["functionDeclaration"].as_str()
+            {
+                sent.push(declaration.to_owned());
+            }
+        }
     }
+
+    assert!(sent.len() > 2, "scripts were sent: {sent:?}");
+    for declaration in &sent {
+        assert!(
+            input::PAGE_SCRIPTS.contains(&declaration.as_str()),
+            "not on the list: {declaration}"
+        );
+    }
+    let mut unique = input::PAGE_SCRIPTS.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), input::PAGE_SCRIPTS.len(), "each script once");
 }
 
 // --- driving through the extension ---
@@ -2171,21 +2204,24 @@ mod through_the_extension {
     }
 
     /// The conversation `name` as recorded, compared with `log`. With
-    /// `JEV_PILOT_RECORD` set, or no recording yet, the log is written as the
-    /// recording instead.
+    /// `JEV_PILOT_RECORD` set, the log is written as the recording instead;
+    /// without it, a recording that is missing fails, rather than being
+    /// written and passing.
     pub fn matches_recording(name: &str, log: &Log) {
         let path = format!(
             "{}/tests/fixtures/extension/{name}.json",
             env!("CARGO_MANIFEST_DIR")
         );
         let frames = Value::Array(log.borrow().clone());
-        if std::env::var_os("JEV_PILOT_RECORD").is_some() || !std::path::Path::new(&path).exists() {
+        if std::env::var_os("JEV_PILOT_RECORD").is_some() {
             let text = serde_json::to_string_pretty(&frames).expect("JSON") + "\n";
             std::fs::write(&path, text).expect("the recording is written");
             return;
         }
-        let recorded: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("JSON");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("no recording at {path} ({e}): record it with JEV_PILOT_RECORD=1")
+        });
+        let recorded: Value = serde_json::from_str(&text).expect("JSON");
         assert_eq!(frames, recorded, "the conversation differs from {path}");
     }
 }
