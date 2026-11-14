@@ -843,6 +843,25 @@ mod run_side {
         });
     }
 
+    /// A run that lets go is seen to close by the host, its reader and all.
+    #[test]
+    fn a_run_that_lets_go_is_seen_to_close() {
+        super::bounded("a_run_that_lets_go_is_seen_to_close", || {
+            let place = place();
+            let listener = listen(&place);
+            let host = std::thread::spawn(move || {
+                let mut run = listener.accept().expect("accepts");
+                let mut heard = Vec::new();
+                let _ = run.read_to_end(&mut heard);
+                heard
+            });
+            let stream = Stream::connect(place.name().expect("a name")).expect("connects");
+            let (run, _pacer) = RunStream::new(stream);
+            drop(run);
+            assert_eq!(host.join().expect("the host thread"), Vec::<u8>::new());
+        });
+    }
+
     /// Facts that pass against `expected`, whatever the stream.
     pub(crate) struct Vouched;
 
@@ -939,8 +958,10 @@ mod run_side {
         super::bounded("a_run_sends_nothing_to_a_host_that_fails_its_check", || {
             let place = place();
             let listener = listen(&place);
+            let (accepted, took) = std::sync::mpsc::channel();
             let squatter = std::thread::spawn(move || {
                 let mut run = listener.accept().expect("accepts");
+                let _ = accepted.send(());
                 let mut heard = Vec::new();
                 let _ = run.read_to_end(&mut heard);
                 heard
@@ -952,6 +973,12 @@ mod run_side {
                 "something other than the installed jev-pilot answered on the bridge (process id: \
              not reported by the OS); nothing was sent"
             );
+            // A Windows pipe skips a client gone before it was accepted, so
+            // the squatter may still be waiting: a second client, kept until
+            // it is taken, lets it finish, having heard nothing either way.
+            let nudge = Stream::connect(place.name().expect("a name")).expect("connects");
+            took.recv().expect("the squatter took a connection");
+            drop(nudge);
             assert_eq!(
                 squatter.join().expect("the squatter thread"),
                 Vec::<u8>::new()
@@ -1661,6 +1688,10 @@ fn audit_files(dir: &std::path::Path) {
 /// The owner may read the audit log, and so may lock it: the host locks a
 /// file of its own instead, which the owner cannot open, so an owner who
 /// holds the log locked does not stall the host.
+///
+/// Not on Windows, which has no setgid: there the audit log is the owner's
+/// to write anyway, and a lock on a file there is binding on writes.
+#[cfg(unix)]
 #[test]
 fn a_lock_held_on_the_audit_log_does_not_stall_the_host() {
     use jev_pilot::browser::host::append_audit;
