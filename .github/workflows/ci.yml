@@ -19,10 +19,23 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # jev-pilot-os holds the only unsafe code, and only for Windows, so its
+  # lints (every unsafe block documented) are checked where it compiles.
+  lint-windows:
+    name: lint (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   # Released for all three, so tested on all three: a file name, a path or a
   # process detail that differs by platform shows up here and not in a release.
@@ -53,10 +66,42 @@ jobs:
       - run: cargo check --lib --no-default-features --features ios
       - run: cargo check --lib --no-default-features --features http
       - run: cargo check --lib --no-default-features --features browser
+      - run: cargo check --lib --no-default-features --features extension
+
+  # The extension feature gathers a peer's identity differently on each
+  # system, so it must build on its own on each.
+  extension:
+    name: extension feature (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --lib --no-default-features --features extension
+
+  # The Chrome extension is plain ES modules tested with Node's own runner, no
+  # packages; it replays the same recorded conversations the Rust tests do.
+  extension-js:
+    name: extension (node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.14.0"
+      - run: node --test "extension/test/*.test.js"
 
   msrv:
-    name: minimum supported rust version
-    runs-on: ubuntu-latest
+    name: minimum supported rust version (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.0

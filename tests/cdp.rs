@@ -2446,62 +2446,86 @@ fn a_confirm_through_the_extension() {
     matches_recording("confirm", &log);
 }
 
+/// The recorded browser's other tab, which is the owner's and outside the
+/// jev-pilot group.
+const OWNERS_TAB: &str = "E8DD778F620BA08560C3270923315360";
+
 /// Each refusal the extension can give, on the call it refused, with its
-/// code.
+/// code, in the extension's own words: the policy's own refusals (an owner's
+/// tab outside the jev-pilot group, a site off the list, a method or script
+/// the engine does not use, a page extensions may not drive, a pause), and
+/// Chrome's (no such tab, an attach Chrome refuses, a command that fails).
 #[test]
 fn each_refusal_through_the_extension() {
+    let signup = "http://127.0.0.1:52578";
     let refusals = [
         (
-            "attach",
+            4,
             "refused_tab",
-            "that tab is not one this run may use",
+            "put that tab in the 'jev-pilot' tab group first, so the run may use it".to_owned(),
         ),
         (
-            "create",
+            5,
             "refused_site",
-            "https://elsewhere.test is not on jev-pilot's allowed sites",
+            "https://elsewhere.test is not on jev-pilot's allowed sites (`sudo jev-pilot extension policy sites add https://elsewhere.test`)".to_owned(),
         ),
         (
-            "Runtime.evaluate",
+            6,
             "refused_method",
-            "Runtime.evaluate is not allowed",
+            "Runtime.evaluate is not one jev-pilot uses".to_owned(),
         ),
         (
-            "Runtime.callFunctionOn",
+            7,
             "refused_script",
-            "that script is not one of jev-pilot's",
+            "that page script is not one of jev-pilot's own".to_owned(),
         ),
         (
-            "Page.navigate",
+            8,
             "refused_page",
-            "Chrome does not let extensions drive chrome://settings",
+            "Chrome does not let extensions drive chrome://settings".to_owned(),
         ),
-        ("DOM.getDocument", "paused", "jev-pilot is paused in Chrome"),
-        ("activate", "no_tab", "there is no such tab"),
         (
-            "detach",
-            "attach_failed",
-            "Chrome would not attach to that tab",
+            9,
+            "paused",
+            "jev-pilot is paused in Chrome: resume it from the extension's toolbar button"
+                .to_owned(),
         ),
-        ("Page.reload", "chrome", "Cannot navigate to invalid URL"),
+        (10, "no_tab", "No tab with id: 1.".to_owned()),
+        (
+            11,
+            "attach_failed",
+            "Another debugger is already attached to the tab with id: 2.".to_owned(),
+        ),
+        (12, "chrome", "No node with given id found".to_owned()),
     ];
-    let (mut wire, log) = through(move |request| {
-        let wanted = request["method"]
-            .as_str()
-            .or_else(|| request["op"].as_str())
-            .unwrap_or_default();
-        let refused = refusals.iter().find(|(what, ..)| *what == wanted);
-        match refused {
-            Some((what, code, message)) if *what != "attach" || request["id"] != 3 => {
-                vec![
-                    json!({"type": "reply", "id": request["id"], "error": {"code": code, "message": message}}),
-                ]
+    let mut listed = hello();
+    listed["policy"]["sites"] = json!([signup]);
+    let status = |paused: bool| {
+        let mut status = listed.clone();
+        status["type"] = "status".into();
+        status["paused"] = paused.into();
+        status
+    };
+    let (pause, resume) = (status(true), status(false));
+    let answers = refusals.clone();
+    let bridge = Bridge::new(listed.clone(), move |request| {
+        let id = request["id"].as_u64().unwrap_or_default();
+        match answers.iter().find(|(at, ..)| *at == id) {
+            Some((at, code, message)) => {
+                let refused =
+                    json!({"type": "reply", "id": at, "error": {"code": code, "message": message}});
+                match *code {
+                    "paused" => vec![pause.clone(), refused, resume.clone()],
+                    _ => vec![refused],
+                }
             }
-            _ => signup_extension(request),
+            None => signup_extension(request),
         }
     });
+    let log = bridge.log();
+    let mut wire = ExtensionWire::connect(bridge, "Sign up for an account", &[signup.to_owned()])
+        .expect("connects");
 
-    // Listed and attached, then every refusal in turn.
     let mut sent = |text: Value| {
         wire.send(&text.to_string()).expect("sends");
         let reply = wire
@@ -2515,20 +2539,20 @@ fn each_refusal_through_the_extension() {
         ["result"]["sessionId"]
         .clone();
     let calls = [
-        json!({"id": 4, "method": "Target.attachToTarget", "params": {"targetId": signup::TARGET, "flatten": true}}),
+        json!({"id": 4, "method": "Target.attachToTarget", "params": {"targetId": OWNERS_TAB, "flatten": true}}),
         json!({"id": 5, "method": "Target.createTarget", "params": {"url": "https://elsewhere.test/"}}),
         json!({"id": 6, "method": "Runtime.evaluate", "params": {"expression": "1"}, "sessionId": session}),
         json!({"id": 7, "method": "Runtime.callFunctionOn", "params": {"functionDeclaration": "function () {}"}, "sessionId": session}),
         json!({"id": 8, "method": "Page.navigate", "params": {"url": "chrome://settings"}, "sessionId": session}),
         json!({"id": 9, "method": "DOM.getDocument", "params": {}, "sessionId": session}),
-        json!({"id": 10, "method": "Target.activateTarget", "params": {"targetId": signup::TARGET}}),
-        json!({"id": 11, "method": "Target.detachFromTarget", "params": {"sessionId": session}}),
-        json!({"id": 12, "method": "Page.reload", "params": {}, "sessionId": session}),
+        json!({"id": 10, "method": "Target.activateTarget", "params": {"targetId": OWNERS_TAB}}),
+        json!({"id": 11, "method": "Target.attachToTarget", "params": {"targetId": signup::TARGET, "flatten": true}}),
+        json!({"id": 12, "method": "DOM.resolveNode", "params": {"backendNodeId": 999_999}, "sessionId": session}),
     ];
     for (call, (_, code, message)) in calls.into_iter().zip(refusals) {
         let reply = sent(call);
         assert_eq!(reply["error"]["data"], code, "{reply}");
-        assert_eq!(reply["error"]["message"], message, "{reply}");
+        assert_eq!(reply["error"]["message"], message.as_str(), "{reply}");
     }
     drop(wire);
     matches_recording("refusals", &log);

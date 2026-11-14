@@ -5,7 +5,9 @@
       "paused": false,
       "policy": {
         "owner_tabs": "group",
-        "sites": []
+        "sites": [
+          "http://127.0.0.1:52578"
+        ]
       },
       "product": "Chrome/158.0.7400.12",
       "protocol": 1,
@@ -26,7 +28,9 @@
     "frame": {
       "goal": "Sign up for an account",
       "nonce": "6a65762d70696c6f742d6272696467652d6e6f6e63652d666f722d746573747",
-      "sites": [],
+      "sites": [
+        "http://127.0.0.1:52578"
+      ],
       "type": "echo"
     },
     "from": "run",
@@ -36,7 +40,9 @@
     "frame": {
       "goal": "Sign up for an account",
       "pid": 4242,
-      "sites": [],
+      "sites": [
+        "http://127.0.0.1:52578"
+      ],
       "type": "run_started"
     },
     "from": "host",
@@ -49,7 +55,9 @@
       "paused": false,
       "policy": {
         "owner_tabs": "group",
-        "sites": []
+        "sites": [
+          "http://127.0.0.1:52578"
+        ]
       },
       "product": "Chrome/158.0.7400.12",
       "protocol": 1,
@@ -114,7 +122,7 @@
     "frame": {
       "id": 4,
       "op": "attach",
-      "tab": 2,
+      "tab": 1,
       "type": "request"
     },
     "from": "run",
@@ -124,7 +132,7 @@
     "frame": {
       "error": {
         "code": "refused_tab",
-        "message": "that tab is not one this run may use"
+        "message": "put that tab in the 'jev-pilot' tab group first, so the run may use it"
       },
       "id": 4,
       "type": "reply"
@@ -146,7 +154,7 @@
     "frame": {
       "error": {
         "code": "refused_site",
-        "message": "https://elsewhere.test is not on jev-pilot's allowed sites"
+        "message": "https://elsewhere.test is not on jev-pilot's allowed sites (`sudo jev-pilot extension policy sites add https://elsewhere.test`)"
       },
       "id": 5,
       "type": "reply"
@@ -172,7 +180,7 @@
     "frame": {
       "error": {
         "code": "refused_method",
-        "message": "Runtime.evaluate is not allowed"
+        "message": "Runtime.evaluate is not one jev-pilot uses"
       },
       "id": 6,
       "type": "reply"
@@ -198,7 +206,7 @@
     "frame": {
       "error": {
         "code": "refused_script",
-        "message": "that script is not one of jev-pilot's"
+        "message": "that page script is not one of jev-pilot's own"
       },
       "id": 7,
       "type": "reply"
@@ -246,9 +254,26 @@
   },
   {
     "frame": {
+      "extension_version": "0.2.0",
+      "paused": true,
+      "policy": {
+        "owner_tabs": "group",
+        "sites": [
+          "http://127.0.0.1:52578"
+        ]
+      },
+      "product": "Chrome/158.0.7400.12",
+      "protocol": 1,
+      "type": "status"
+    },
+    "from": "extension",
+    "to": "run"
+  },
+  {
+    "frame": {
       "error": {
         "code": "paused",
-        "message": "jev-pilot is paused in Chrome"
+        "message": "jev-pilot is paused in Chrome: resume it from the extension's toolbar button"
       },
       "id": 9,
       "type": "reply"
@@ -258,9 +283,26 @@
   },
   {
     "frame": {
+      "extension_version": "0.2.0",
+      "paused": false,
+      "policy": {
+        "owner_tabs": "group",
+        "sites": [
+          "http://127.0.0.1:52578"
+        ]
+      },
+      "product": "Chrome/158.0.7400.12",
+      "protocol": 1,
+      "type": "status"
+    },
+    "from": "extension",
+    "to": "run"
+  },
+  {
+    "frame": {
       "id": 10,
       "op": "activate",
-      "tab": 2,
+      "tab": 1,
       "type": "request"
     },
     "from": "run",
@@ -270,7 +312,7 @@
     "frame": {
       "error": {
         "code": "no_tab",
-        "message": "there is no such tab"
+        "message": "No tab with id: 1."
       },
       "id": 10,
       "type": "reply"
@@ -281,7 +323,7 @@
   {
     "frame": {
       "id": 11,
-      "op": "detach",
+      "op": "attach",
       "tab": 2,
       "type": "request"
     },
@@ -292,7 +334,7 @@
     "frame": {
       "error": {
         "code": "attach_failed",
-        "message": "Chrome would not attach to that tab"
+        "message": "Another debugger is already attached to the tab with id: 2."
       },
       "id": 11,
       "type": "reply"
@@ -303,9 +345,11 @@
   {
     "frame": {
       "id": 12,
-      "method": "Page.reload",
+      "method": "DOM.resolveNode",
       "op": "send",
-      "params": {},
+      "params": {
+        "backendNodeId": 999999
+      },
       "tab": 2,
       "type": "request"
     },
@@ -316,7 +360,7 @@
     "frame": {
       "error": {
         "code": "chrome",
-        "message": "Cannot navigate to invalid URL"
+        "message": "No node with given id found"
       },
       "id": 12,
       "type": "reply"
