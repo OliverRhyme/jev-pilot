@@ -1307,14 +1307,16 @@ fn a_protected_install_makes_the_audit_logs_files() {
 // --- where a protected install writes ---
 
 /// What a protected install writes is safe only if no folder above it can
-/// be changed by the owner: every one that exists must be root's, closed to
-/// group and others, and not a link.
+/// be changed by the owner: every one that exists must be root's, not a
+/// link, not writable by anyone, and writable by its group only when that
+/// group is root's or one the owner is not in.
 #[test]
 fn a_protected_install_writes_only_under_folders_only_root_can_change() {
     use jev_pilot::browser::install::{DirMeta, check_ancestors};
     let target = Path::new("/usr/local/libexec/jev-pilot/jev-pilot");
     let safe = DirMeta {
         uid: 0,
+        gid: 0,
         mode: 0o755,
         is_link: false,
     };
@@ -1331,22 +1333,53 @@ fn a_protected_install_writes_only_under_folders_only_root_can_change() {
             }
         }
     };
-    assert_eq!(check_ancestors(target, &lookup("/nowhere", safe)), Ok(()));
+    // The owner is in group 20 (staff on macOS), not in 50 or 104.
+    let member_of = |gid: u32| gid == 20;
+    assert_eq!(
+        check_ancestors(target, &lookup("/nowhere", safe), &member_of),
+        Ok(())
+    );
+    // Writable by a group the owner is not in, or root's own: Debian's
+    // /usr/local is root:staff 2775 and Ubuntu's /var/log root:syslog 0775.
+    for meta in [
+        DirMeta {
+            gid: 50,
+            mode: 0o2775,
+            ..safe
+        },
+        DirMeta {
+            gid: 104,
+            mode: 0o775,
+            ..safe
+        },
+        DirMeta {
+            gid: 0,
+            mode: 0o775,
+            ..safe
+        },
+    ] {
+        assert_eq!(
+            check_ancestors(target, &lookup("/usr/local", meta), &member_of),
+            Ok(()),
+            "{meta:?}"
+        );
+    }
     for (meta, why) in [
         (DirMeta { uid: 501, ..safe }, "is owned by uid 501"),
         (
             DirMeta {
+                gid: 20,
                 mode: 0o775,
                 ..safe
             },
-            "can be written by others (mode 775)",
+            "can be written by group 20, which you are in (mode 775)",
         ),
         (
             DirMeta {
                 mode: 0o757,
                 ..safe
             },
-            "can be written by others (mode 757)",
+            "can be written by anyone (mode 757)",
         ),
         (
             DirMeta {
@@ -1357,12 +1390,99 @@ fn a_protected_install_writes_only_under_folders_only_root_can_change() {
         ),
     ] {
         assert_eq!(
-            check_ancestors(target, &lookup("/usr/local", meta)),
+            check_ancestors(target, &lookup("/usr/local", meta), &member_of),
             Err(format!(
                 "/usr/local {why}, so a program running as you could change what jev-pilot \
                  installs under it"
             )),
         );
+    }
+}
+
+/// Every path a protected install writes passes the check, step by step,
+/// on systems as they come: each step's folders and files are what the
+/// steps before it made.
+#[test]
+fn every_step_of_a_protected_install_passes_the_folder_check() {
+    use jev_pilot::browser::install::{DirMeta, check_ancestors};
+    use std::collections::HashMap;
+    const GROUP: u32 = 977;
+    let dir = |gid: u32, mode: u32| DirMeta {
+        uid: 0,
+        gid,
+        mode,
+        is_link: false,
+    };
+    let systems = [
+        (
+            Os::Linux,
+            vec![
+                ("/", dir(0, 0o755)),
+                ("/usr", dir(0, 0o755)),
+                // Debian's, and Ubuntu's /var/log.
+                ("/usr/local", dir(50, 0o2775)),
+                ("/usr/local/share", dir(50, 0o2775)),
+                ("/var", dir(0, 0o755)),
+                ("/var/log", dir(104, 0o775)),
+                ("/etc", dir(0, 0o755)),
+            ],
+        ),
+        (
+            Os::MacOs,
+            vec![
+                ("/", dir(0, 0o755)),
+                ("/usr", dir(0, 0o755)),
+                ("/usr/local", dir(0, 0o755)),
+                ("/Library", dir(0, 0o755)),
+                ("/Library/Application Support", dir(80, 0o755)),
+                ("/Library/Logs", dir(0, 0o755)),
+                ("/Library/Google", dir(0, 0o755)),
+            ],
+        ),
+    ];
+    let member_of = |gid: u32| gid == 20 || gid == 1000;
+    for (os, existing) in systems {
+        let mut tree: HashMap<PathBuf, DirMeta> = existing
+            .into_iter()
+            .map(|(path, meta)| (PathBuf::from(path), meta))
+            .collect();
+        let layout = Layout::protected(os, &folders());
+        let steps = plan(
+            os,
+            InstallKind::Protected,
+            &layout,
+            Path::new(EXE),
+            &UserHosts::Files(vec![]),
+            &Existing::default(),
+        );
+        for step in &steps {
+            let (path, owner, mode) = match step {
+                Step::CreateDir { path, owner, mode }
+                | Step::CreateFile { path, owner, mode }
+                | Step::WriteFile {
+                    path, owner, mode, ..
+                } => (path, *owner, *mode),
+                Step::CopyBinary { to, .. } => (to, Owner::Root, 0o600),
+                Step::WritePolicy { path, .. } | Step::Record { path, .. } => {
+                    (path, Owner::Root, 0o644)
+                }
+                Step::CopyHost(copy) => (&copy.to, Owner::Root, 0o644),
+                _ => continue,
+            };
+            let lookup = |p: &Path| tree.get(p).copied();
+            assert_eq!(
+                check_ancestors(path, &lookup, &member_of),
+                Ok(()),
+                "{os:?}: {}",
+                path.display()
+            );
+            // create_dir_all makes missing folders root's, 0755.
+            for above in path.ancestors().skip(1) {
+                tree.entry(above.to_owned()).or_insert(dir(0, 0o755));
+            }
+            let gid = if owner == Owner::RootGroup { GROUP } else { 0 };
+            tree.insert(path.clone(), dir(gid, mode));
+        }
     }
 }
 
@@ -1411,6 +1531,7 @@ fn the_programs_an_install_runs_are_named_by_their_full_paths() {
         (Tool::Dseditgroup, "/usr/sbin/dseditgroup"),
         (Tool::Groupadd, "/usr/sbin/groupadd"),
         (Tool::Plutil, "/usr/bin/plutil"),
+        (Tool::Id, "/usr/bin/id"),
         (Tool::Reg, r"C:\Windows\System32\reg.exe"),
     ] {
         assert_eq!(tool_path(tool, system32), PathBuf::from(path), "{tool:?}");

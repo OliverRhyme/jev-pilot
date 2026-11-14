@@ -1241,16 +1241,42 @@ pub enum Installer {
 /// The first step that fails, naming it.
 pub fn apply(steps: &[Step], installer: &Installer, kind: InstallKind) -> io::Result<Vec<String>> {
     let mut said = Vec::new();
+    let groups = if kind == InstallKind::Protected {
+        groups_of(installer)?
+    } else {
+        Vec::new()
+    };
+    let member_of = |gid: u32| groups.contains(&gid);
     for step in steps {
         if kind == InstallKind::Protected
             && let Some(target) = written(step)
         {
-            check_ancestors(target, &dir_meta).map_err(io::Error::other)?;
+            check_ancestors(target, &dir_meta, &member_of).map_err(io::Error::other)?;
         }
         apply_one(step, installer, &mut said)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", describe(step))))?;
     }
     Ok(said)
+}
+
+/// The groups the owner is in, as `id -G` reports them.
+fn groups_of(installer: &Installer) -> io::Result<Vec<u32>> {
+    let Installer::Uid(uid) = installer else {
+        return Ok(Vec::new());
+    };
+    let output = std::process::Command::new(tool_here(Tool::Id)?)
+        .arg("-G")
+        .arg(uid.to_string())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "cannot tell which groups uid {uid} is in"
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .filter_map(|g| g.parse().ok())
+        .collect())
 }
 
 /// What a step writes, whose folders must be safe.
@@ -1272,32 +1298,48 @@ fn written(step: &Step) -> Option<&Path> {
 pub struct DirMeta {
     /// Its owner's uid.
     pub uid: u32,
+    /// Its group's gid.
+    pub gid: u32,
     /// Its permission bits.
     pub mode: u32,
     /// Whether it is a symbolic link.
     pub is_link: bool,
 }
 
-/// Whether every folder above `path` that exists is root's, closed to
-/// group and others for writing, and not a link: what a protected install
-/// writes is safe only under folders the owner cannot change. Folders that
-/// do not exist yet are made by the install, as root.
+/// Whether every folder above `path` that exists is one the owner cannot
+/// change: root's, not a link, not writable by anyone, and writable by its
+/// group only when that group is root's or one the owner is not in
+/// (`member_of` says which groups the owner is in). Debian's `/usr/local`
+/// (root:staff 2775), Ubuntu's `/var/log` (root:syslog 0775) and the
+/// install's own audit folder (root:jev-pilot 0775) pass for an owner not
+/// in those groups. Folders that do not exist yet are made by the install,
+/// as root.
 ///
 /// # Errors
 /// The first folder that is not, and why.
-pub fn check_ancestors(path: &Path, meta: &dyn Fn(&Path) -> Option<DirMeta>) -> Result<(), String> {
+pub fn check_ancestors(
+    path: &Path,
+    meta: &dyn Fn(&Path) -> Option<DirMeta>,
+    member_of: &dyn Fn(u32) -> bool,
+) -> Result<(), String> {
     let mut above: Vec<&Path> = path.ancestors().skip(1).collect();
     above.reverse();
     for dir in above {
         let Some(found) = meta(dir) else {
             continue;
         };
+        let mode = found.mode & 0o777;
         let why = if found.is_link {
             "is a link".to_owned()
         } else if found.uid != 0 {
             format!("is owned by uid {}", found.uid)
-        } else if found.mode & 0o022 != 0 {
-            format!("can be written by others (mode {:o})", found.mode & 0o777)
+        } else if found.mode & 0o002 != 0 {
+            format!("can be written by anyone (mode {mode:o})")
+        } else if found.mode & 0o020 != 0 && found.gid != 0 && member_of(found.gid) {
+            format!(
+                "can be written by group {}, which you are in (mode {mode:o})",
+                found.gid
+            )
         } else {
             continue;
         };
@@ -1315,6 +1357,7 @@ fn dir_meta(dir: &Path) -> Option<DirMeta> {
     let meta = std::fs::symlink_metadata(dir).ok()?;
     Some(DirMeta {
         uid: meta.uid(),
+        gid: meta.gid(),
         mode: meta.mode(),
         is_link: meta.file_type().is_symlink(),
     })
@@ -1551,6 +1594,8 @@ pub enum Tool {
     Plutil,
     /// Windows's registry tool.
     Reg,
+    /// The Unix tool that names a user's groups.
+    Id,
 }
 
 /// Where `tool` is: a full path, never found through `PATH`, which the
@@ -1564,6 +1609,7 @@ pub fn tool_path(tool: Tool, system32: &str) -> PathBuf {
         Tool::Dseditgroup => "/usr/sbin/dseditgroup".into(),
         Tool::Groupadd => "/usr/sbin/groupadd".into(),
         Tool::Plutil => "/usr/bin/plutil".into(),
+        Tool::Id => "/usr/bin/id".into(),
         Tool::Reg => join(Os::Windows, system32, &["reg.exe"]),
     }
 }
