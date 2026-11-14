@@ -298,7 +298,10 @@ fn the_attached_devices_are_read_from_adb_devices() {
         vec!["39081FDJG00G9A".to_owned(), "emulator-5554".to_owned()],
         "only devices that are ready to be driven"
     );
-    assert!(Adb::parse_devices("List of devices attached\n\n").is_empty());
+    assert_eq!(
+        Adb::parse_devices("List of devices attached\n\n"),
+        [] as [String; 0]
+    );
 }
 
 /// A screen withheld from accessibility services and a screen caught
@@ -390,4 +393,38 @@ fn the_home_screen_package_is_read_from_the_component_it_resolves_to() {
         Some("com.example.launcher"),
     );
     assert_eq!(Adb::parse_home_screen("No activity found\n"), None);
+}
+
+/// A phone has no page to press, fill, navigate or answer a dialog on. The
+/// adapter says so rather than doing nothing, which a running loop would read
+/// as an action that worked. Refused before `adb` is run at all.
+#[test]
+fn the_browser_commands_are_refused_on_a_phone() {
+    use jev_pilot::act::DialogReply;
+    use jev_pilot::device::adb::AdbDevice;
+    use jev_pilot::device::{Command, Device};
+    use jev_pilot::snapshot::{NodeKey, Point, TabKey};
+
+    let mut phone = AdbDevice::new("serial");
+    let at = Point { x: 1, y: 2 };
+    for command in [
+        Command::Press {
+            at,
+            node: NodeKey::new("1:1"),
+        },
+        Command::Fill {
+            at,
+            node: NodeKey::new("1:1"),
+            text: "hello".into(),
+        },
+        Command::Navigate("https://example.test/".into()),
+        Command::SwitchTab(TabKey::new("tab")),
+        Command::Dialog(DialogReply::Dismiss),
+    ] {
+        let refused = phone.perform(&command).expect_err("a phone has no page");
+        assert!(
+            refused.to_string().contains("no Android equivalent"),
+            "{command:?}: {refused}"
+        );
+    }
 }

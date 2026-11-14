@@ -33,6 +33,10 @@ const OPERATIONS: &[Operation] = &[
     Operation::Home,
     Operation::AppSwitcher,
     Operation::Submit,
+    // Going back into the app a goal is about is offered by the catalog
+    // only on a screen that belongs to some other app; listing it here says
+    // this platform has such a thing as another app.
+    Operation::Return,
     Operation::Wait,
     Operation::Done,
     Operation::Blocked,
@@ -99,21 +103,28 @@ impl Platform for Ios {
                 detail: error.to_string().into_boxed_str(),
             })?;
 
-        let elements = document
+        let mut protected = Vec::new();
+        let elements: Vec<Element> = document
             .descendants()
             .filter(is_actionable)
             .filter_map(|node| {
                 let mut texts = own_texts(&node).into_iter();
-                Some(Element {
+                let element = Element {
                     label: texts.next()?,
                     detail: texts.next(),
                     editable: kind_of(&node).is_some_and(|kind| EDITABLE.contains(&kind)),
                     bounds: parse_bounds(&node)?,
-                })
+                };
+                // What is typed into a secure field is never repeated to the
+                // model.
+                protected.push(kind_of(&node) == Some("SecureTextField"));
+                Some(element)
             })
             .collect();
 
-        Snapshot::new(elements).map_err(HierarchyError::from)
+        Snapshot::new(elements)
+            .map(|snapshot| snapshot.with_protected(protected))
+            .map_err(HierarchyError::from)
     }
 }
 

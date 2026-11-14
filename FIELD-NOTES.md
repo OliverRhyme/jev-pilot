@@ -230,3 +230,154 @@ longer offered to Jev; an escalation can still name them.
   circles. A second opinion could have picked a real result; the run ended
   instead of asking.
 - Time spent answering a covered-row question is not counted in `waited_ms`.
+
+---
+
+## 2026-11-14 — Browser, fresh mode on GitHub (Chrome for Testing 157, headless)
+
+Goal: logged out, search GitHub for the ratatui repository and open its issue
+list, with a plan (open Search or jump to; type ratatui and submit; open
+ratatui/ratatui; open its Issues tab), `--text search=ratatui`, the accept line
+"An issue list for ratatui/ratatui is on screen", and `--floor 0.4`. Three runs;
+the first two each found a fault, fixed before the next.
+
+| run | ending | steps | per step | rows |
+|---|---|---|---|---|
+| 1 | refused by TypeSafe at step 5 (`max_tokens_exceeded`) | 4 | 0.9–3.2s | 16–100 |
+| 2 | asked at step 6, unanswered, gave up after 300s | 5 | 0.7–2.9s | 16–176 |
+| 3 | achieved | 7 | 0.5–2.8s | 16–176 |
+
+Reads took 30–240ms and judgements 350–530ms; the rest of each step is
+settling, which on GitHub is 0.3–2.4s.
+
+### 1. Headless Chrome reads as a phone-sized page
+
+Headless Chrome opens an 800 by 600 window, and GitHub served its narrow layout:
+the search was folded into a collapsed "Toggle navigation" menu, so the plan's
+first step named a row that did not exist. A headless fresh browser now starts
+at 1280 by 800, and the same page offers "Search or jump to" directly.
+
+### 2. A region that takes the clicks is named after everything in it
+
+A nameless clickable is named after the words inside it, and GitHub's page
+regions (the navigation menu, the repository header) take clicks for everything
+they hold. On a repository page the header was offered as one row named after
+the whole README, and the step's request was refused as too long, which ended
+the run. A row's name, its description and a field's value are now cut to 120
+characters. The regions are still offered as rows ("ratatui ratatui Repository
+navigation Code Issues (141) Pull requests…"); they are noise, but a card that
+is clickable as a whole is the same shape and is kept on purpose.
+
+### 3. A tab that fetches its page looked like a tap that did nothing
+
+GitHub switches repository tabs with a script: the old page stays up, a
+progress bar is drawn, and the new page arrives when its fetch returns. The
+pilot's watch after a tap saw a screen quiet since just after the tap and
+unchanged, and called the tap dead after 627ms. The next judgement was made
+about the old page, `done` at 0.53 fell under its floor, and the question asked
+waited five minutes for an answer. A step too uncertain to act on, right after
+an action that seemed to change nothing, now watches once more before asking.
+In run 3 the same judgement came back over the floor at 0.62 instead, the
+accept line refused it, and the next step read the issue list.
+
+### 4. Still open
+
+- "navigated to https://github.com" is the outcome of every navigation within
+  the site: the outcome names only the origin, so a search results page and a
+  repository read the same to the next step. The step record keeps the full
+  address.
+- The results page offered 100 rows and the repository page 176; the right row
+  was still chosen at 0.97 and 0.82–0.86.
+- Settling never waits for a fetch, only for a navigation, a load and a quiet
+  DOM; the pilot's patience is what covers a script-driven page change.
+
+## 2026-11-14 — Browser, how far beyond the screen to offer rows
+
+`examples/band.rs --send` sends the first step's request on a recorded page at
+band 0 (only rows on screen) and band 1 (rows up to one viewport away, marked
+"off screen"), eight goals over the search-results and repository fixtures,
+each with one right row. Jev 1.14.0.
+
+| | right row offered | right row chosen | its confidence, rows on screen |
+|---|---|---|---|
+| band 0 | 6 of 8 | 6 of 8 | 0.77–1.00 |
+| band 1 | 8 of 8 | 8 of 8 | 0.63–1.00 |
+
+Band 1 chose the right element more often. For a row below the fold ("Open the
+seventh result", "Open the releases page") band 0 could only lean `scroll_down`,
+at 0.57 and 0.68, one of them under the default floor; band 1 named the row at
+0.84 and 0.88, though with `scroll_down` rather than `tap` as the operation,
+at 0.99 and 0.91. On goals whose row was already on screen band 0 was a little
+sharper: the fourth result at 0.86 against 0.69, Star at 0.77 against 0.63.
+`BAND_VIEWPORTS` stays at one viewport.
+
+## 2026-11-14 — Browser, attach mode on GitHub (the owner's Chrome, stable, signed in)
+
+Goal: star the jev-pilot repository, then unstar it, with
+`--open https://github.com/OliverRhyme/jev-pilot` so the run had a tab of its
+own, and the accept line "The repository's star button reads Star, not
+Starred". Two runs, each started by clicking Allow on Chrome's "Allow remote
+debugging?" dialog.
+
+| run | ending | steps | what went wrong |
+|---|---|---|---|
+| 1 | `Finished(Achieved)`, having done nothing | 2 | the first read had no address and no rows; the accept line already held on the unstarred page |
+| 2 | `Uncertain` (no progress, 4 repeats) | 6 | Star was pressed; Unstar was refused at click time and never pressed |
+
+### 1. A tab opened for the run was read before it had loaded
+
+The tab was created at its address and attached at once, so the first read
+came before the navigation committed: no address and no rows, and the run
+asked what to do. A run's tab is now created blank and sent to its address
+through the same settled navigation a `navigate` step uses.
+
+### 2. The accept line held before the run had done anything
+
+"The star button reads Star" is as true before starring as after unstarring,
+and the run ended achieved at step 2 without touching the page. With a plan,
+the accept lines now end a run only once it has acted.
+
+### 3. A redrawn button read as covered
+
+Once a star lands, GitHub redraws its star button and its count with new
+nodes. The click-time check could no longer find the node it had read and
+reported "something else covers it", so Unstar was refused. When the node read
+is gone, the engine now clicks the one control at that point with the same
+role and name, and otherwise refuses with "the row was replaced since the page
+was read". Real Chrome's replies for this are in `tests/fixtures/cdp/replaced/`.
+
+### 4. A refused tap armed the guard against repeating it
+
+The repeat guard turned the next two choices of Unstar into waits, though no
+tap had been made, and the run ran out of patience with the repository still
+starred. A tap refused at click time no longer counts as an action taken.
+
+### 5. A click on Allow for every connection
+
+Every connection raised Chrome's dialog, with Cancel focused, and nothing
+remembered the answer. A run connects once, but over MCP every tool call is a
+connection of its own, so an agent looking at a page and then starting a run
+needs the owner at the keyboard for each. That cost is what the jev-pilot
+extension removes: it is installed once, as an administrator, and a run then
+needs no click.
+
+## 2026-11-15 — Browser, extension mode acceptance (to be run)
+
+The runs that accept extension mode, each pass or fail, with its transcript
+under `notes/acceptance/`:
+
+0. Install on the Mac: `sudo jev-pilot extension install`, the profile
+   approved, the extension loaded unpacked from the root-owned folder.
+   `jev-pilot extension status` reports a protected install, the bridge
+   connected and the policy in force; Claude in Chrome still works.
+1. Star, then unstar, on GitHub with zero clicks.
+2. The same pair after a Chrome restart, and after a reboot.
+3. The same pair through MCP, with `browser: {mode: "extension"}`.
+4. The checks hold: a copy run from `~/Downloads`, a script speaking the
+   protocol, a user-level host manifest, an edit to the extension folder,
+   pause, Cancel on the bar, a site off the list, `--tab` outside the group,
+   and a second run.
+5. Linux (Ubuntu) and Windows 11: the install, the pair, and the first two
+   checks.
+
+Not yet run.

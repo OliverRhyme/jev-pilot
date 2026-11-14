@@ -321,6 +321,35 @@ fn the_helper_serves_no_command_the_shell_refuses() {
     );
 }
 
+/// The accessibility service has no page either: the browser's commands are
+/// left to the shell path, which refuses them.
+#[test]
+fn the_helper_serves_none_of_the_browser_commands() {
+    use jev_pilot::act::DialogReply;
+    use jev_pilot::snapshot::{NodeKey, TabKey};
+
+    let at = Point { x: 540, y: 1200 };
+    for command in [
+        Command::Press {
+            at,
+            node: NodeKey::new("1:1"),
+        },
+        Command::Fill {
+            at,
+            node: NodeKey::new("1:1"),
+            text: "hello".into(),
+        },
+        Command::Navigate("https://example.test/".into()),
+        Command::SwitchTab(TabKey::new("tab")),
+        Command::Dialog(DialogReply::Dismiss),
+    ] {
+        assert!(
+            Action::for_command(&command, (1080, 2400)).is_none(),
+            "{command:?}"
+        );
+    }
+}
+
 #[test]
 fn a_tap_carries_the_point_it_was_given() {
     let body = body_of(&Command::Tap(Point { x: 540, y: 1200 }));

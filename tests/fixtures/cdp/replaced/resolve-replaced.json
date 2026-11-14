@@ -1,0 +1,8 @@
+{
+ "id": 9,
+ "error": {
+  "code": -32000,
+  "message": "No node with given id found"
+ },
+ "sessionId": "E33095F94A465535FB56161BD465D358"
+}

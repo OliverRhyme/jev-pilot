@@ -1,0 +1,68 @@
+[
+  {
+    "frame": {
+      "extension_version": "0.2.0",
+      "paused": true,
+      "policy": {
+        "owner_tabs": "group",
+        "sites": []
+      },
+      "product": "Chrome/158.0.7400.12",
+      "protocol": 1,
+      "type": "hello"
+    },
+    "from": "extension",
+    "to": "host"
+  },
+  {
+    "frame": {
+      "nonce": "6a65762d70696c6f742d6272696467652d6e6f6e63652d666f722d746573747",
+      "type": "nonce"
+    },
+    "from": "host",
+    "to": "run"
+  },
+  {
+    "frame": {
+      "goal": "Sign up for an account",
+      "nonce": "6a65762d70696c6f742d6272696467652d6e6f6e63652d666f722d746573747",
+      "sites": [],
+      "type": "echo"
+    },
+    "from": "run",
+    "to": "host"
+  },
+  {
+    "frame": {
+      "goal": "Sign up for an account",
+      "pid": 4242,
+      "sites": [],
+      "type": "run_started"
+    },
+    "from": "host",
+    "to": "extension"
+  },
+  {
+    "frame": {
+      "extension_version": "0.2.0",
+      "host_version": "0.2.0",
+      "paused": true,
+      "policy": {
+        "owner_tabs": "group",
+        "sites": []
+      },
+      "product": "Chrome/158.0.7400.12",
+      "protocol": 1,
+      "type": "ready"
+    },
+    "from": "host",
+    "to": "run"
+  },
+  {
+    "frame": {
+      "type": "release"
+    },
+    "from": "host",
+    "to": "extension"
+  }
+]

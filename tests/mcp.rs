@@ -9,11 +9,11 @@ use jev_pilot::mcp::Sessions;
 fn observing_runs_the_command_line_that_observes() {
     assert_eq!(
         jev_pilot::mcp::invocation("observe", &serde_json::json!({})),
-        Some(vec!["observe".to_owned()]),
+        Ok(vec!["observe".to_owned()]),
     );
     assert_eq!(
         jev_pilot::mcp::invocation("observe", &serde_json::json!({"device": "abc123"})),
-        Some(vec![
+        Ok(vec![
             "--device".to_owned(),
             "abc123".to_owned(),
             "observe".to_owned(),
@@ -27,11 +27,11 @@ fn observing_runs_the_command_line_that_observes() {
 fn the_helper_is_only_installed_when_asked() {
     assert_eq!(
         jev_pilot::mcp::invocation("helper", &serde_json::json!({})),
-        Some(vec!["helper".to_owned()]),
+        Ok(vec!["helper".to_owned()]),
     );
     assert_eq!(
         jev_pilot::mcp::invocation("helper", &serde_json::json!({"install": true})),
-        Some(vec!["helper".to_owned(), "install".to_owned()]),
+        Ok(vec!["helper".to_owned(), "install".to_owned()]),
     );
 }
 
@@ -67,10 +67,7 @@ fn a_run_is_started_with_the_flags_the_command_line_already_has() {
 /// A run with no goal is not a run.
 #[test]
 fn a_run_without_a_goal_is_refused() {
-    assert_eq!(
-        jev_pilot::mcp::invocation("start_run", &serde_json::json!({})),
-        None,
-    );
+    assert!(jev_pilot::mcp::invocation("start_run", &serde_json::json!({})).is_err());
 }
 
 /// An answer becomes the file the desk already reads, because that is the seam
@@ -348,4 +345,438 @@ fn a_run_s_goal_is_passed_after_the_end_of_options() {
         .expect("a run is startable");
 
     assert_eq!(&args[args.len() - 2..], ["--", "logout"]);
+}
+
+// --- the browser ---
+
+use jev_pilot::mcp::{busy_with, invocation, run_key};
+use serde_json::json;
+
+fn line(tool: &str, arguments: &serde_json::Value) -> Vec<String> {
+    invocation(tool, arguments).expect("a call worth running")
+}
+
+/// Every field of the `browser` argument becomes the flag the command line
+/// has for it.
+#[test]
+fn every_browser_field_becomes_its_flag() {
+    let args = line(
+        "start_run",
+        &json!({
+            "goal": "Sign up for an account",
+            "browser": {
+                "mode": "attach",
+                "tab": "github.com",
+                "channel": "beta",
+                "endpoint": "ws://127.0.0.1:9222/devtools/browser/x",
+            },
+            "urls": ["https://github.com/signup", "https://github.com/login"],
+        }),
+    );
+    let joined = args.join(" ");
+    for wanted in [
+        "--browser attach",
+        "--tab github.com",
+        "--channel beta",
+        "--endpoint ws://127.0.0.1:9222/devtools/browser/x",
+        "--url https://github.com/signup",
+        "--url https://github.com/login",
+    ] {
+        assert!(joined.contains(wanted), "{wanted:?} in {joined}");
+    }
+    assert!(
+        !joined.contains("--allow-wait"),
+        "a run waits as long as the command line does: {joined}"
+    );
+    assert_eq!(&args[args.len() - 2..], ["--", "Sign up for an account"]);
+
+    let fresh = line(
+        "start_run",
+        &json!({
+            "goal": "Sign up for an account",
+            "browser": {
+                "mode": "fresh",
+                "open": "https://example.test/signup",
+                "chrome": "/opt/cft/chrome",
+                "headless": true,
+            },
+        }),
+    )
+    .join(" ");
+    for wanted in [
+        "--browser fresh",
+        "--open https://example.test/signup",
+        "--chrome /opt/cft/chrome",
+        "--headless",
+    ] {
+        assert!(fresh.contains(wanted), "{wanted:?} in {fresh}");
+    }
+}
+
+/// A look at an attached browser is a tool call the owner must click Allow
+/// for; a client times out long before two minutes, so it waits forty seconds.
+#[test]
+fn looking_at_an_attached_browser_waits_forty_seconds_for_allow() {
+    assert_eq!(
+        line(
+            "observe",
+            &json!({"browser": {"mode": "attach", "tab": "github.com"}})
+        ),
+        [
+            "observe",
+            "--browser",
+            "attach",
+            "--sites-only",
+            "--tab",
+            "github.com",
+            "--allow-wait",
+            "40"
+        ]
+    );
+    assert_eq!(
+        line("devices", &json!({"browser": {"mode": "attach"}})),
+        [
+            "devices",
+            "--browser",
+            "attach",
+            "--sites-only",
+            "--allow-wait",
+            "40"
+        ]
+    );
+    assert_eq!(
+        line(
+            "devices",
+            &json!({"browser": {"mode": "fresh", "headless": true}})
+        ),
+        ["devices", "--browser", "fresh", "--headless"],
+        "a fresh browser asks nobody"
+    );
+    assert_eq!(line("devices", &json!({})), ["devices"]);
+}
+
+#[test]
+fn a_call_naming_both_a_device_and_a_browser_is_refused() {
+    for tool in ["observe", "devices", "start_run"] {
+        let refused = invocation(
+            tool,
+            &json!({"goal": "Open the page", "device": "abc123", "browser": {"mode": "fresh"}}),
+        )
+        .expect_err("refused");
+        assert!(
+            refused.contains("device") && refused.contains("browser"),
+            "{refused}"
+        );
+    }
+}
+
+/// The new operations reach the desk with their index, numbered on their own
+/// as the desk numbers tabs and addresses.
+#[test]
+fn browser_answers_reach_the_desk_with_their_index() {
+    for operation in ["switch_tab", "navigate", "accept_dialog", "dismiss_dialog"] {
+        assert_eq!(
+            jev_pilot::mcp::answer_from(&json!({"operation": operation, "target": 1})),
+            Some(json!({"operation": operation, "target": 1})),
+        );
+    }
+}
+
+/// A browser run is named by the browser it drives, beside device serials:
+/// one attached Chrome per channel, and one fresh browser.
+#[test]
+fn a_browser_run_is_named_by_its_browser() {
+    assert_eq!(run_key(&json!({"device": "abc123"})), "abc123");
+    assert_eq!(run_key(&json!({})), "the attached device");
+    assert_eq!(
+        run_key(&json!({"browser": {"mode": "attach"}})),
+        "browser:attach:stable"
+    );
+    assert_eq!(
+        run_key(&json!({"browser": {"mode": "attach", "channel": "canary"}})),
+        "browser:attach:canary"
+    );
+    assert_eq!(
+        run_key(&json!({"browser": {"mode": "fresh", "headless": true}})),
+        "browser:fresh"
+    );
+}
+
+/// One run per target: a second run on the same browser is refused, and a
+/// browser run and a phone run do not get in each other's way.
+#[test]
+fn browser_runs_keep_one_run_per_target() {
+    assert_eq!(
+        busy_with("browser:fresh", &["browser:fresh"]),
+        Some("browser:fresh".to_owned())
+    );
+    assert_eq!(busy_with("browser:fresh", &["abc123"]), None);
+    assert_eq!(
+        busy_with("browser:attach:stable", &["browser:attach:beta"]),
+        None
+    );
+    assert_eq!(busy_with("the attached device", &["browser:fresh"]), None);
+    assert_eq!(
+        busy_with("the attached device", &["abc123"]),
+        Some("abc123".to_owned()),
+        "an unnamed phone could be any phone being driven"
+    );
+    assert_eq!(busy_with("abc123", &["abc123"]), Some("abc123".to_owned()));
+    assert_eq!(busy_with("def456", &["abc123"]), None);
+
+    assert_eq!(
+        jev_pilot::mcp::which_run(Some("browser:fresh"), &["abc123", "browser:fresh"]),
+        Ok("browser:fresh".to_owned())
+    );
+}
+
+/// Stopping a run ends its process outright, so a fresh run's browser and
+/// profile outlive it unless the server clears them. Only the stopped run's
+/// profiles are touched: the folder name carries the run's process id, and a
+/// profile whose lock is still held belongs to a run that is alive. The lock
+/// is a file beside the folder, and goes with it.
+#[cfg(feature = "browser")]
+#[test]
+fn stopping_a_run_clears_the_fresh_profile_it_left() {
+    use jev_pilot::browser::launch::{PROFILE_PREFIX, reap_run};
+    use std::fs::File;
+
+    let temp = std::env::temp_dir().join(format!("jev-pilot-reap-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    let profile = |name: &str| {
+        let dir = temp.join(format!("{PROFILE_PREFIX}{name}"));
+        std::fs::create_dir_all(dir.join("Default")).expect("a profile folder");
+        let lock =
+            File::create(temp.join(format!("{PROFILE_PREFIX}{name}.lock"))).expect("a lock file");
+        (dir, lock)
+    };
+    let (left, _) = profile("4242-0000aaaa");
+    let (alive, held) = profile("4242-0000bbbb");
+    held.try_lock().expect("this profile's run is alive");
+    let (other, _) = profile("999-0000cccc");
+    let (prefix_only, _) = profile("42420-0000dddd");
+
+    let cleared = reap_run(&temp, 4242);
+
+    assert_eq!(cleared, 1);
+    assert!(!left.exists(), "the stopped run's profile is removed");
+    assert!(
+        !temp
+            .join(format!("{PROFILE_PREFIX}4242-0000aaaa.lock"))
+            .exists(),
+        "and its lock with it"
+    );
+    assert!(
+        alive.exists(),
+        "a profile still locked belongs to a live run"
+    );
+    assert!(other.exists(), "another run's profile is not this run's");
+    assert!(prefix_only.exists(), "process 42420 is not process 4242");
+    drop(held);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn a_browser_endpoint_must_be_local() {
+    let refused = invocation(
+        "observe",
+        &json!({"browser": {"mode": "attach", "endpoint": "ws://10.0.0.5:9222/devtools/browser/x"}}),
+    )
+    .expect_err("refused");
+    assert!(refused.contains("endpoint"), "{refused}");
+    assert!(
+        invocation(
+            "observe",
+            &json!({"browser": {"mode": "attach", "endpoint": "ws://127.0.0.1:9222/devtools/browser/x"}}),
+        )
+        .is_ok()
+    );
+}
+
+/// Over MCP the owner's tabs reach another agent, so every attach call asks
+/// the command line to name them by site alone. A fresh browser's tabs are the
+/// run's own.
+#[test]
+fn an_attached_browser_lists_its_tabs_by_site_over_mcp() {
+    for tool in ["devices", "observe"] {
+        let args = line(tool, &json!({"browser": {"mode": "attach"}}));
+        assert!(
+            args.contains(&"--sites-only".to_owned()),
+            "{tool}: {args:?}"
+        );
+        let args = line(tool, &json!({"browser": {"mode": "fresh"}}));
+        assert!(
+            !args.contains(&"--sites-only".to_owned()),
+            "{tool}: {args:?}"
+        );
+    }
+    let run = line(
+        "start_run",
+        &json!({"goal": "Star the repository", "browser": {"mode": "attach", "tab": "github"}}),
+    );
+    assert!(run.contains(&"--sites-only".to_owned()), "{run:?}");
+}
+
+/// The README and the server's guidance say the same thing about tab
+/// listings, word for word.
+#[test]
+fn the_readme_and_the_guidance_agree_on_tab_listings() {
+    let readme = include_str!("../README.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        readme.contains(jev_pilot::mcp::TABS_OVER_MCP),
+        "README lacks: {}",
+        jev_pilot::mcp::TABS_OVER_MCP
+    );
+}
+
+/// The extension drives the owner's own Chrome with no click per call, so a
+/// look waits for nobody; its tabs reach another agent, so they are named by
+/// site alone.
+#[test]
+fn the_extension_is_driven_by_site_with_no_wait() {
+    assert_eq!(
+        line(
+            "observe",
+            &json!({"browser": {"mode": "extension", "tab": "7"}})
+        ),
+        [
+            "observe",
+            "--browser",
+            "extension",
+            "--sites-only",
+            "--tab",
+            "7"
+        ]
+    );
+    assert_eq!(
+        line("devices", &json!({"browser": {"mode": "extension"}})),
+        ["devices", "--browser", "extension", "--sites-only"]
+    );
+    let run = line(
+        "start_run",
+        &json!({
+            "goal": "Star the repository",
+            "browser": {"mode": "extension", "open": "https://github.com/OliverRhyme/jev-pilot"},
+        }),
+    );
+    assert_eq!(
+        &run[..6],
+        [
+            "--browser",
+            "extension",
+            "--sites-only",
+            "--open",
+            "https://github.com/OliverRhyme/jev-pilot",
+            "--"
+        ]
+    );
+    assert!(!run.contains(&"--allow-wait".to_owned()), "{run:?}");
+}
+
+/// The extension serves one run at a time, whichever channel's Chrome it is
+/// in.
+#[test]
+fn an_extension_run_is_named_browser_extension() {
+    assert_eq!(
+        run_key(&json!({"browser": {"mode": "extension"}})),
+        "browser:extension"
+    );
+    assert_eq!(
+        busy_with("browser:extension", &["browser:extension"]),
+        Some("browser:extension".to_owned())
+    );
+    assert_eq!(
+        busy_with("browser:extension", &["browser:attach:stable"]),
+        None
+    );
+}
+
+/// A development install is not protected against other programs running as
+/// the owner, so another agent may drive Chrome through one only when whoever
+/// started the server said so.
+#[cfg(feature = "extension")]
+#[test]
+fn a_development_install_is_refused_unless_the_server_allows_it() {
+    use jev_pilot::browser::install::{ALLOW_DEV_BRIDGE, InstallKind};
+    use jev_pilot::mcp::development_refusal;
+
+    let through = json!({"browser": {"mode": "extension"}});
+    let said = development_refusal(&through, Some(InstallKind::Development), None)
+        .expect("refused without the variable");
+    assert!(said.contains("development install"), "{said}");
+    assert!(said.contains(&format!("{ALLOW_DEV_BRIDGE}=1")), "{said}");
+    assert!(
+        development_refusal(&through, Some(InstallKind::Development), Some("0")).is_some(),
+        "only 1 allows it"
+    );
+    assert_eq!(
+        development_refusal(&through, Some(InstallKind::Development), Some("1")),
+        None
+    );
+    assert_eq!(
+        development_refusal(&through, Some(InstallKind::Protected), None),
+        None
+    );
+    assert_eq!(
+        development_refusal(&through, None, None),
+        None,
+        "with nothing installed, the run itself says how to set it up"
+    );
+    for other in [
+        json!({"browser": {"mode": "attach"}}),
+        json!({"browser": {"mode": "fresh"}}),
+        json!({"device": "abc123"}),
+    ] {
+        assert_eq!(
+            development_refusal(&other, Some(InstallKind::Development), None),
+            None,
+            "{other}"
+        );
+    }
+}
+
+/// The instructions put the extension first, and tell the client what to say
+/// to the owner for each way it can stop a run; attach mode follows as the
+/// fallback, with its click on Allow.
+#[test]
+fn the_guidance_leads_with_the_extension() {
+    use rmcp::ServerHandler as _;
+    let guidance = jev_pilot::mcp::Pilot::new()
+        .get_info()
+        .instructions
+        .expect("instructions")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let at = |said: &str| {
+        guidance
+            .find(said)
+            .unwrap_or_else(|| panic!("the guidance lacks {said:?}"))
+    };
+    assert!(at("`mode` 'extension'") < at("`mode` 'attach'"));
+    for said in [
+        "one-time",
+        "no click",
+        "sudo jev-pilot extension install",
+        "resume it from the extension's toolbar button",
+        "sudo jev-pilot extension policy sites add",
+        "put that tab in the 'jev-pilot' tab group first",
+        "JEV_PILOT_ALLOW_DEV_BRIDGE=1",
+        "browser:extension",
+        "click Allow",
+    ] {
+        at(said);
+    }
+    let identity = &guidance[at("something other than the installed jev-pilot")..];
+    assert!(
+        identity
+            .chars()
+            .take(300)
+            .collect::<String>()
+            .contains("never retry"),
+        "a refused identity check is never retried: {identity}"
+    );
 }

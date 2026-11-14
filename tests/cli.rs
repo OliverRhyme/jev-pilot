@@ -1,7 +1,9 @@
 //! Reading a command line. Pure: nothing here touches a device.
 
 use jev_pilot::act::Operation;
-use jev_pilot::cli::{Invocation, parse};
+use jev_pilot::cli::{
+    BrowserMode, BrowserTarget, CliError, ExtensionCommand, Invocation, OwnerTabs, parse,
+};
 
 fn parsed(words: &[&str]) -> Invocation {
     parse(words.iter().map(|w| (*w).to_owned())).expect("a valid command line")
@@ -22,7 +24,7 @@ fn a_goal_is_the_whole_command_line() {
 
     assert_eq!(&*goal, "Open the Wi-Fi settings");
     assert!(device.is_none(), "one attached device needs no naming");
-    assert!(accept.is_empty());
+    assert_eq!(accept, [] as [String; 0]);
 }
 
 /// A goal is not optional: without one there is nothing to pursue, and
@@ -105,7 +107,10 @@ fn the_helper_is_managed_by_its_own_subcommand() {
 
 #[test]
 fn devices_and_help_are_their_own_subcommands() {
-    assert!(matches!(parsed(&["devices"]), Invocation::Devices));
+    assert!(matches!(
+        parsed(&["devices"]),
+        Invocation::Devices { browser: None }
+    ));
     assert!(matches!(parsed(&["--help"]), Invocation::Help));
     assert!(matches!(parsed(&["-h"]), Invocation::Help));
 }
@@ -128,11 +133,17 @@ fn a_goal_can_follow_the_end_of_options() {
 fn the_catalog_can_be_looked_at_without_running_anything() {
     assert!(matches!(
         parsed(&["observe"]),
-        Invocation::Observe { device: None }
+        Invocation::Observe {
+            device: None,
+            browser: None
+        }
     ));
     assert!(matches!(
         parsed(&["observe", "--device", "abc123"]),
-        Invocation::Observe { device: Some(_) }
+        Invocation::Observe {
+            device: Some(_),
+            browser: None
+        }
     ));
 }
 
@@ -315,4 +326,531 @@ fn a_single_word_that_is_not_a_command_is_refused_not_pursued() {
         panic!("a sentence is a goal");
     };
     assert_eq!(&*goal, "open settings");
+}
+
+// --- the browser ---
+
+fn browser_of(invocation: Invocation) -> Option<BrowserTarget> {
+    match invocation {
+        Invocation::Run { browser, .. }
+        | Invocation::Observe { browser, .. }
+        | Invocation::Devices { browser } => browser,
+        other => panic!("no browser on {other:?}"),
+    }
+}
+
+fn refused(words: &[&str]) -> CliError {
+    parse(words.iter().map(|w| (*w).to_owned())).expect_err("refused")
+}
+
+#[test]
+fn a_run_without_browser_flags_drives_a_phone_as_before() {
+    assert_eq!(browser_of(parsed(&["Turn Wi-Fi on"])), None);
+}
+
+/// Attach mode defaults to the stable channel and a two-minute wait for the
+/// owner to click Allow.
+#[test]
+fn attach_mode_takes_its_channel_endpoint_and_wait() {
+    assert_eq!(
+        browser_of(parsed(&[
+            "--browser",
+            "attach",
+            "--tab",
+            "github.com",
+            "Star the repository"
+        ])),
+        Some(BrowserTarget {
+            mode: BrowserMode::Attach {
+                channel: "stable".into(),
+                endpoint: None,
+                allow_wait: 120,
+                sites_only: false,
+            },
+            tab: Some("github.com".into()),
+            open: None,
+            urls: Vec::new(),
+        })
+    );
+    assert_eq!(
+        browser_of(parsed(&[
+            "--browser",
+            "attach",
+            "--channel",
+            "canary",
+            "--endpoint",
+            "ws://127.0.0.1:9222/devtools/browser/x",
+            "--allow-wait",
+            "40",
+            "Star the repository",
+        ])),
+        Some(BrowserTarget {
+            mode: BrowserMode::Attach {
+                channel: "canary".into(),
+                endpoint: Some("ws://127.0.0.1:9222/devtools/browser/x".into()),
+                allow_wait: 40,
+                sites_only: false,
+            },
+            tab: None,
+            open: None,
+            urls: Vec::new(),
+        })
+    );
+}
+
+/// The `--open` address is always one `navigate` may go to.
+#[test]
+fn fresh_mode_takes_its_binary_headless_and_addresses() {
+    assert_eq!(
+        browser_of(parsed(&[
+            "--browser",
+            "fresh",
+            "--chrome",
+            "/opt/cft/chrome",
+            "--headless",
+            "--open",
+            "https://example.test/signup",
+            "--url",
+            "https://example.test/terms",
+            "Sign up for an account",
+        ])),
+        Some(BrowserTarget {
+            mode: BrowserMode::Fresh {
+                chrome: Some("/opt/cft/chrome".into()),
+                headless: true,
+            },
+            tab: None,
+            open: Some("https://example.test/signup".into()),
+            urls: vec![
+                "https://example.test/signup".into(),
+                "https://example.test/terms".into()
+            ],
+        })
+    );
+}
+
+#[test]
+fn observe_and_devices_take_the_browser_flags_too() {
+    let fresh = Some(BrowserTarget {
+        mode: BrowserMode::Fresh {
+            chrome: None,
+            headless: true,
+        },
+        tab: None,
+        open: Some("https://example.test/".into()),
+        urls: vec!["https://example.test/".into()],
+    });
+    assert_eq!(
+        browser_of(parsed(&[
+            "observe",
+            "--browser",
+            "fresh",
+            "--headless",
+            "--open",
+            "https://example.test/"
+        ])),
+        fresh
+    );
+    assert!(matches!(
+        browser_of(parsed(&["devices", "--browser", "attach"])),
+        Some(BrowserTarget {
+            mode: BrowserMode::Attach { .. },
+            ..
+        })
+    ));
+}
+
+#[test]
+fn conflicting_browser_flags_are_refused() {
+    for words in [
+        &["--browser", "fresh", "--device", "abc123", "Open the page"][..],
+        &[
+            "--browser",
+            "fresh",
+            "--app",
+            "com.example",
+            "Open the page",
+        ],
+        &[
+            "--browser",
+            "attach",
+            "--tab",
+            "x",
+            "--open",
+            "https://example.test/",
+            "Open the page",
+        ],
+        &["observe", "--browser", "fresh", "--device", "abc123"],
+        &["--browser", "fresh", "--channel", "beta", "Open the page"],
+        &[
+            "--browser",
+            "fresh",
+            "--endpoint",
+            "ws://127.0.0.1:1/devtools/browser/x",
+            "Open the page",
+        ],
+        &["--browser", "fresh", "--allow-wait", "40", "Open the page"],
+        &[
+            "--browser",
+            "attach",
+            "--chrome",
+            "/opt/chrome",
+            "Open the page",
+        ],
+        &["--browser", "attach", "--headless", "Open the page"],
+    ] {
+        let error = parse(words.iter().map(|w| (*w).to_owned()));
+        assert!(error.is_err(), "{words:?} is refused");
+    }
+    let message = refused(&[
+        "--browser",
+        "fresh",
+        "--app",
+        "com.example",
+        "Open the page",
+    ])
+    .to_string();
+    assert!(
+        message.contains("--url") || message.contains("--open"),
+        "says what to use instead: {message}"
+    );
+}
+
+/// A browser flag without `--browser` is a mistake, not a phone run.
+#[test]
+fn browser_flags_need_a_browser() {
+    for words in [
+        &["--tab", "x", "Open the page"][..],
+        &["--open", "https://example.test/", "Open the page"],
+        &["--url", "https://example.test/", "Open the page"],
+        &["--headless", "Open the page"],
+        &["observe", "--channel", "beta"],
+    ] {
+        assert!(
+            parse(words.iter().map(|w| (*w).to_owned())).is_err(),
+            "{words:?} is refused"
+        );
+    }
+}
+
+#[test]
+fn bad_browser_values_are_refused() {
+    for words in [
+        &["--browser", "chrome", "Open the page"][..],
+        &[
+            "--browser",
+            "attach",
+            "--channel",
+            "nightly",
+            "Open the page",
+        ],
+        &[
+            "--browser",
+            "attach",
+            "--allow-wait",
+            "soon",
+            "Open the page",
+        ],
+        &[
+            "--browser",
+            "attach",
+            "--endpoint",
+            "http://127.0.0.1:9222",
+            "Open the page",
+        ],
+    ] {
+        assert!(
+            matches!(
+                parse(words.iter().map(|w| (*w).to_owned())),
+                Err(CliError::BadValue { .. })
+            ),
+            "{words:?} is refused"
+        );
+    }
+}
+
+/// The endpoint is a browser on this machine. One anywhere else would carry
+/// the page, and whatever is typed into it, across a network unencrypted.
+#[test]
+fn an_endpoint_must_be_a_local_websocket() {
+    for endpoint in [
+        "ws://127.0.0.1:9222/devtools/browser/x",
+        "ws://localhost:9222/devtools/browser/x",
+        "ws://[::1]:9222/devtools/browser/x",
+    ] {
+        assert!(
+            parse(
+                [
+                    "--browser",
+                    "attach",
+                    "--endpoint",
+                    endpoint,
+                    "Open the page"
+                ]
+                .map(str::to_owned)
+            )
+            .is_ok(),
+            "{endpoint} is local"
+        );
+    }
+    for endpoint in [
+        "ws://192.168.1.20:9222/devtools/browser/x",
+        "ws://example.test:9222/devtools/browser/x",
+        "ws://127.0.0.1.example.test:9222/devtools/browser/x",
+        "wss://127.0.0.1:9222/devtools/browser/x",
+    ] {
+        assert!(
+            matches!(
+                parse(
+                    [
+                        "--browser",
+                        "attach",
+                        "--endpoint",
+                        endpoint,
+                        "Open the page"
+                    ]
+                    .map(str::to_owned)
+                ),
+                Err(CliError::BadValue {
+                    flag: "--endpoint",
+                    ..
+                })
+            ),
+            "{endpoint} is refused"
+        );
+    }
+}
+
+/// `--sites-only` asks for the owner's tabs by site alone, for a caller that
+/// is not the owner. It means something only for the owner's own Chrome.
+#[test]
+fn sites_only_belongs_to_attach_mode() {
+    assert!(matches!(
+        browser_of(parsed(&["devices", "--browser", "attach", "--sites-only"])),
+        Some(BrowserTarget {
+            mode: BrowserMode::Attach {
+                sites_only: true,
+                ..
+            },
+            ..
+        })
+    ));
+    assert!(matches!(
+        browser_of(parsed(&["devices", "--browser", "attach"])),
+        Some(BrowserTarget {
+            mode: BrowserMode::Attach {
+                sites_only: false,
+                ..
+            },
+            ..
+        })
+    ));
+    let refused = |words: &[&str]| parse(words.iter().map(|w| (*w).to_owned())).is_err();
+    assert!(refused(&["devices", "--browser", "fresh", "--sites-only"]));
+    assert!(refused(&["devices", "--sites-only"]));
+}
+
+// --- the extension ---
+
+#[test]
+fn extension_mode_drives_the_owners_chrome_through_the_extension() {
+    let target = browser_of(parsed(&[
+        "--browser",
+        "extension",
+        "--open",
+        "https://example.test/",
+        "Open the page",
+    ]))
+    .expect("a browser target");
+    assert_eq!(target.mode, BrowserMode::Extension { sites_only: false });
+    assert_eq!(target.open.as_deref(), Some("https://example.test/"));
+    assert_eq!(
+        browser_of(parsed(&["observe", "--browser", "extension", "--tab", "7"]))
+            .map(|t| (t.mode, t.tab)),
+        Some((
+            BrowserMode::Extension { sites_only: false },
+            Some("7".into())
+        ))
+    );
+    assert_eq!(
+        browser_of(parsed(&[
+            "devices",
+            "--browser",
+            "extension",
+            "--sites-only"
+        ]))
+        .map(|t| t.mode),
+        Some(BrowserMode::Extension { sites_only: true })
+    );
+}
+
+/// The attach and fresh flags are refused in extension mode, naming the mode
+/// they belong to.
+#[test]
+fn attach_and_fresh_flags_are_refused_in_extension_mode() {
+    for (flag, value, mode) in [
+        ("--channel", Some("beta"), "attach"),
+        (
+            "--endpoint",
+            Some("ws://127.0.0.1:1/devtools/browser/x"),
+            "attach",
+        ),
+        ("--allow-wait", Some("40"), "attach"),
+        ("--chrome", Some("/opt/chrome"), "fresh"),
+        ("--headless", None, "fresh"),
+    ] {
+        let mut words = vec!["--browser", "extension", flag];
+        words.extend(value);
+        words.push("Open the page");
+        let error = refused(&words);
+        assert_eq!(error, CliError::NeedsMode { flag, mode }, "{words:?}");
+        assert_eq!(error.to_string(), format!("{flag} needs --browser {mode}"));
+    }
+}
+
+fn extension(words: &[&str]) -> ExtensionCommand {
+    let mut all = vec!["extension"];
+    all.extend_from_slice(words);
+    match parsed(&all) {
+        Invocation::Extension(command) => command,
+        other => panic!("not an extension command: {other:?}"),
+    }
+}
+
+#[test]
+fn the_extension_subcommand_installs_reports_and_removes() {
+    assert_eq!(
+        extension(&["install"]),
+        ExtensionCommand::Install { dev: false }
+    );
+    assert_eq!(
+        extension(&["install", "--dev"]),
+        ExtensionCommand::Install { dev: true }
+    );
+    assert_eq!(extension(&["status"]), ExtensionCommand::Status);
+    assert_eq!(extension(&["uninstall"]), ExtensionCommand::Uninstall);
+    assert_eq!(extension(&["log"]), ExtensionCommand::Log);
+}
+
+#[test]
+fn the_extension_policy_is_edited_from_the_command_line() {
+    assert_eq!(
+        extension(&["policy", "sites", "add", "https://example.test"]),
+        ExtensionCommand::Sites {
+            add: true,
+            origin: "https://example.test".into()
+        }
+    );
+    assert_eq!(
+        extension(&["policy", "sites", "remove", "https://*.example.test"]),
+        ExtensionCommand::Sites {
+            add: false,
+            origin: "https://*.example.test".into()
+        }
+    );
+    assert_eq!(
+        extension(&["policy", "sites", "add", "HTTP://LocalHost:8080"]),
+        ExtensionCommand::Sites {
+            add: true,
+            origin: "http://localhost:8080".into()
+        }
+    );
+    assert_eq!(
+        extension(&["policy", "owner-tabs", "group"]),
+        ExtensionCommand::OwnerTabs(OwnerTabs::Group)
+    );
+    assert_eq!(
+        extension(&["policy", "owner-tabs", "never"]),
+        ExtensionCommand::OwnerTabs(OwnerTabs::Never)
+    );
+}
+
+#[test]
+fn a_bad_extension_command_is_refused() {
+    for words in [
+        &["extension"][..],
+        &["extension", "launch"],
+        &["extension", "install", "--now"],
+        &["extension", "status", "extra"],
+        &["extension", "policy"],
+        &["extension", "policy", "sites", "add"],
+        &[
+            "extension",
+            "policy",
+            "sites",
+            "toggle",
+            "https://example.test",
+        ],
+        &["extension", "policy", "owner-tabs", "always"],
+    ] {
+        assert!(
+            parse(words.iter().map(|w| (*w).to_owned())).is_err(),
+            "{words:?} is refused"
+        );
+    }
+}
+
+/// A site is an origin: a scheme of http or https, a host, and perhaps a
+/// port. A `*.` before the host takes its subdomains too. Anything else, a
+/// path or a pattern elsewhere, is refused rather than guessed at.
+#[test]
+fn a_site_must_be_an_origin() {
+    for origin in [
+        "example.test",
+        "ftp://example.test",
+        "https://example.test/path",
+        "https://",
+        "https://exa*mple.test",
+        "https://*.",
+        "https://example.test:port",
+        "chrome://settings",
+        "https://user@example.test",
+    ] {
+        assert!(
+            matches!(
+                parse(["extension", "policy", "sites", "add", origin].map(str::to_owned)),
+                Err(CliError::BadValue { flag: "sites", .. })
+            ),
+            "{origin} is refused"
+        );
+    }
+}
+
+/// Chrome starts the host with the extension's origin as its first argument
+/// (and, on Windows, a `--parent-window` after it).
+#[cfg(feature = "browser")]
+#[test]
+fn chrome_starts_the_host_with_the_extensions_origin() {
+    let origin = format!(
+        "chrome-extension://{}/",
+        jev_pilot::browser::bridge::EXTENSION_ID
+    );
+    assert_eq!(parsed(&[&origin]), Invocation::Host);
+    assert_eq!(parsed(&[&origin, "--parent-window=0"]), Invocation::Host);
+    for extra in [
+        &[&origin[..], "--parent-window=0", "--parent-window=1"][..],
+        &[&origin[..], "--something"],
+        &[&origin[..], "Open the page"],
+    ] {
+        assert!(
+            parse(extra.iter().map(|w| (*w).to_owned())).is_err(),
+            "{extra:?}"
+        );
+    }
+    let other = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/";
+    assert_eq!(refused(&[other]), CliError::ForeignOrigin(other.to_owned()));
+    assert_eq!(
+        refused(&[other]).to_string(),
+        format!("jev-pilot serves only its own extension, not {other}")
+    );
+}
+
+/// Ctrl-C in a run on the owner's Chrome lets go of it and closes nothing,
+/// and says so.
+#[test]
+fn ctrl_c_on_the_owners_chrome_says_it_let_go() {
+    assert_eq!(
+        jev_pilot::cli::LET_GO,
+        "interrupted: let go of Chrome, and closed nothing"
+    );
 }
