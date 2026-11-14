@@ -160,7 +160,12 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
       },
       getTargets: async () => {
         calls.push(["debugger.getTargets"]);
-        return [...state.targets].map(([tabId, id]) => ({ id, tabId, type: "page", attached: false }));
+        return [...state.targets].map(([tabId, id]) => ({
+          id,
+          tabId,
+          type: "page",
+          attached: state.attached?.has(tabId) ?? false,
+        }));
       },
       onEvent: event("debugger.onEvent"),
       onDetach: event("debugger.onDetach"),

@@ -68,9 +68,14 @@ export function createConnection({ chrome, bridge, setTimer = setTimeout, now = 
       }
       await bridge.receive(message);
     });
+    const opened = port;
     port.onDisconnect.addListener(() => lost());
     await mark("");
     await bridge.connect();
+    // Hello is on its way; until the port is lost, the bridge is up.
+    if (port === opened && status === "connecting") {
+      status = "connected";
+    }
   };
 
   chrome.alarms.create(ALARM, { periodInMinutes: 1 });

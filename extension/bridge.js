@@ -40,10 +40,13 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
   /** The run being served: its goal and its sites. */
   let run = { goal: "", sites: [] };
 
+  /** The policy file, or `null` when it cannot be read, which refuses. */
+  const policyNow = () => loadPolicy().catch(() => null);
+
   const paused = async () => (await chrome.storage.local.get("paused")).paused === true;
 
   const say = async (type) =>
-    post(protocol.hello({ version, userAgent, paused: await paused(), policy: await loadPolicy() }, type));
+    post(protocol.hello({ version, userAgent, paused: await paused(), policy: await policyNow() }, type));
 
   const targetOf = async (tabId) =>
     (await chrome.debugger.getTargets()).find((t) => t.tabId === tabId && t.type === "page")?.id;
@@ -89,7 +92,7 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
    */
   const checkArrival = (tabId, url) => {
     const check = (checks.get(tabId) ?? Promise.resolve()).then(async () => {
-      if (!held.has(tabId) || !leftAllowedSites(url, await loadPolicy())) {
+      if (!held.has(tabId) || !leftAllowedSites(url, await policyNow())) {
         return;
       }
       if (held.delete(tabId)) {
@@ -171,8 +174,29 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
     }
   };
 
-  /** Answer one request from the run. */
+  /** The address of the history entry a tab would go back to, if any. */
+  const historyUrl = async (request) => {
+    if (request.method !== "Page.navigateToHistoryEntry") {
+      return undefined;
+    }
+    try {
+      const history = await chrome.debugger.sendCommand({ tabId: request.tab }, "Page.getNavigationHistory", {});
+      return history?.entries?.find((entry) => entry.id === request.params?.entryId)?.url;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** Answer one request from the run, always: a failure is a coded refusal. */
   const answer = async (request) => {
+    try {
+      await answerOrThrow(request);
+    } catch (failure) {
+      post(protocol.refused(request.id, failure?.code ? failure : chromeFailure("chrome", failure)));
+    }
+  };
+
+  const answerOrThrow = async (request) => {
     let tab;
     if (request.op === "attach" || request.op === "activate") {
       try {
@@ -197,7 +221,8 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
       }
     }
     const refused = requestRefusal(request, {
-      policy: await loadPolicy(),
+      historyUrl: request.op === "send" ? await historyUrl(request) : undefined,
+      policy: await policyNow(),
       paused: await paused(),
       scripts,
       run: { owned, groups: await groups() },
@@ -239,6 +264,18 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
   return {
     /** The run being served and the tabs it holds, for the popup. */
     state: () => ({ running, goal: run.goal, sites: run.sites, tabs: [...held] }),
+
+    /**
+     * Let go of tabs an earlier service worker left attached: its run's
+     * state went with it, so nothing would ever let go of them.
+     */
+    async forgetEarlierRun() {
+      for (const target of await chrome.debugger.getTargets()) {
+        if (target.attached && target.tabId !== undefined && !held.has(target.tabId)) {
+          await chrome.debugger.detach({ tabId: target.tabId }).catch(() => {});
+        }
+      }
+    },
 
     /** Say hello to the host, on connecting. */
     connect: () => say("hello"),

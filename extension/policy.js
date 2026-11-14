@@ -121,6 +121,35 @@ export function siteAllowed(url, sites) {
   });
 }
 
+/**
+ * What is wrong with a policy file, or `null` when it is in the shape the
+ * install writes: an object whose `sites` is a list of origins and whose
+ * `owner_tabs` is "group" or "never". Anything else is not guessed at.
+ */
+export function policyProblem(policy) {
+  if (policy === null || typeof policy !== "object" || Array.isArray(policy)) {
+    return "it is not a policy";
+  }
+  if (!Array.isArray(policy.sites) || !policy.sites.every((site) => typeof site === "string")) {
+    return "its sites are not a list of origins";
+  }
+  if (policy.owner_tabs !== "group" && policy.owner_tabs !== "never") {
+    return "its owner_tabs is neither group nor never";
+  }
+  return null;
+}
+
+/** A policy file that cannot be used refuses, rather than allowing more. */
+function brokenPolicyRefusal(policy) {
+  const why = policyProblem(policy);
+  return why === null
+    ? null
+    : refusal(
+        "refused_site",
+        `jev-pilot's policy.json cannot be used (${why}): set it with \`sudo jev-pilot extension policy\`, or run the install again`,
+      );
+}
+
 /** A site off the allowed list is refused, naming the command that adds it. */
 export function siteRefusal(url, policy) {
   if (siteAllowed(url, policy.sites ?? [])) {
@@ -184,7 +213,17 @@ function first(...checks) {
  * go of one are always allowed.
  */
 export function requestRefusal(request, context) {
-  const { policy, paused, scripts, run, tab } = context;
+  const { policy, paused, scripts, run, tab, historyUrl } = context;
+  if (!REQUESTS.includes(request.op)) {
+    return refusal("refused_method", `${String(request.op)} is not a request jev-pilot makes`);
+  }
+  if (request.op === "tabs" || request.op === "detach") {
+    return null;
+  }
+  const broken = brokenPolicyRefusal(policy);
+  if (broken) {
+    return broken;
+  }
   switch (request.op) {
     case "create":
       return first(
@@ -202,11 +241,16 @@ export function requestRefusal(request, context) {
     case "activate":
       return tabRefusal(tab, run, policy);
     case "send": {
-      const navigating = request.method === "Page.navigate" ? request.params?.url : undefined;
+      const back = request.method === "Page.navigateToHistoryEntry";
+      const navigating = request.method === "Page.navigate" ? request.params?.url : back ? historyUrl : undefined;
       return first(
         () => pausedRefusal(paused),
         () => methodRefusal(request.method),
         () => scriptRefusal(request.method, request.params, scripts),
+        () =>
+          back && typeof historyUrl !== "string"
+            ? refusal("refused_site", "the page to go back to is not in the tab's history")
+            : null,
         () => (navigating === undefined ? null : pageRefusal(navigating)),
         () => (navigating === undefined ? null : siteRefusal(navigating, policy)),
       );
@@ -216,7 +260,10 @@ export function requestRefusal(request, context) {
   }
 }
 
+/** The requests a run makes. */
+const REQUESTS = ["tabs", "create", "attach", "detach", "activate", "send"];
+
 /** Whether a held tab that has arrived at `url` has left the allowed sites. */
 export function leftAllowedSites(url, policy) {
-  return !siteAllowed(url, policy.sites ?? []);
+  return policyProblem(policy) !== null || !siteAllowed(url, policy.sites);
 }

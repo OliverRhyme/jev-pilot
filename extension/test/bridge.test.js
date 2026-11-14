@@ -258,3 +258,64 @@ test("a committed navigation off the sites lets go of the tab, whatever DevTools
     { type: "detached", tab: 7, reason: "left_allowed_sites", url: "https://elsewhere.test/x" },
   ]);
 });
+
+test("every request is answered, even when the policy file cannot be read", async () => {
+  const { fake, bridge, posted } = bridged({
+    loadPolicy: async () => {
+      throw new SyntaxError("Unexpected token");
+    },
+  });
+  await bridge.receive(started);
+  await bridge.receive({ type: "request", id: 5, op: "create", url: "https://github.com/" });
+  await bridge.receive({ type: "request", id: 6, op: "close" });
+  await settle();
+  assert.deepEqual(
+    posted.map((m) => [m.id, m.error?.code]),
+    [
+      [5, "refused_site"],
+      [6, "refused_method"],
+    ],
+  );
+  assert.equal(fake.calls.some(([call]) => call === "tabs.create"), false);
+});
+
+test("going back looks up the page it goes back to, and refuses one off the sites", async () => {
+  const { fake, bridge, posted } = bridged({ policy: { sites: ["https://github.com"], owner_tabs: "group" } });
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  const history = {
+    currentIndex: 1,
+    entries: [
+      { id: 3, url: "https://elsewhere.test/" },
+      { id: 4, url: "https://github.com/" },
+    ],
+  };
+  fake.when("debugger.sendCommand", () => history);
+  posted.length = 0;
+  await bridge.receive({
+    type: "request",
+    id: 8,
+    op: "send",
+    tab: 7,
+    method: "Page.navigateToHistoryEntry",
+    params: { entryId: 3 },
+  });
+  await settle();
+  assert.equal(posted.at(-1).error.code, "refused_site");
+  assert.deepEqual(
+    fake.calls.filter(([call]) => call === "debugger.sendCommand").map(([, , method]) => method),
+    ["Page.getNavigationHistory"],
+  );
+});
+
+test("on starting, the extension lets go of tabs an earlier worker left attached", async () => {
+  const { fake, bridge } = bridged();
+  fake.state.targets.set(7, "T7");
+  fake.state.targets.set(8, "T8");
+  fake.state.attached = new Set([7]);
+  await bridge.forgetEarlierRun();
+  assert.deepEqual(
+    fake.calls.filter(([call]) => call === "debugger.detach").map(([, d]) => d.tabId),
+    [7],
+  );
+});

@@ -102,11 +102,17 @@ test("only well-formed messages from the host are read", () => {
     "release",
     { type: "hello" },
     { type: "request", op: "tabs" },
-    { type: "request", id: 1, op: "close" },
     { type: "request", id: 1, op: "send", tab: 7 },
     { type: "request", id: 1, op: "attach" },
     { type: "request", id: 1, op: "create" },
   ]) {
     assert.equal(protocol.read(bad), null, JSON.stringify(bad));
   }
+});
+
+test("a request of a kind the extension does not know is read, so that it can be refused", () => {
+  for (const op of ["close", "constructor", "__proto__"]) {
+    assert.deepEqual(protocol.read({ type: "request", id: 1, op }), { type: "request", id: 1, op }, op);
+  }
+  assert.equal(protocol.read({ type: "request", op: "close" }), null, "with no id there is nothing to answer");
 });

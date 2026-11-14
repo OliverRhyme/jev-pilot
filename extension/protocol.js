@@ -75,8 +75,9 @@ export function detached(tab, reason, url) {
 
 /**
  * A message from the host, when it is one the extension reads: a run's
- * request with its id and every field its operation needs, or the host's own
- * `run_started`, `release` or `reload`. Anything else is `null`.
+ * request with its id and every field its operation needs (or of a kind not
+ * listed, to be refused), or the host's own `run_started`, `release` or
+ * `reload`. Anything else is `null`.
  */
 export function read(message) {
   if (message === null || typeof message !== "object") {
@@ -88,11 +89,15 @@ export function read(message) {
     case "run_started":
       return message;
     case "request": {
-      const needs = OPERATIONS[message.op];
-      if (!Number.isInteger(message.id) || needs === undefined) {
+      if (!Number.isInteger(message.id)) {
         return null;
       }
-      return needs.every((field) => message[field] !== undefined) ? message : null;
+      // A request of a kind not listed is read as it is, for the policy to
+      // refuse: it has an id, so it gets an answer.
+      if (typeof message.op !== "string" || !Object.hasOwn(OPERATIONS, message.op)) {
+        return message;
+      }
+      return OPERATIONS[message.op].every((field) => message[field] !== undefined) ? message : null;
     }
     default:
       return null;

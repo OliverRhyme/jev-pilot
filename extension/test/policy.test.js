@@ -242,3 +242,51 @@ test("a held tab that arrives off the allowed sites is to be let go of", () => {
   assert.equal(policy.leftAllowedSites("about:blank", listed), false);
   assert.equal(policy.leftAllowedSites("https://elsewhere.test/", { sites: [], owner_tabs: "group" }), false);
 });
+
+// --- the policy file's shape ---
+
+test("a policy file not in the install's shape refuses everything that drives a page", () => {
+  for (const broken of [
+    null,
+    "sites",
+    [],
+    {},
+    { owner_tabs: "group" },
+    { sites: null, owner_tabs: "group" },
+    { sites: "https://example.test", owner_tabs: "group" },
+    { sites: [7], owner_tabs: "group" },
+    { sites: [] },
+    { sites: [], owner_tabs: "always" },
+  ]) {
+    const context = ctx({ policy: broken, tab: { id: 7, groupId: 31, url: "https://example.test/" } });
+    for (const request of [
+      { op: "create", url: "https://example.test/" },
+      { op: "attach", tab: 7 },
+      { op: "activate", tab: 7 },
+      { op: "send", tab: 7, method: "Page.enable" },
+    ]) {
+      const refused = policy.requestRefusal(request, context);
+      assert.equal(refused?.code, "refused_site", `${JSON.stringify(broken)} ${request.op}`);
+      assert.match(refused.message, /run the install again/);
+    }
+    for (const request of [{ op: "tabs" }, { op: "detach", tab: 7 }]) {
+      assert.equal(codeOf(request, context), null, "listing tabs and letting go of one still work");
+    }
+    assert.equal(policy.leftAllowedSites("https://example.test/", broken), true, JSON.stringify(broken));
+  }
+  assert.equal(policy.policyProblem({ sites: [], owner_tabs: "never", install: "protected" }), null);
+});
+
+test("a request of a kind the run does not make is refused", () => {
+  for (const op of ["close", "constructor", "toString", undefined]) {
+    assert.equal(codeOf({ op, tab: 7 }, ctx()), "refused_method", String(op));
+  }
+});
+
+test("going back is checked against the site of the page it goes back to", () => {
+  const back = { op: "send", tab: 7, method: "Page.navigateToHistoryEntry", params: { entryId: 3 } };
+  assert.equal(codeOf(back, ctx({ historyUrl: "https://example.test/before" })), null);
+  assert.equal(codeOf(back, ctx({ historyUrl: "https://elsewhere.test/" })), "refused_site");
+  assert.equal(codeOf(back, ctx({ historyUrl: "chrome://settings/" })), "refused_page");
+  assert.equal(codeOf(back, ctx()), "refused_site", "an entry that cannot be found is refused");
+});
