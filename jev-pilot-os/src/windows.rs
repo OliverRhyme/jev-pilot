@@ -35,7 +35,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY, RegCloseKey, RegOpenKeyExW,
+    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY, RegCloseKey,
+    RegOpenKeyExW,
 };
 use windows_sys::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_INFO_CLASS,
@@ -395,14 +396,24 @@ pub fn owner_sid(path: &Path) -> io::Result<String> {
     sid
 }
 
-/// Whether the key `HKLM\<key>` exists, in the 64-bit view. Only a key
-/// Windows says is not found is absent; any other failure is an error.
+/// Whether the key `HKLM\<key>` exists in either registry view, 64-bit or
+/// 32-bit: Chrome looks in both. Only a key Windows says is not found is
+/// absent; any other failure is an error.
 ///
 /// # Errors
 ///
 /// When the key cannot be told to exist or not.
-#[allow(unsafe_code)]
 pub fn machine_key_exists(key: &str) -> io::Result<bool> {
+    for view in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+        if machine_key_exists_in(key, view)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[allow(unsafe_code)]
+fn machine_key_exists_in(key: &str, view: u32) -> io::Result<bool> {
     let wide: Vec<u16> = key.encode_utf16().chain(iter::once(0)).collect();
     let mut handle: HKEY = ptr::null_mut();
     // SAFETY: `wide` is a NUL-terminated key name that outlives the call;
@@ -412,7 +423,7 @@ pub fn machine_key_exists(key: &str) -> io::Result<bool> {
             HKEY_LOCAL_MACHINE,
             wide.as_ptr(),
             0,
-            KEY_READ | KEY_WOW64_64KEY,
+            KEY_READ | view,
             &raw mut handle,
         )
     };
