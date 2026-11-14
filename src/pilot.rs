@@ -1224,6 +1224,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         let mut lately: Vec<String> = Vec::new();
         // How many actions in a row have left the screen exactly as it was.
         let mut ineffective: u32 = 0;
+        // Whether the screen has already been looked at again, before asking,
+        // since the last action that seemed to change nothing.
+        let mut looked_again = false;
         // How many of `self.keys` have been pressed on the keypad now showing.
         let mut entered: usize = 0;
         // Whether the last action was seen to move the screen, so this step
@@ -1595,6 +1598,47 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             }
 
             let moved_before = core::mem::take(&mut just_moved);
+            // An action that seemed to change nothing may only be slow. A
+            // link that starts a network call leaves the old page up, quiet
+            // from just after the click, until the new one arrives, so the
+            // watch after acting can call it dead while it is on its way.
+            // Before asking about what may be the old screen, look again once,
+            // as patiently as a second try of the action would.
+            //
+            // Measured on GitHub: the Issues tab was tapped, judged to have
+            // done nothing in 627ms, and the question asked about the old
+            // page waited five minutes for an answer.
+            let arrived_late = matches!(decided, Err(Indecision::TooUncertain { .. }))
+                && ineffective > 0
+                && !core::mem::replace(&mut looked_again, true)
+                && self.settled_on_a_new_screen(snapshot.fingerprint(), ineffective + 1)?;
+            if arrived_late {
+                ineffective = 0;
+                looked_again = false;
+                just_moved = true;
+                previous = Some(format!(
+                    "{} — the screen changed after a wait",
+                    last_did.as_deref().unwrap_or("Acted")
+                ));
+                self.report(
+                    index,
+                    &snapshot,
+                    &answers,
+                    Some(&Act::Wait),
+                    Went {
+                        repeating: repeated,
+                        acted: false,
+                    },
+                    Spent {
+                        read_ms,
+                        step_ms: elapsed_ms(began),
+                        waited_ms: waited.get(),
+                        judged_ms,
+                        settled_ms,
+                    },
+                );
+                continue;
+            }
             let decision = match decided {
                 Ok(decision) => decision,
                 // A screen on its way from one thing to the next is read as it
@@ -1936,6 +1980,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     }
                     if moved {
                         ineffective = 0;
+                        looked_again = false;
                         just_moved = true;
                     } else {
                         // It never moved. That is worth saying: a run that
