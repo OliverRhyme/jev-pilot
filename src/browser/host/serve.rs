@@ -95,15 +95,18 @@ pub fn serve(
     stdin: impl Read + Send + 'static,
     mut stdout: impl Write,
 ) -> io::Result<()> {
-    let log = config.audit_dir.join("audit.log");
-    if !log.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "the audit log {} is missing: run the install again",
-                log.display()
-            ),
-        ));
+    // The install makes these, and the host never does.
+    for name in ["audit.log", "audit.lock", "audit.skipped"] {
+        let file = config.audit_dir.join(name);
+        if !file.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "the audit log {} is missing: run the install again",
+                    file.display()
+                ),
+            ));
+        }
     }
     if another_serves(&config) {
         send_to_chrome(&mut stdout, &Message::Elsewhere)?;

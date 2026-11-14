@@ -1285,6 +1285,52 @@ mod serving {
         });
     }
 
+    /// Nor one without the lock or the count of skipped starts the install
+    /// makes beside the log: each is named, as the log is.
+    #[test]
+    fn a_host_without_its_audit_lock_or_count_does_not_serve() {
+        super::bounded(
+            "a_host_without_its_audit_lock_or_count_does_not_serve",
+            || {
+                for missing in ["audit.lock", "audit.skipped"] {
+                    let place = place();
+                    let (stdin, _writer) = std::io::pipe().unwrap();
+                    let audit = std::env::temp_dir().join(format!(
+                        "jev-pilot-without-{missing}-{}",
+                        std::process::id()
+                    ));
+                    let _ = std::fs::remove_dir_all(&audit);
+                    super::audit_files(&audit);
+                    std::fs::remove_file(audit.join(missing)).unwrap();
+                    let config = Serve {
+                        place: place.clone(),
+                        expected: expected(),
+                        check: Arc::new(Vouched),
+                        audit_dir: audit.clone(),
+                        version: "0.4.0".into(),
+                        extension_on_disk: None,
+                        installed_version: Box::new(|| None),
+                        diagnostics: None,
+                        echo_wait: Duration::from_millis(300),
+                    };
+                    let error = serve(config, stdin, Out::default()).expect_err("refused");
+                    assert_eq!(
+                        error.to_string(),
+                        format!(
+                            "the audit log {} is missing: run the install again",
+                            audit.join(missing).display()
+                        )
+                    );
+                    assert!(
+                        Stream::connect(place.name().unwrap()).is_err(),
+                        "nothing listens"
+                    );
+                    let _ = std::fs::remove_dir_all(&audit);
+                }
+            },
+        );
+    }
+
     /// A run that stops reading does not hold the host up: after a while
     /// it is taken as gone, and the host still leaves with Chrome.
     #[test]
