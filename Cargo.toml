@@ -51,6 +51,10 @@ widestring = { version = "1.2.1", optional = true }
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
 
+# The Windows calls, tested against files the system ships.
+[target.'cfg(windows)'.dev-dependencies]
+jev-pilot-os = { path = "jev-pilot-os" }
+
 [features]
 default = ["android", "ios", "http"]
 # UIAutomator hierarchy parsing and the Android system gestures.

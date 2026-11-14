@@ -898,3 +898,21 @@ fn the_parent_is_this_processs_parent() {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert!(parent.exe.is_some(), "{parent:?}");
 }
+
+/// Authenticode names the signer of a signed image: PowerShell 7, signed
+/// by Microsoft, where the system has it (GitHub's Windows runners do).
+#[cfg(windows)]
+#[test]
+fn authenticode_names_the_signer_of_a_signed_image() {
+    let pwsh = std::path::Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe");
+    if !pwsh.exists() {
+        eprintln!("no PowerShell 7 here to check a signature against");
+        return;
+    }
+    let signer = jev_pilot_os::authenticode_signer(pwsh).expect("pwsh.exe is signed");
+    assert!(
+        signer.subject.contains("O=Microsoft Corporation"),
+        "{}",
+        signer.subject
+    );
+}
