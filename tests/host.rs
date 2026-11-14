@@ -82,6 +82,46 @@ fn a_verified_run_takes_the_bridge_and_the_extension_is_told() {
     );
 }
 
+/// What the extension is told of a run always fits in one message to
+/// Chrome, whatever the length of its goal and sites.
+#[test]
+fn a_run_too_long_to_tell_the_extension_whole_is_told_in_part() {
+    let mut relay = connected();
+    let huge = Started {
+        pid: 4242,
+        goal: "g".repeat(2 << 20),
+        sites: vec![format!("https://{}.test", "s".repeat(4096)); 10_000],
+        parent_pid: None,
+        parent_exe: None,
+    };
+    let out = relay.handle(Input::RunVerified {
+        run: FIRST,
+        started: huge,
+    });
+    let told = out
+        .iter()
+        .find_map(|o| match o {
+            Output::ToExtension(m @ Message::RunStarted { .. }) => Some(m),
+            _ => None,
+        })
+        .expect("the extension is told");
+    let text = serde_json::to_vec(told).expect("JSON");
+    assert!(
+        text.len() < jev_pilot::browser::bridge::TO_CHROME_LIMIT,
+        "{} bytes",
+        text.len()
+    );
+    let Message::RunStarted { goal, sites, .. } = told else {
+        unreachable!()
+    };
+    assert!(
+        goal.starts_with("ggg") && goal.ends_with('…'),
+        "{}",
+        &goal[..10]
+    );
+    assert!(sites.len() < 10_000);
+}
+
 #[test]
 fn a_run_before_the_extension_has_connected_is_told_it_is_absent() {
     let mut relay = relay();
@@ -514,6 +554,36 @@ fn each_audit_event_is_one_line_of_json() {
     );
 }
 
+/// Each start of the host is audited with the program that started it, and
+/// whether that was a browser.
+#[test]
+fn the_hosts_start_is_audited_with_its_parent() {
+    let at = "2026-11-15T09:30:00Z";
+    let line = |audit: Audit| -> serde_json::Value {
+        serde_json::from_str(&audit.line(at)).expect("JSON")
+    };
+    assert_eq!(
+        line(Audit::HostStarted {
+            parent_pid: Some(1234),
+            parent_exe: Some("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into()),
+            refused: None,
+        }),
+        json!({"time": at, "event": "host_started", "parent_pid": 1234,
+               "parent_exe": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+               "browser": "accepted"})
+    );
+    assert_eq!(
+        line(Audit::HostStarted {
+            parent_pid: Some(77),
+            parent_exe: Some("/usr/bin/python3".into()),
+            refused: Some("it is not Chrome signed by Google".into()),
+        }),
+        json!({"time": at, "event": "host_started", "parent_pid": 77,
+               "parent_exe": "/usr/bin/python3", "browser": "refused",
+               "why": "it is not Chrome signed by Google"})
+    );
+}
+
 #[test]
 fn audit_times_are_utc_to_the_second() {
     use jev_pilot::browser::host::utc;
@@ -543,7 +613,7 @@ mod channel {
     };
     use std::path::{Path, PathBuf};
 
-    const HOME: &str = "/home/oliver";
+    const HOME: &str = "/home/owner";
 
     fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |name| {
@@ -558,10 +628,10 @@ mod channel {
         assert_eq!(
             socket_dir(
                 Os::MacOs,
-                Path::new("/Users/oliver"),
+                Path::new("/Users/owner"),
                 &env(&[("TMPDIR", "/var/x")])
             ),
-            PathBuf::from("/Users/oliver/Library/Application Support/jev-pilot/run")
+            PathBuf::from("/Users/owner/Library/Application Support/jev-pilot/run")
         );
         assert_eq!(
             socket_dir(
@@ -573,7 +643,7 @@ mod channel {
         );
         assert_eq!(
             socket_dir(Os::Linux, Path::new(HOME), &env(&[])),
-            PathBuf::from("/home/oliver/.local/state/jev-pilot/run")
+            PathBuf::from("/home/owner/.local/state/jev-pilot/run")
         );
         // A relative runtime directory is not one to trust.
         assert_eq!(
@@ -582,7 +652,7 @@ mod channel {
                 Path::new(HOME),
                 &env(&[("XDG_RUNTIME_DIR", "run")])
             ),
-            PathBuf::from("/home/oliver/.local/state/jev-pilot/run")
+            PathBuf::from("/home/owner/.local/state/jev-pilot/run")
         );
         assert_eq!(
             socket_path(Path::new("/run/user/1000/jev-pilot")),
@@ -652,16 +722,17 @@ mod channel {
         assert_eq!(pipe_name(SID), format!(r"\\.\pipe\jev-pilot-{SID}"));
         // Deny network and anonymous logons first (an access check stops at
         // the first ACE that decides), then all to SYSTEM, and to the user
-        // read and write without FILE_CREATE_PIPE_INSTANCE (0x4), so no
-        // program of the user's can add an instance of its own.
+        // read and write. Write includes FILE_CREATE_PIPE_INSTANCE (0x4):
+        // the host makes a new instance for each run, which needs it. A
+        // program of the user's may then add an instance too, which is why
+        // each run checks the host before it sends anything.
         assert_eq!(
             pipe_sddl(SID),
-            format!("D:P(D;;GA;;;NU)(D;;GA;;;AN)(A;;GA;;;SY)(A;;0x12019b;;;{SID})")
+            format!("D:P(D;;GA;;;NU)(D;;GA;;;AN)(A;;GA;;;SY)(A;;0x12019f;;;{SID})")
         );
-        let mask = 0x0012_019b_u32;
-        assert_eq!(mask & 0x4, 0, "no FILE_CREATE_PIPE_INSTANCE");
+        let mask = 0x0012_019f_u32;
         assert_eq!(mask & 0x0012_0089, 0x0012_0089, "FILE_GENERIC_READ");
-        assert_eq!(mask & 0x2, 0x2, "FILE_WRITE_DATA");
+        assert_eq!(mask & 0x0012_0116, 0x0012_0116, "FILE_GENERIC_WRITE");
     }
 }
 
@@ -680,6 +751,7 @@ mod run_side {
     /// A place of this test's own on the local channel.
     pub(crate) fn place() -> Place {
         static NEXT: AtomicU32 = AtomicU32::new(0);
+        super::watchdog();
         let unique = format!(
             "jev-pilot-host-{}-{}",
             std::process::id(),
@@ -852,6 +924,44 @@ mod run_side {
         );
     }
 
+    /// Facts that pass, but name another process the second time they are
+    /// gathered: on macOS, whoever used the socket last.
+    pub(crate) struct Changing(pub(crate) std::sync::atomic::AtomicU32);
+
+    impl PeerCheck for Changing {
+        fn facts(&self, stream: &Stream, expected: &Expected) -> Facts {
+            let seen = self.0.fetch_add(1, Ordering::SeqCst);
+            let mut facts = Vouched.facts(stream, expected);
+            facts.token = Some([seen; 8]);
+            facts
+        }
+    }
+
+    /// The run checks the host again after reading its nonce: a host that
+    /// handed the socket to another process by then is sent nothing.
+    #[test]
+    fn a_run_checks_the_host_again_before_answering_its_nonce() {
+        let place = place();
+        let listener = listen(&place);
+        let host = std::thread::spawn(move || {
+            let mut run = listener.accept().expect("accepts");
+            run.write_all(&frame(&json!({"type": "nonce", "nonce": "cd".repeat(32)})))
+                .expect("writes");
+            let mut heard = Vec::new();
+            let _ = run.read_to_end(&mut heard);
+            heard
+        });
+        let check = Changing(AtomicU32::new(0));
+        let error = connect_run(&place, &expected(), &check, "x", &[], &Parent::default())
+            .expect_err("refused");
+        assert_eq!(
+            error.to_string(),
+            "something other than the installed jev-pilot answered on the bridge (audit token: \
+             not the expected value); nothing was sent"
+        );
+        assert_eq!(host.join().expect("the host thread"), Vec::<u8>::new());
+    }
+
     /// No host listening is the extension not running.
     #[test]
     fn no_host_is_chrome_not_running_with_the_extension() {
@@ -937,6 +1047,7 @@ mod serving {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&audit);
+        super::audit_files(&audit);
         let config = Serve {
             place: place.clone(),
             expected: expected(),
@@ -945,6 +1056,7 @@ mod serving {
             version: "0.4.0".into(),
             extension_on_disk: Some("0.4.0".into()),
             installed_version: Box::new(|| Some("0.4.0".into())),
+            diagnostics: None,
         };
         let stdout = out.clone();
         let done = std::thread::spawn(move || serve(config, stdin, stdout));
@@ -1054,6 +1166,181 @@ mod serving {
         first.done.join().unwrap().expect("ends cleanly");
     }
 
+    /// A raw connection to the host at `place`, once it is listening.
+    fn raw(place: &Place) -> Stream {
+        let started = Instant::now();
+        loop {
+            if let Ok(stream) = Stream::connect(place.name().unwrap()) {
+                return stream;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the host listens"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn first_frame(stream: &mut Stream) -> serde_json::Value {
+        let frame = bridge::decode(stream, ByteOrder::Little)
+            .expect("reads")
+            .expect("a frame");
+        serde_json::from_slice(&frame).expect("JSON")
+    }
+
+    fn audit_events(audit: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(audit.join("audit.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("JSON"))
+            .collect()
+    }
+
+    /// A host whose audit log is missing does not serve.
+    #[test]
+    fn a_host_without_its_audit_log_does_not_serve() {
+        let place = place();
+        let (stdin, _writer) = std::io::pipe().unwrap();
+        let audit = std::env::temp_dir().join(format!("jev-pilot-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&audit);
+        let config = Serve {
+            place: place.clone(),
+            expected: expected(),
+            check: Arc::new(Vouched),
+            audit_dir: audit.clone(),
+            version: "0.4.0".into(),
+            extension_on_disk: None,
+            installed_version: Box::new(|| None),
+            diagnostics: None,
+        };
+        let error = serve(config, stdin, Out::default()).expect_err("refused");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the audit log {} is missing: run the install again",
+                audit.join("audit.log").display()
+            )
+        );
+        assert!(
+            Stream::connect(place.name().unwrap()).is_err(),
+            "nothing listens"
+        );
+    }
+
+    /// A run that stops reading does not hold the host up: after a while
+    /// it is taken as gone, and the host still leaves with Chrome.
+    #[test]
+    fn a_run_that_stops_reading_does_not_hold_the_host_up() {
+        let place = place();
+        let mut host = host_at(&place, Arc::new(Vouched));
+        let run = run_at(&place, "x").expect("the run connects");
+        wait_for("run_started", || {
+            host.out
+                .messages()
+                .iter()
+                .any(|m| m["type"] == "run_started")
+        });
+        let mut stdin = host.stdin.take().expect("stdin");
+        let page = json!({"type": "cdp", "tab": 7, "method": "Page.x",
+                          "params": {"pad": "p".repeat(256 << 10)}});
+        let started = Instant::now();
+        for _ in 0..64 {
+            stdin
+                .write_all(&frame_native(&page))
+                .expect("the host reads");
+        }
+        drop(stdin);
+        host.done.join().unwrap().expect("ends cleanly");
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(host.out.messages().iter().any(|m| m["type"] == "release"));
+        drop(run);
+    }
+
+    /// The host checks a connection before it reads anything from it: one
+    /// that fails is told so where a nonce would have been.
+    #[test]
+    fn the_host_checks_a_run_before_reading_from_it() {
+        let first = place();
+        let mut refusing = host_at(&first, Arc::new(Unknown));
+        let mut stream = raw(&first);
+        assert_eq!(first_frame(&mut stream)["type"], "refused");
+        drop(stream);
+        drop(refusing.stdin.take());
+        refusing.done.join().unwrap().expect("ends cleanly");
+
+        let other = place();
+        let mut passing = host_at(&other, Arc::new(Vouched));
+        let mut stream = raw(&other);
+        assert_eq!(first_frame(&mut stream)["type"], "nonce");
+        drop(stream);
+        drop(passing.stdin.take());
+        passing.done.join().unwrap().expect("ends cleanly");
+    }
+
+    /// An echo of another nonce is refused, and audited.
+    #[test]
+    fn a_wrong_echo_is_refused_and_audited() {
+        let place = place();
+        let mut host = host_at(&place, Arc::new(Vouched));
+        let mut stream = raw(&place);
+        assert_eq!(first_frame(&mut stream)["type"], "nonce");
+        let echo = json!({"type": "echo", "nonce": "00".repeat(32), "goal": "x", "sites": []});
+        stream
+            .write_all(&bridge::encode(
+                echo.to_string().as_bytes(),
+                ByteOrder::Little,
+            ))
+            .expect("writes");
+        assert_eq!(
+            first_frame(&mut stream),
+            json!({"type": "refused", "check": "nonce: not echoed"})
+        );
+        drop(stream);
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("ends cleanly");
+        let events = audit_events(&host.audit);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["event"], "refused");
+        assert_eq!(events[0]["check"], "nonce: not echoed");
+    }
+
+    /// The host checks the run again after its echo: a run whose facts have
+    /// changed by then (on macOS, another process used the socket) is
+    /// refused, and audited.
+    #[test]
+    fn a_run_whose_facts_change_after_its_echo_is_refused() {
+        use super::run_side::Changing;
+        let place = place();
+        let mut host = host_at(
+            &place,
+            Arc::new(Changing(std::sync::atomic::AtomicU32::new(0))),
+        );
+        wait_for("the host", || {
+            Stream::connect(place.name().unwrap()).is_ok()
+        });
+        let error = run_at(&place, "x").err().expect("refused");
+        assert!(
+            error
+                .to_string()
+                .contains("audit token: not the expected value"),
+            "{error}"
+        );
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("ends cleanly");
+        let events = audit_events(&host.audit);
+        assert!(
+            events
+                .iter()
+                .any(|e| e["event"] == "refused"
+                    && e["check"] == "audit token: not the expected value"),
+            "{events:?}"
+        );
+    }
+
     /// `status` asks whether a verified host answers, without taking the
     /// bridge or telling the extension anything.
     #[test]
@@ -1093,6 +1380,7 @@ fn the_audit_log_is_rotated_by_size() {
     use jev_pilot::browser::host::append_audit;
     let dir = std::env::temp_dir().join(format!("jev-pilot-rotate-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    audit_files(&dir);
     // Each line is 7 bytes, so the log reaches the limit every two lines.
     for n in 0..10 {
         append_audit(&dir, &format!("line {n}\n"), 10).expect("appends");
@@ -1103,5 +1391,84 @@ fn the_audit_log_is_rotated_by_size() {
     assert_eq!(read("audit.log.2").as_deref(), Some("line 4\nline 5\n"));
     assert_eq!(read("audit.log.3").as_deref(), Some("line 2\nline 3\n"));
     assert_eq!(read("audit.log.4"), None, "the oldest is dropped");
+    // Rotated by copying within the files the install made, so they keep
+    // their owner and mode.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for name in ["audit.log", "audit.log.1", "audit.log.2", "audit.log.3"] {
+            let mode = std::fs::metadata(dir.join(name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o664, "{name}");
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The host's diagnostics go to a file beside the socket that never grows
+/// past its bound: when full, it starts again.
+#[test]
+fn the_diagnostics_file_is_bounded() {
+    use jev_pilot::browser::host::Diagnostics;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-diag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("host.log");
+    let diagnostics = Diagnostics::new(file.clone(), 100);
+    for n in 0..50 {
+        diagnostics.note(&format!("accepting a run failed: attempt {n}"));
+    }
+    let text = std::fs::read_to_string(&file).expect("written");
+    assert!(text.len() <= 100 + 80, "{} bytes", text.len());
+    assert!(text.contains("attempt 49"), "{text}");
+    assert!(
+        text.lines()
+            .all(|l| l.ends_with(|c: char| c.is_ascii_digit()))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The audit log's files as an install makes them: all four, mode 0664.
+fn audit_files(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    for name in ["audit.log", "audit.log.1", "audit.log.2", "audit.log.3"] {
+        std::fs::write(dir.join(name), "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o664))
+                .unwrap();
+        }
+    }
+}
+
+/// The host never makes the audit log: one it would make would be the
+/// owner's, and the owner could then rewrite it. A missing log is refused.
+#[test]
+fn a_missing_audit_log_is_refused_not_made() {
+    use jev_pilot::browser::host::append_audit;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-noaudit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(append_audit(&dir, "line\n", 10).is_err());
+    assert!(!dir.exists(), "the directory is not made");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(append_audit(&dir, "line\n", 10).is_err());
+    assert!(!dir.join("audit.log").exists(), "the log is not made");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Ends these tests, failing, if they run past two minutes: a socket or
+/// pipe that never answers fails the run instead of hanging it. They take
+/// about a second.
+fn watchdog() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(120));
+            eprintln!("the host tests ran past two minutes: a socket or pipe is stuck");
+            std::process::exit(101);
+        });
+    });
 }

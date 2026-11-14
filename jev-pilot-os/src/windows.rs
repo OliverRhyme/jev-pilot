@@ -22,13 +22,25 @@ use windows_sys::Win32::Security::WinTrust::{
     WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
+    GetTokenInformation, LookupAccountSidW, PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
+    TokenElevation, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
-use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+use windows_sys::Win32::System::Com::CoTaskMemFree;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
+use windows_sys::Win32::System::RemoteDesktop::{
+    ProcessIdToSessionId, WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_INFO_CLASS,
+    WTSDomainName, WTSFreeMemory, WTSQuerySessionInformationW, WTSUserName,
+};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows_sys::Win32::UI::Shell::{
+    FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_System,
+    SHGetKnownFolderPath,
 };
 
 /// Another process, opened only to ask about it.
@@ -181,6 +193,54 @@ pub fn final_path(file: &File) -> io::Result<PathBuf> {
     }
 }
 
+/// A folder Windows keeps for the whole machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownFolder {
+    /// Program Files.
+    ProgramFiles,
+    /// Program Files (x86).
+    ProgramFilesX86,
+    /// ProgramData.
+    ProgramData,
+    /// System32.
+    System,
+}
+
+/// Where `folder` is, as the system says, not as the environment says: a
+/// process inherits its environment from whoever started it, and a program
+/// running as the user can change the user's.
+///
+/// # Errors
+///
+/// When Windows cannot say.
+#[allow(unsafe_code)]
+pub fn known_folder(folder: KnownFolder) -> io::Result<PathBuf> {
+    let id = match folder {
+        KnownFolder::ProgramFiles => FOLDERID_ProgramFiles,
+        KnownFolder::ProgramFilesX86 => FOLDERID_ProgramFilesX86,
+        KnownFolder::ProgramData => FOLDERID_ProgramData,
+        KnownFolder::System => FOLDERID_System,
+    };
+    let mut path: *mut u16 = ptr::null_mut();
+    // SAFETY: `id` is a valid GUID that outlives the call; a null token
+    // asks for the folder as this process sees it; `path` is a valid place
+    // for the pointer to the string the call allocates.
+    let status = unsafe { SHGetKnownFolderPath(&raw const id, 0, ptr::null_mut(), &raw mut path) };
+    let result = if status == 0 {
+        // SAFETY: the call succeeded, so `path` is a NUL-terminated wide
+        // string that stays valid until it is freed below.
+        let wide = unsafe { nul_terminated(path) };
+        Ok(PathBuf::from(OsString::from_wide(wide)))
+    } else {
+        Err(io::Error::from_raw_os_error(status))
+    };
+    // SAFETY: the string was allocated by SHGetKnownFolderPath, which says
+    // to free it with CoTaskMemFree whether it succeeded or not; it is not
+    // used after this.
+    unsafe { CoTaskMemFree(path.cast()) };
+    result
+}
+
 /// The string form of the SID of the user this process runs as, for a named
 /// pipe's security descriptor and for comparing with a peer's.
 ///
@@ -249,8 +309,130 @@ pub fn is_elevated() -> io::Result<bool> {
     Ok(elevation.TokenIsElevated != 0)
 }
 
+/// The process id of the process that started process `pid`, as Windows
+/// recorded it. The id may since have been given to a newer process: a
+/// caller compares creation times ([`Process::created`]) to tell.
+///
+/// # Errors
+///
+/// When there is no such process, or no snapshot can be taken.
 #[allow(unsafe_code)]
+pub fn parent_process_id(pid: u32) -> io::Result<u32> {
+    // SAFETY: CreateToolhelp32Snapshot takes two integers and returns a new
+    // handle, or INVALID_HANDLE_VALUE on failure.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `snapshot` is a valid handle that nothing else owns.
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: u32::try_from(size_of::<PROCESSENTRY32W>()).map_err(io::Error::other)?,
+        ..PROCESSENTRY32W::default()
+    };
+    // SAFETY: `snapshot` is a process snapshot; `entry` is a
+    // PROCESSENTRY32W with its size set, as the call requires.
+    let mut found = unsafe { Process32FirstW(snapshot.as_raw_handle(), &raw mut entry) };
+    while found != 0 {
+        if entry.th32ProcessID == pid {
+            return Ok(entry.th32ParentProcessID);
+        }
+        // SAFETY: as above.
+        found = unsafe { Process32NextW(snapshot.as_raw_handle(), &raw mut entry) };
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("no process {pid}"),
+    ))
+}
+
+/// The account signed in to this process's session, as `DOMAIN\name`.
+///
+/// # Errors
+///
+/// When Windows cannot say.
+pub fn session_account() -> io::Result<String> {
+    let name = session_text(WTSUserName)?;
+    let domain = session_text(WTSDomainName)?;
+    Ok(format!(r"{domain}\{name}"))
+}
+
+#[allow(unsafe_code)]
+fn session_text(what: WTS_INFO_CLASS) -> io::Result<String> {
+    let mut text: *mut u16 = ptr::null_mut();
+    let mut bytes = 0u32;
+    // SAFETY: the current server and session are named by constants;
+    // `text` and `bytes` are valid places for what the call returns.
+    let ok = unsafe {
+        WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE,
+            WTS_CURRENT_SESSION,
+            what,
+            &raw mut text,
+            &raw mut bytes,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call succeeded, so `text` is a NUL-terminated wide string
+    // valid until it is freed below.
+    let wide = unsafe { nul_terminated(text) };
+    let result = String::from_utf16(wide).map_err(io::Error::other);
+    // SAFETY: `text` was allocated by WTSQuerySessionInformationW, which
+    // says to free it with WTSFreeMemory; it is not used after this.
+    unsafe { WTSFreeMemory(text.cast()) };
+    result
+}
+
+/// The account this process's token runs as, as `DOMAIN\name`.
+///
+/// # Errors
+///
+/// When the token or the account cannot be read.
+#[allow(unsafe_code)]
+pub fn current_account() -> io::Result<String> {
+    // SAFETY: GetCurrentProcess takes nothing and returns a pseudo-handle.
+    let me = unsafe { GetCurrentProcess() };
+    with_token_user(me, |sid| {
+        let mut name = vec![0u16; 256];
+        let mut domain = vec![0u16; 256];
+        let (mut name_len, mut domain_len) = (256u32, 256u32);
+        let mut kind = 0;
+        // SAFETY: `sid` is a valid SID for the length of this call;
+        // `name` and `domain` hold the lengths given, and the lengths and
+        // `kind` are valid places for what the call writes.
+        let ok = unsafe {
+            LookupAccountSidW(
+                ptr::null(),
+                sid,
+                name.as_mut_ptr(),
+                &raw mut name_len,
+                domain.as_mut_ptr(),
+                &raw mut domain_len,
+                &raw mut kind,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        name.truncate(name_len as usize);
+        domain.truncate(domain_len as usize);
+        Ok(format!(
+            r"{}\{}",
+            String::from_utf16_lossy(&domain),
+            String::from_utf16_lossy(&name)
+        ))
+    })
+}
+
 fn token_user_sid(process: HANDLE) -> io::Result<String> {
+    with_token_user(process, sid_string)
+}
+
+/// Call `with` on the SID of the user `process` runs as.
+#[allow(unsafe_code)]
+fn with_token_user<T>(process: HANDLE, with: impl FnOnce(PSID) -> io::Result<T>) -> io::Result<T> {
     let mut token: HANDLE = ptr::null_mut();
     // SAFETY: `process` is a live process handle with at least
     // PROCESS_QUERY_LIMITED_INFORMATION, which OpenProcessToken requires,
@@ -294,7 +476,7 @@ fn token_user_sid(process: HANDLE) -> io::Result<String> {
     // and the buffer is aligned for it.
     let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
     // The SID it points to lives in `buffer`, which outlives this call.
-    sid_string(user.User.Sid)
+    with(user.User.Sid)
 }
 
 #[allow(unsafe_code)]

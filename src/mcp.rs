@@ -971,11 +971,10 @@ pub fn run_key(arguments: &serde_json::Value) -> String {
 fn development_install(arguments: &serde_json::Value) -> Option<String> {
     #[cfg(feature = "extension")]
     {
-        use crate::browser::{discover::Os, install};
+        use crate::browser::install;
         let env = |name: &str| std::env::var(name).ok();
         let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
-        let read = |path: &std::path::Path| std::fs::read_to_string(path).ok();
-        let kind = install::find_installed(Os::current(), home.as_ref(), &env, &read)
+        let kind = install::installed_on_this_system(home.as_ref())
             .ok()
             .flatten()
             .map(|found| found.record.kind);

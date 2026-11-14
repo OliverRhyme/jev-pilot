@@ -119,6 +119,10 @@ pub enum OwnerTabs {
     Never,
 }
 
+/// What Ctrl-C says in a run on the owner's own Chrome, through the
+/// extension or attached: it lets go of every tab and closes nothing.
+pub const LET_GO: &str = "interrupted: let go of Chrome, and closed nothing";
+
 /// How many steps a run takes before giving up, unless told otherwise.
 pub const DEFAULT_STEPS: u32 = 15;
 
@@ -369,7 +373,10 @@ fn subcommand(
     Some(match args.peek().map(String::as_str)? {
         // Chrome passes the caller's origin first, and on Windows a
         // `--parent-window` after it, which the host has no use for.
-        origin if origin.starts_with("chrome-extension://") => host(origin),
+        origin if origin.starts_with("chrome-extension://") => {
+            let origin = args.next().unwrap_or_default();
+            host(&origin, args)
+        }
         "extension" => {
             let _ = args.next();
             extension(args)
@@ -394,8 +401,17 @@ fn subcommand(
     })
 }
 
-/// Host mode, for the extension whose origin Chrome passed.
-fn host(origin: &str) -> Result<Invocation, CliError> {
+/// Host mode, for the extension whose origin Chrome passed. On Windows
+/// Chrome adds one `--parent-window=<handle>`; nothing else may follow.
+fn host(origin: &str, rest: impl Iterator<Item = String>) -> Result<Invocation, CliError> {
+    let mut parent_window = false;
+    for word in rest {
+        if word.starts_with("--parent-window=") && !parent_window {
+            parent_window = true;
+        } else {
+            return Err(CliError::UnknownFlag(word));
+        }
+    }
     #[cfg(feature = "browser")]
     {
         let ours = format!(

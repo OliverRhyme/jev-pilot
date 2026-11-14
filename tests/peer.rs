@@ -201,7 +201,7 @@ fn linux_facts() -> Facts {
 fn linux_dev_expected() -> Expected {
     Expected::Linux {
         uid: UID,
-        path: PathBuf::from("/home/oliver/.jev-pilot/bin/jev-pilot"),
+        path: PathBuf::from("/home/owner/.jev-pilot/bin/jev-pilot"),
         pin: LinuxPin::DevelopmentSha256(digest(7)),
     }
 }
@@ -211,7 +211,7 @@ fn linux_dev_facts(hash: Sha256Digest) -> Facts {
         uid: Some(UID),
         pid: Some(PID),
         egid: Some(USER_GROUP),
-        path: Some(PathBuf::from("/home/oliver/.jev-pilot/bin/jev-pilot")),
+        path: Some(PathBuf::from("/home/owner/.jev-pilot/bin/jev-pilot")),
         code: Some(Code::ImageSha256(hash)),
         ..Facts::default()
     }
@@ -308,10 +308,54 @@ fn windows_facts(code: Code) -> Facts {
         sid: Some(SID.to_owned()),
         pid: Some(PID),
         session: Some(SESSION),
+        image: Some(windows_path()),
         path: Some(windows_path()),
         code: Some(code),
         ..Facts::default()
     }
+}
+
+/// A program can rename its own running image away and put a junction to
+/// the install where its folder was: the file it then opens by its name is
+/// the genuine one. The path Windows reports it was started from is not.
+#[test]
+fn windows_refuses_an_image_started_from_another_path() {
+    let facts = Facts {
+        image: Some(PathBuf::from(r"C:\Users\owner\d\jev-pilot.exe")),
+        ..windows_facts(Code::ImageSha256(digest(1)))
+    };
+    assert_eq!(
+        decide(&facts, &windows_expected(hash_pin())),
+        refused(Check::Path, Reason::Mismatch)
+    );
+}
+
+/// The path Windows reports is compared without regard to case, and with
+/// the pin's `\\?\` prefix set aside.
+#[test]
+fn windows_compares_the_started_path_without_regard_to_case() {
+    let expected = Expected::Windows {
+        sid: SID.to_owned(),
+        path: PathBuf::from(r"\\?\C:\Program Files\jev-pilot\jev-pilot.exe"),
+        pin: hash_pin(),
+        session: Some(SESSION),
+    };
+    let facts = Facts {
+        image: Some(PathBuf::from(r"c:\program files\JEV-PILOT\jev-pilot.exe")),
+        path: Some(PathBuf::from(
+            r"\\?\C:\Program Files\jev-pilot\jev-pilot.exe",
+        )),
+        ..windows_facts(Code::ImageSha256(digest(1)))
+    };
+    assert_eq!(decide(&facts, &expected), Verdict::Accept);
+    let missing = Facts {
+        image: None,
+        ..facts
+    };
+    assert_eq!(
+        decide(&missing, &expected),
+        refused(Check::Path, Reason::Missing)
+    );
 }
 
 fn hash_pin() -> WindowsPin {
@@ -358,7 +402,7 @@ fn windows_refuses_another_session() {
 fn windows_refuses_a_path_outside_program_files() {
     let facts = Facts {
         path: Some(PathBuf::from(
-            r"C:\Users\oliver\AppData\Local\Temp\jev-pilot.exe",
+            r"C:\Users\owner\AppData\Local\Temp\jev-pilot.exe",
         )),
         ..windows_facts(Code::ImageSha256(digest(1)))
     };
@@ -395,7 +439,7 @@ fn windows_checks_the_path_before_the_signer() {
     // Another program from the same publisher, signed with the same
     // certificate, is still not the installed copy.
     let facts = Facts {
-        path: Some(PathBuf::from(r"C:\Users\oliver\Downloads\other.exe")),
+        path: Some(PathBuf::from(r"C:\Users\owner\Downloads\other.exe")),
         ..windows_facts(Code::Signer {
             subject: SIGNER.to_owned(),
         })
@@ -554,7 +598,7 @@ fn a_macos_pin_is_rendered_as_a_code_requirement() {
     );
     assert_eq!(
         team_pin().requirement(),
-        r#"anchor apple generic and identifier "dev.jevpilot.jev-pilot" and certificate leaf[subject.OU] = "ABCDE12345""#
+        r#"anchor apple generic and identifier "dev.jevpilot.jev-pilot" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "ABCDE12345""#
     );
     assert_eq!(
         MacosPin::from_cdhash_hex("32E719C23C33EB097271B746F2A09F3127B57E5A").unwrap(),
@@ -815,30 +859,57 @@ mod gather {
         assert!(status.success());
     }
 
+    /// A setgid process gives up its group for good. The test binary is
+    /// copied, given one of the user's other groups with the setgid bit, and
+    /// run: the child holds the group, gives it up, and cannot take it back.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_process_can_give_up_the_install_group_for_good() {
+        use nix::unistd::{getegid, getgid};
+        use std::os::unix::fs::PermissionsExt as _;
         const CHILD: &str = "JEV_PILOT_PEER_TEST_DROP_GROUP";
-        // It changes the whole process, so it runs in a child of its own.
-        if std::env::var_os(CHILD).is_some() {
+        if let Some(group) = std::env::var_os(CHILD) {
+            let held = nix::unistd::Gid::from_raw(group.to_str().unwrap().parse().unwrap());
+            let real = getgid();
+            assert_eq!(getegid(), held, "the setgid bit gave the group");
+            assert_ne!(real, held);
             jev_pilot::peer::drop_install_group().unwrap();
-            let real = nix::unistd::getgid();
-            assert_eq!(nix::unistd::getegid(), real);
+            assert_eq!((getgid(), getegid()), (real, real));
             #[cfg(target_os = "linux")]
             {
                 let ids = nix::unistd::getresgid().unwrap();
                 assert_eq!((ids.real, ids.effective, ids.saved), (real, real, real));
             }
+            assert!(
+                nix::unistd::setegid(held).is_err(),
+                "the group cannot be taken back"
+            );
             return;
         }
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let real = getgid();
+        let groups = std::process::Command::new("id").arg("-G").output().unwrap();
+        let other = String::from_utf8_lossy(&groups.stdout)
+            .split_whitespace()
+            .filter_map(|g| g.parse().ok())
+            .map(nix::unistd::Gid::from_raw)
+            .find(|g| *g != real)
+            .expect("the user is in a group other than their own");
+        let dir = std::env::temp_dir().join(format!("jev-pilot-setgid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join("peer-test");
+        std::fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+        std::os::unix::fs::chown(&copy, None, Some(other.as_raw())).unwrap();
+        std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o2755)).unwrap();
+        let status = std::process::Command::new(&copy)
             .args([
                 "--exact",
                 "gather::a_process_can_give_up_the_install_group_for_good",
             ])
-            .env(CHILD, "1")
+            .env(CHILD, other.as_raw().to_string())
             .status()
             .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(status.success());
     }
 
@@ -915,4 +986,160 @@ fn authenticode_names_the_signer_of_a_signed_image() {
         "{}",
         signer.subject
     );
+}
+
+// --- the host's parent: the browser that started it ---
+
+mod browser_parent {
+    use jev_pilot::peer::browser::{
+        FileFacts, linux_browser, macos_browser_requirement, windows_browser,
+    };
+    use std::path::Path;
+
+    /// On macOS the browser is Chrome, or Chrome for Testing, signed with
+    /// Google's Developer ID: Chrome's own designated requirement.
+    #[test]
+    fn the_macos_browser_is_one_google_signed() {
+        assert_eq!(
+            macos_browser_requirement(),
+            r#"(identifier "com.google.Chrome" or identifier "com.google.Chrome.beta" or identifier "com.google.Chrome.dev" or identifier "com.google.Chrome.canary" or identifier "com.google.chrome.for.testing") and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "EQHXZ8M8AV""#
+        );
+    }
+
+    /// The requirement is one the Security framework reads, Chrome on disk
+    /// satisfies it where it is installed, and this test program does not.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_browser_requirement_holds_for_chrome_alone() {
+        use core_foundation::url::CFURL;
+        use security_framework::os::macos::code_signing::{Flags, SecRequirement, SecStaticCode};
+        let requirement: SecRequirement =
+            macos_browser_requirement().parse().expect("a requirement");
+        let satisfied = |path: &Path| {
+            let url = CFURL::from_path(path, true).expect("a url");
+            SecStaticCode::from_path(&url, Flags::NONE)
+                .and_then(|code| code.check_validity(Flags::NONE, &requirement))
+                .is_ok()
+        };
+        let chrome = Path::new("/Applications/Google Chrome.app");
+        if chrome.exists() {
+            assert!(satisfied(chrome), "Chrome is signed by Google");
+        }
+        assert!(
+            !satisfied(&std::env::current_exe().unwrap()),
+            "this test is not"
+        );
+    }
+
+    fn root_file() -> FileFacts {
+        FileFacts {
+            uid: 0,
+            mode: 0o755,
+            is_link: false,
+        }
+    }
+
+    /// On Linux the browser is one of the known installs, a root file no
+    /// one else can write, under folders only root can change.
+    #[test]
+    fn the_linux_browser_is_a_known_root_install() {
+        let facts = |_: &Path| Some(root_file());
+        for path in [
+            "/opt/google/chrome/chrome",
+            "/opt/google/chrome-beta/chrome",
+            "/opt/google/chrome-unstable/chrome",
+            "/opt/google/chrome-canary/chrome",
+            "/usr/lib/chromium/chromium",
+            "/usr/lib/chromium-browser/chromium-browser",
+            "/opt/microsoft/msedge/msedge",
+            "/opt/brave.com/brave/brave",
+        ] {
+            assert_eq!(linux_browser(Path::new(path), &facts), Ok(()), "{path}");
+        }
+        assert!(linux_browser(Path::new("/home/owner/chrome/chrome"), &facts).is_err());
+        assert!(linux_browser(Path::new("/usr/bin/python3"), &facts).is_err());
+        let owned = |path: &Path| {
+            Some(if path == Path::new("/opt/google/chrome") {
+                FileFacts {
+                    uid: 1000,
+                    ..root_file()
+                }
+            } else {
+                root_file()
+            })
+        };
+        assert!(linux_browser(Path::new("/opt/google/chrome/chrome"), &owned).is_err());
+        let writable = |path: &Path| {
+            Some(if path == Path::new("/opt/google/chrome/chrome") {
+                FileFacts {
+                    mode: 0o777,
+                    ..root_file()
+                }
+            } else {
+                root_file()
+            })
+        };
+        assert!(linux_browser(Path::new("/opt/google/chrome/chrome"), &writable).is_err());
+    }
+
+    /// The test harness was started by cargo, not a browser: its parent is
+    /// found, named, and refused.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_parent_that_is_not_a_browser_is_found_and_refused() {
+        let parent = jev_pilot::peer::browser::browser_parent();
+        assert_eq!(parent.pid, Some(std::os::unix::process::parent_id()));
+        assert!(parent.exe.is_some(), "{parent:?}");
+        assert!(parent.verdict.is_err(), "{parent:?}");
+    }
+
+    /// On Windows Chrome starts the host through cmd.exe: the parent must be
+    /// System32's cmd.exe, and its parent a browser under Program Files
+    /// signed by Google.
+    #[test]
+    fn the_windows_browser_starts_the_host_through_system_cmd() {
+        let system32 = Path::new(r"C:\Windows\System32");
+        let programs = [
+            Path::new(r"C:\Program Files"),
+            Path::new(r"C:\Program Files (x86)"),
+        ];
+        let chrome = Path::new(r"\\?\C:\Program Files\Google\Chrome\Application\chrome.exe");
+        let google = "CN=Google LLC, O=Google LLC, L=Mountain View, S=California, C=US";
+        let cmd = Path::new(r"C:\WINDOWS\system32\cmd.exe");
+        assert_eq!(
+            windows_browser(cmd, chrome, Some(google), system32, &programs),
+            Ok(())
+        );
+        assert!(
+            windows_browser(
+                Path::new(r"C:\Users\owner\cmd.exe"),
+                chrome,
+                Some(google),
+                system32,
+                &programs
+            )
+            .is_err()
+        );
+        assert!(
+            windows_browser(
+                cmd,
+                Path::new(r"C:\Users\owner\chrome.exe"),
+                Some(google),
+                system32,
+                &programs
+            )
+            .is_err()
+        );
+        assert!(
+            windows_browser(
+                cmd,
+                chrome,
+                Some("CN=Someone, O=Someone"),
+                system32,
+                &programs
+            )
+            .is_err()
+        );
+        assert!(windows_browser(cmd, chrome, None, system32, &programs).is_err());
+    }
 }

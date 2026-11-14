@@ -10,10 +10,10 @@ use std::time::Duration;
 use interprocess::local_socket::traits::Stream as _;
 use interprocess::local_socket::{GenericFilePath, Name, Stream, ToFsName as _};
 
-use crate::browser::bridge::Parent;
+use crate::browser::bridge::{self, ByteOrder, Parent};
 use crate::browser::discover::Os;
 use crate::browser::extension::{ConnectError, ExtensionWire, Pacer};
-use crate::peer::{Expected, PeerCheck, Refusal, Verdict, decide};
+use crate::peer::{Expected, PeerCheck, Refusal, Verdict, decide, recheck};
 
 /// The socket's file name, in [`socket_dir`].
 pub const SOCKET_NAME: &str = "bridge.sock";
@@ -163,11 +163,13 @@ pub fn pipe_name(sid: &str) -> String {
     format!(r"\\.\pipe\jev-pilot-{sid}")
 }
 
-/// The pipe's access rights for its user: `FILE_GENERIC_READ` (0x120089),
-/// and `FILE_GENERIC_WRITE` (0x120116) without `FILE_APPEND_DATA` (0x4),
-/// which on a pipe is `FILE_CREATE_PIPE_INSTANCE` and would let any program
-/// of the user's add an instance of its own and take connections.
-const PIPE_USER_RIGHTS: u32 = 0x0012_0089 | (0x0012_0116 & !0x4);
+/// The pipe's access rights for its user: `FILE_GENERIC_READ` (0x120089)
+/// and `FILE_GENERIC_WRITE` (0x120116). Write includes
+/// `FILE_CREATE_PIPE_INSTANCE` (`FILE_APPEND_DATA`, 0x4), which the host
+/// needs to make an instance of the pipe for each run. A program running as
+/// the user can then add an instance of its own and take a connection; each
+/// run checks the host before it sends anything, which is what defeats it.
+const PIPE_USER_RIGHTS: u32 = 0x0012_0089 | 0x0012_0116;
 
 /// The pipe's security descriptor, as SDDL.
 ///
@@ -175,8 +177,7 @@ const PIPE_USER_RIGHTS: u32 = 0x0012_0089 | (0x0012_0116 & !0x4);
 /// - network (`NU`) and anonymous (`AN`) logons denied everything, first,
 ///   because an access check stops at the first entry that decides;
 /// - SYSTEM allowed everything;
-/// - the user allowed read and write (`0x12019b`), without the right to
-///   create instances.
+/// - the user allowed read and write (`0x12019f`).
 ///
 /// The default descriptor would give Everyone read access, and an empty one
 /// (`SecurityDescriptor::new()`) gives everyone everything.
@@ -227,6 +228,8 @@ pub struct RunStream {
     prefix_read: usize,
     /// How many bytes of the frame's message are still to come.
     message_left: usize,
+    /// Whole frames read already and put back, to be read again first.
+    again: io::Cursor<Vec<u8>>,
 }
 
 impl RunStream {
@@ -241,8 +244,14 @@ impl RunStream {
             prefix: [0; 4],
             prefix_read: 0,
             message_left: 0,
+            again: io::Cursor::new(Vec::new()),
         };
         (run, pacer)
+    }
+
+    /// Read `frame`, a whole frame read before, again before anything new.
+    fn put_back(&mut self, frame: Vec<u8>) {
+        self.again = io::Cursor::new(frame);
     }
 
     fn between_frames(&self) -> bool {
@@ -254,6 +263,10 @@ impl Read for RunStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
+        }
+        if usize::try_from(self.again.position()).unwrap_or(usize::MAX) < self.again.get_ref().len()
+        {
+            return self.again.read(buf);
         }
         let between = self.between_frames();
         let wait = between.then(|| self.pacer.wait().max(Duration::from_millis(1)));
@@ -377,10 +390,23 @@ pub fn connect_run(
 ) -> Result<ExtensionWire<RunStream>, RunError> {
     let name = place.name().map_err(|_| RunError::NoHost)?;
     let stream = Stream::connect(name).map_err(|_| RunError::NoHost)?;
-    if let Verdict::Refuse(refusal) = decide(&check.facts(&stream, expected), expected) {
+    let first = check.facts(&stream, expected);
+    if let Verdict::Refuse(refusal) = decide(&first, expected) {
         return Err(RunError::NotTheHost(refusal));
     }
-    let (stream, pacer) = RunStream::new(stream);
+    let (mut stream, pacer) = RunStream::new(stream);
+    // On macOS the kernel names the socket's peer by whoever used it last,
+    // when asked: the host is checked again once its nonce has been read,
+    // before the run says anything, so a process it handed the socket to is
+    // told nothing.
+    let nonce = bridge::decode(&mut stream, ByteOrder::Little)
+        .map_err(|e| RunError::Connect(ConnectError::Frame(e)))?
+        .ok_or(RunError::Connect(ConnectError::Closed))?;
+    let again = check.facts(&stream.stream, expected);
+    if let Verdict::Refuse(refusal) = recheck(&first, &again, expected) {
+        return Err(RunError::NotTheHost(refusal));
+    }
+    stream.put_back(bridge::encode(&nonce, ByteOrder::Little));
     let wire = ExtensionWire::connect_as(stream, goal, sites, parent).map_err(|e| match e {
         ConnectError::Refused { check } => RunError::Refused {
             installed: expected.path().to_owned(),

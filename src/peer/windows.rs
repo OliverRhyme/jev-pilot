@@ -43,10 +43,15 @@ pub(super) fn facts(stream: &Stream, expected: &Expected) -> Facts {
         return facts;
     }
     facts.sid = process.user_sid().ok();
-    // The image is opened once, and its final path, its hash and its signer
-    // all come from that one file. Windows refuses to write to the image of
-    // a running process, so it is the file the process runs.
-    let image = process_image(&process).and_then(File::open);
+    // The path Windows says the process was started from, as it says it;
+    // then the image opened once, its final path, its hash and its signer
+    // all from that one file. Windows refuses to write to the image of a
+    // running process, so it is the file the process runs.
+    let Ok(started) = process_image(&process) else {
+        return facts;
+    };
+    let image = File::open(&started);
+    facts.image = Some(started);
     let Ok(image) = image else {
         return facts;
     };

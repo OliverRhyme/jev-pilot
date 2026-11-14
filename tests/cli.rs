@@ -827,10 +827,30 @@ fn chrome_starts_the_host_with_the_extensions_origin() {
     );
     assert_eq!(parsed(&[&origin]), Invocation::Host);
     assert_eq!(parsed(&[&origin, "--parent-window=0"]), Invocation::Host);
+    for extra in [
+        &[&origin[..], "--parent-window=0", "--parent-window=1"][..],
+        &[&origin[..], "--something"],
+        &[&origin[..], "Open the page"],
+    ] {
+        assert!(
+            parse(extra.iter().map(|w| (*w).to_owned())).is_err(),
+            "{extra:?}"
+        );
+    }
     let other = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/";
     assert_eq!(refused(&[other]), CliError::ForeignOrigin(other.to_owned()));
     assert_eq!(
         refused(&[other]).to_string(),
         format!("jev-pilot serves only its own extension, not {other}")
+    );
+}
+
+/// Ctrl-C in a run on the owner's Chrome lets go of it and closes nothing,
+/// and says so.
+#[test]
+fn ctrl_c_on_the_owners_chrome_says_it_let_go() {
+    assert_eq!(
+        jev_pilot::cli::LET_GO,
+        "interrupted: let go of Chrome, and closed nothing"
     );
 }
