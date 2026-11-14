@@ -1540,8 +1540,17 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // things and shown one of them is not finished. With no criteria
             // given there is nothing to be satisfied by, and the progress
             // score above remains the only word on it.
+            //
+            // A plan says there is work to do, so with one, criteria that hold
+            // before the run has done anything are not that work done.
+            // Measured on GitHub: "the star button reads Star" held on the
+            // unstarred repository, and a run told to star it and then unstar
+            // it ended achieved without touching it. Without a plan, a screen
+            // that already satisfies the criteria is where the run should
+            // stop, as for "make sure Wi-Fi is on".
             if !blind
                 && !self.criteria.is_empty()
+                && (self.plan.is_empty() || self.acted > 0)
                 && answers.unmet(&self.criteria, self.certainty).is_none()
             {
                 self.report(
