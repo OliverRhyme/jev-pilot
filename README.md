@@ -609,6 +609,12 @@ jev-pilot is <v>, the installed one is <w>: run the install again" and goes on
 with the installed copy, which is the one any `--browser extension` run hands
 itself to.
 
+An install made before the audit log gained its `audit.lock` and
+`audit.skipped` files has neither, and the install is the only thing that makes
+them, since the owner must not be able to write them. Until
+`sudo jev-pilot extension install` (or its elevated equivalent on Windows) is
+run again, the host does not serve, and its error names the missing file.
+
 #### What a run may do: the policy
 
 `policy.json` lives in the admin-owned extension folder, and the extension
