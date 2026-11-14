@@ -89,6 +89,34 @@ pub fn set_not_dumpable() -> std::io::Result<()> {
     linux::set_not_dumpable()
 }
 
+/// Gives up the setgid install's group for good: sets the real, effective
+/// and saved gid to the real gid, then reads them back and fails unless all
+/// three are.
+///
+/// A setgid process's children inherit its effective gid, and the group is
+/// what the bridge trusts. jev-pilot starts other programs found on `PATH`
+/// (`adb`, a browser), so a program put first on `PATH` would otherwise run
+/// with the group and pass the bridge's check. Once this has returned, no
+/// program this process starts has it, and this process cannot take it back.
+///
+/// Who calls it:
+///
+/// - every mode, first thing in `main`, except the two below;
+/// - the bridge client (a run in extension mode), right after it connects:
+///   the host reads its credentials as they were at `connect`;
+/// - the bridge host keeps the group: the run reads the host's credentials
+///   as they were at `listen`, and only the group may append to the audit
+///   log. The host starts no other program.
+///
+/// # Errors
+///
+/// When the kernel refuses the change, or the group is still held after it.
+#[cfg(target_os = "linux")]
+#[cfg_attr(docsrs, doc(cfg(target_os = "linux")))]
+pub fn drop_install_group() -> std::io::Result<()> {
+    linux::drop_install_group()
+}
+
 /// The string form of the SID of the user this process runs as: what a
 /// Windows install pins, and what its pipe's security descriptor names.
 ///

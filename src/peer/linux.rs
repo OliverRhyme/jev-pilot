@@ -64,3 +64,21 @@ pub(super) fn set_not_dumpable() -> std::io::Result<()> {
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         .map_err(std::io::Error::from)
 }
+
+/// Sets the real, effective and saved gid all to the real gid, and checks
+/// that they held.
+pub(super) fn drop_install_group() -> std::io::Result<()> {
+    use nix::unistd::{getgid, getresgid, setresgid};
+    let real = getgid();
+    // libc's setresgid applies to every thread of the process, not only the
+    // calling one.
+    setresgid(real, real, real).map_err(std::io::Error::from)?;
+    let now = getresgid().map_err(std::io::Error::from)?;
+    if (now.real, now.effective, now.saved) == (real, real, real) {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "the install group is still held after setresgid",
+        ))
+    }
+}

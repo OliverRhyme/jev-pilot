@@ -799,6 +799,29 @@ mod gather {
         assert!(status.success());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_can_give_up_the_install_group_for_good() {
+        const CHILD: &str = "JEV_PILOT_PEER_TEST_DROP_GROUP";
+        // It changes the whole process, so it runs in a child of its own.
+        if std::env::var_os(CHILD).is_some() {
+            jev_pilot::peer::drop_install_group().unwrap();
+            let ids = nix::unistd::getresgid().unwrap();
+            let real = nix::unistd::getgid();
+            assert_eq!((ids.real, ids.effective, ids.saved), (real, real, real));
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "gather::a_process_can_give_up_the_install_group_for_good",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_gathers_this_process_from_either_end() {
