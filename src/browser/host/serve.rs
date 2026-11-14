@@ -155,18 +155,10 @@ pub fn serve(
                         }
                     }
                     Output::ToRun { run, message } => {
-                        // A run that stops reading is hung up on once a
-                        // write has waited SEND_WAIT, and taken as gone, so
-                        // it cannot hold up the extension or the other runs.
-                        if let Some(stream) = runs.get(&run) {
-                            let sent = {
-                                let _watched = watch.watch(stream);
-                                send_to_run(stream, &message)
-                            };
-                            if sent.is_err() {
-                                hang_up(stream);
-                                pending.push_back(Input::RunGone { run });
-                            }
+                        if let Some(stream) = runs.get(&run)
+                            && !send_watched(&watch, stream, &message)
+                        {
+                            pending.push_back(Input::RunGone { run });
                         }
                     }
                     Output::Close { run } => {
@@ -466,6 +458,20 @@ fn send_to_chrome(stdout: &mut impl Write, message: &Message) -> io::Result<()> 
     let frame = bridge::encode_for_chrome(&text, ByteOrder::Native).map_err(io::Error::other)?;
     stdout.write_all(&frame)?;
     stdout.flush()
+}
+
+/// Write `message` to a run, whether it went. A run that stops reading is
+/// hung up on once a write has waited [`SEND_WAIT`], and taken as gone, so
+/// it cannot hold up the extension or the other runs.
+fn send_watched(watch: &SendWatch, stream: &Arc<Stream>, message: &Message) -> bool {
+    let sent = {
+        let _watched = watch.watch(stream);
+        send_to_run(stream, message)
+    };
+    if sent.is_err() {
+        hang_up(stream);
+    }
+    sent.is_ok()
 }
 
 /// End a connection now, so its reader sees it close, and a write waiting

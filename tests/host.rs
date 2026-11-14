@@ -1777,9 +1777,12 @@ fn refusals_held_back_are_counted_when_the_host_ends() {
     };
     let mut throttle = Throttle::default();
     assert_eq!(throttle.finish(), None, "nothing held");
-    assert_eq!(throttle.admit(refusal.clone(), start), [refusal.clone()]);
-    assert!(throttle.admit(refusal.clone(), start).is_empty());
-    assert!(throttle.admit(refusal, start).is_empty());
+    assert_eq!(
+        throttle.admit(refusal.clone(), start),
+        std::slice::from_ref(&refusal)
+    );
+    assert_eq!(throttle.admit(refusal.clone(), start), []);
+    assert_eq!(throttle.admit(refusal, start), []);
     assert_eq!(throttle.finish(), Some(Audit::NotWritten { refusals: 2 }));
 }
 
