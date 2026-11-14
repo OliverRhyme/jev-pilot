@@ -1394,7 +1394,7 @@ pub struct DirMeta {
 
 /// Whether every folder above `path` that exists is one the owner cannot
 /// change: root's, not a link, not writable by anyone, and writable by its
-/// group only when that group is root's or one the owner is not in
+/// group only when the owner is not in that group, root's group included
 /// (`member_of` says which groups the owner is in). Debian's `/usr/local`
 /// (root:staff 2775), Ubuntu's `/var/log` (root:syslog 0775) and the
 /// install's own audit folder (root:jev-pilot 0775) pass for an owner not
@@ -1421,7 +1421,7 @@ pub fn check_ancestors(
             format!("is owned by uid {}", found.uid)
         } else if found.mode & 0o002 != 0 {
             format!("can be written by anyone (mode {mode:o})")
-        } else if found.mode & 0o020 != 0 && found.gid != 0 && member_of(found.gid) {
+        } else if found.mode & 0o020 != 0 && member_of(found.gid) {
             format!(
                 "can be written by group {}, which you are in (mode {mode:o})",
                 found.gid

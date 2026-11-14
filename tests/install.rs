@@ -1316,8 +1316,8 @@ fn a_protected_install_makes_the_audit_logs_files() {
 
 /// What a protected install writes is safe only if no folder above it can
 /// be changed by the owner: every one that exists must be root's, not a
-/// link, not writable by anyone, and writable by its group only when that
-/// group is root's or one the owner is not in.
+/// link, not writable by anyone, and writable by its group only when the
+/// owner is not in that group.
 #[test]
 fn a_protected_install_writes_only_under_folders_only_root_can_change() {
     use jev_pilot::browser::install::{DirMeta, check_ancestors};
@@ -1405,6 +1405,20 @@ fn a_protected_install_writes_only_under_folders_only_root_can_change() {
             )),
         );
     }
+    // Root's group too is refused when the owner is in it.
+    let in_wheel = |gid: u32| gid == 0;
+    let wheel = DirMeta {
+        mode: 0o775,
+        ..safe
+    };
+    assert_eq!(
+        check_ancestors(target, &lookup("/usr/local", wheel), &in_wheel),
+        Err(
+            "/usr/local can be written by group 0, which you are in (mode 775), so a \
+             program running as you could change what jev-pilot installs under it"
+                .to_owned()
+        ),
+    );
 }
 
 /// Every path a protected install writes passes the check, step by step,
