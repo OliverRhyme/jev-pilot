@@ -90,8 +90,13 @@ pub fn set_not_dumpable() -> std::io::Result<()> {
 }
 
 /// Gives up the setgid install's group for good: sets the real, effective
-/// and saved gid to the real gid, then reads them back and fails unless all
-/// three are.
+/// and saved gid to the real gid, then checks all three are.
+///
+/// Linux reads them back with `getresgid`. macOS sets them with `setregid`,
+/// which moves the saved gid with the effective one, and has no way to read
+/// the saved gid; it is checked by trying to take the group back with
+/// `setegid`, which a process that is not root can do only for its real or
+/// saved gid.
 ///
 /// A setgid process's children inherit its effective gid, and the group is
 /// what the bridge trusts. jev-pilot starts other programs found on `PATH`
@@ -111,10 +116,13 @@ pub fn set_not_dumpable() -> std::io::Result<()> {
 /// # Errors
 ///
 /// When the kernel refuses the change, or the group is still held after it.
-#[cfg(target_os = "linux")]
-#[cfg_attr(docsrs, doc(cfg(target_os = "linux")))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(docsrs, doc(cfg(any(target_os = "linux", target_os = "macos"))))]
 pub fn drop_install_group() -> std::io::Result<()> {
-    linux::drop_install_group()
+    #[cfg(target_os = "linux")]
+    return linux::drop_install_group();
+    #[cfg(target_os = "macos")]
+    return macos::drop_install_group();
 }
 
 /// The string form of the SID of the user this process runs as: what a
