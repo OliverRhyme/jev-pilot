@@ -2374,6 +2374,15 @@ fn opening_and_navigating_through_the_extension() {
                 json!({"type": "reply", "id": id, "result": {"tab": 100, "target": "T100"}}),
             ];
         }
+        // The tab just opened is listed with the rest, as Chrome lists it.
+        if request["op"] == "tabs" {
+            let mut tabs = signup_tabs();
+            tabs["tabs"]
+                .as_array_mut()
+                .expect("tabs")
+                .push(json!({"tab": 100, "target": "T100", "url": "about:blank", "title": ""}));
+            return vec![json!({"type": "reply", "id": id, "result": tabs})];
+        }
         if is_send(request, "Page.navigate") {
             let event = |method: &str, params: Value| json!({"type": "cdp", "tab": 100, "method": method, "params": params});
             return vec![

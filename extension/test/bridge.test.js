@@ -312,7 +312,7 @@ test("on starting, the extension lets go of tabs an earlier worker left attached
   const { fake, bridge } = bridged();
   fake.state.targets.set(7, "T7");
   fake.state.targets.set(8, "T8");
-  fake.state.attached = new Set([7]);
+  fake.state.attached.add(7);
   await bridge.forgetEarlierRun();
   assert.deepEqual(
     fake.calls.filter(([call]) => call === "debugger.detach").map(([, d]) => d.tabId),
