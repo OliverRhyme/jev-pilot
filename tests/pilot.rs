@@ -2262,3 +2262,123 @@ mod browser {
         );
     }
 }
+
+/// A page whose link starts a network call: the old page stays up, quiet from
+/// a moment after the tap (a progress bar was drawn), until the new one
+/// arrives a second and a half later.
+#[derive(Default)]
+struct Fetching {
+    tapped: Option<std::time::Instant>,
+}
+
+impl Device for Fetching {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        let since = self
+            .tapped
+            .map(|at| u32::try_from(at.elapsed().as_millis()).unwrap_or(u32::MAX));
+        Ok(match since {
+            Some(ms) if ms >= 1_500 => screen_of(&["Issue one", "Issue two"]).quiet_for(Some(400)),
+            Some(ms) => screen_of(&["Code", "Issues"]).quiet_for(Some(ms.saturating_sub(30))),
+            None => screen_of(&["Code", "Issues"]).quiet_for(Some(5_000)),
+        })
+    }
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        if matches!(command, Command::Tap(_)) && self.tapped.is_none() {
+            self.tapped = Some(std::time::Instant::now());
+        }
+        Ok(())
+    }
+}
+
+/// An action whose screen is still on its way when it is judged gets one more
+/// look before anyone is asked. Measured on GitHub: the Issues tab was tapped,
+/// the old page sat quiet while the new one was fetched, the next judgement
+/// was made about the old page and fell under the floor, and the question it
+/// asked waited five minutes on a page that had long since changed.
+#[test]
+fn an_unsure_step_after_an_action_that_seemed_to_do_nothing_looks_again_before_asking() {
+    use jev_pilot::pilot::{Impasse, Resolution};
+    let asked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let judge = Recording {
+        seen: std::rc::Rc::clone(&seen),
+        turns: std::cell::RefCell::new(vec![
+            answer("tap", Some("A2"), 0.9, 0.1),
+            answer("tap", Some("A1"), 0.45, 0.3),
+            answer("done", None, 0.99, 0.97),
+        ]),
+    };
+    let asking = std::rc::Rc::clone(&asked);
+    let mut pilot = Pilot::new(Fetching::default(), judge, &Android)
+        .requiring(Confidence::new(0.6).expect("valid"))
+        .escalating_to(move |_: &Impasse<'_>| {
+            asking.set(true);
+            Ok::<_, Infallible>(Resolution::Stop)
+        });
+
+    let ending = pilot
+        .pursue("Open the Issues tab")
+        .expect("the run completes");
+
+    assert!(!asked.get(), "nobody was asked");
+    assert_eq!(ending, Ending::Finished(Outcome::Achieved));
+    let last = seen
+        .borrow()
+        .last()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    assert!(last.contains("Issue one"), "{last}");
+}
+
+/// A page whose first tap is refused at click time, as a browser refuses a
+/// tap on a row it finds replaced or covered, and whose screen never changes.
+#[derive(Default)]
+struct RefusesFirstTap {
+    taps: u32,
+}
+
+impl Device for RefusesFirstTap {
+    type Error = Infallible;
+    fn observe(&mut self) -> Result<Snapshot, Infallible> {
+        Ok(screen_of(&["Unstar", "1 star"]))
+    }
+    fn perform(&mut self, command: &Command) -> Result<(), Infallible> {
+        if matches!(command, Command::Tap(_)) {
+            self.taps += 1;
+        }
+        Ok(())
+    }
+    fn refused(&mut self) -> bool {
+        self.taps == 1
+    }
+}
+
+/// A tap that was refused was never made, so choosing it again is not a
+/// repeat to be waited out. Measured on GitHub: Unstar was refused once,
+/// and the guard against repeating then turned the next two tries into
+/// waits, so it was never pressed.
+#[test]
+fn a_refused_action_chosen_again_is_tried_again() {
+    let mut pilot = Pilot::new(
+        RefusesFirstTap::default(),
+        Scripted::new(vec![
+            answer("tap", Some("A1"), 0.9, 0.2),
+            answer("tap", Some("A1"), 0.9, 0.2),
+            answer("done", None, 0.99, 0.97),
+        ]),
+        &Android,
+    );
+
+    let ending = pilot
+        .pursue("Unstar the repository")
+        .expect("the run completes");
+
+    assert_eq!(ending, Ending::Finished(Outcome::Achieved));
+    assert_eq!(pilot.device().taps, 2, "the refused tap was tried again");
+    assert_eq!(
+        pilot.actions_taken(),
+        1,
+        "a refused tap is not an action taken"
+    );
+}

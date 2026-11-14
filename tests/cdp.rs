@@ -833,6 +833,130 @@ fn a_press_on_a_covered_row_refuses_and_names_what_covers_it() {
     );
 }
 
+/// Chrome's replies when a row read from the page has been replaced by an
+/// identical copy before it is clicked, as GitHub re-renders its star button
+/// once a star lands. Recorded by `tests/fixtures/cdp/replaced/record.mjs`.
+mod replaced {
+    use serde_json::Value;
+
+    pub fn load(name: &str) -> Value {
+        let path = format!(
+            "{}/tests/fixtures/cdp/replaced/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        serde_json::from_str(&text).expect("fixture is JSON")
+    }
+
+    /// The node drawn at the point now, and its accessibility ancestors, with
+    /// the redrawn control (a button in the recording) given `role` and
+    /// `name`, as many times as `copies` says, going up from it.
+    pub fn ancestors_as(role: &str, name: &str, copies: usize) -> Value {
+        let mut tree = load("ax-partial")["result"].clone();
+        let nodes = tree["nodes"].as_array_mut().expect("nodes");
+        for backend in [10, 9].into_iter().take(copies) {
+            let node = nodes
+                .iter_mut()
+                .find(|n| n["backendDOMNodeId"] == backend)
+                .expect("the recorded ancestor");
+            node["role"]["value"] = role.into();
+            node["name"] = serde_json::json!({"type": "computedString", "value": name});
+            node["ignored"] = false.into();
+        }
+        tree
+    }
+}
+
+/// Scripts a press on the email row whose node is gone by the time it is
+/// clicked, with `ancestors` drawn at the point instead.
+fn script_press_on_replaced_row(script: &Script, ancestors: Value) {
+    let refused = replaced::load("resolve-replaced");
+    assert_eq!(refused["error"]["message"], "No node with given id found");
+    script.on("Page.getFrameTree", signup::load("frame-tree"));
+    script.on(
+        "DOM.getNodeForLocation",
+        replaced::load("hit-after")["result"].clone(),
+    );
+    script.answer(
+        "DOM.resolveNode",
+        Answer::Error("No node with given id found"),
+    );
+    script.on("Accessibility.getPartialAXTree", ancestors);
+    for _ in 0..3 {
+        script.on("Input.dispatchMouseEvent", json!({}));
+    }
+    script_settle(script, 4);
+}
+
+/// A row redrawn as an identical copy between the read and the click is the
+/// same control: the node read is gone, and exactly one node at the point,
+/// the hit or one of its ancestors, has the role and name the row was read
+/// with. Measured on GitHub, where the star button and the stars link were
+/// re-rendered with the new count, and both were refused as covered.
+#[test]
+fn a_row_redrawn_as_an_identical_copy_is_clicked() {
+    let (script, mut engine) = engine_after_read();
+    script_press_on_replaced_row(&script, replaced::ancestors_as("textbox", "Email", 1));
+
+    engine
+        .perform(&BrowserCommand::Press {
+            at: Point { x: 120, y: 19 },
+            node: email(),
+        })
+        .expect("performs");
+
+    assert_eq!(clicks(&script), 3);
+    assert_eq!(engine.outcome(), None);
+    assert!(!engine.refused());
+    assert_eq!(
+        script.params_of("Accessibility.getPartialAXTree"),
+        [json!({"backendNodeId": 5, "fetchRelatives": true})]
+    );
+}
+
+/// A row whose node is gone, with something else drawn where it was, was not
+/// covered: it was replaced. Nothing is clicked, and the outcome says so.
+#[test]
+fn a_row_replaced_by_another_control_is_refused_as_replaced() {
+    let (script, mut engine) = engine_after_read();
+    script_press_on_replaced_row(&script, replaced::load("ax-partial")["result"].clone());
+
+    engine
+        .perform(&BrowserCommand::Press {
+            at: Point { x: 120, y: 19 },
+            node: email(),
+        })
+        .expect("a refused click is not an error");
+
+    assert_eq!(clicks(&script), 0);
+    assert_eq!(
+        engine.outcome(),
+        Some("the tap was not made: the row was replaced since the page was read")
+    );
+    assert!(engine.refused(), "a refused tap says so");
+}
+
+/// Two nodes at the point that both look like the row cannot say which one it
+/// became, so nothing is clicked.
+#[test]
+fn a_replaced_row_with_two_look_alikes_at_the_point_is_refused() {
+    let (script, mut engine) = engine_after_read();
+    script_press_on_replaced_row(&script, replaced::ancestors_as("textbox", "Email", 2));
+
+    engine
+        .perform(&BrowserCommand::Press {
+            at: Point { x: 120, y: 19 },
+            node: email(),
+        })
+        .expect("a refused click is not an error");
+
+    assert_eq!(clicks(&script), 0);
+    assert_eq!(
+        engine.outcome(),
+        Some("the tap was not made: the row was replaced since the page was read")
+    );
+}
+
 /// The read's node ids belong to the document it read. Once the frame has
 /// loaded another, the same id may name something else, so nothing is
 /// hit-tested or clicked.
@@ -1292,6 +1416,55 @@ fn navigate_loads_the_address_and_reports_where_it_went() {
         loaded < next_request,
         "the page is asked nothing more until it has loaded: {order:?}"
     );
+}
+
+/// A tab opened for the run is made blank and then sent to its address the
+/// way `navigate` sends one, so nothing is read until the page has loaded.
+/// Created straight at its address, the tab was read before it had committed
+/// its navigation: no address and no rows, on GitHub in attach mode.
+#[test]
+fn an_opened_tab_is_read_only_after_its_page_has_loaded() {
+    let script = Script::new();
+    script.on("Target.createTarget", json!({"targetId": signup::TARGET}));
+    script_attach(&script);
+    script.answer(
+        "Page.navigate",
+        Answer::EventsThen(
+            vec![json!({"method": "Page.frameNavigated", "params": {"frame": {"id": signup::MAIN_FRAME, "loaderId": "L2", "url": "https://example.test/signup"}}, "sessionId": SESSION})],
+            Box::new(Answer::ThenEvents(
+                Box::new(Answer::Result(json!({"frameId": signup::MAIN_FRAME, "loaderId": "L2"}))),
+                vec![json!({"method": "Page.loadEventFired", "params": {"timestamp": 1.0}, "sessionId": SESSION})],
+            )),
+        ),
+    );
+    script.on(
+        "Page.createIsolatedWorld",
+        json!({"executionContextId": 42}),
+    );
+    script_settle(&script, 0);
+    script_read(&script);
+
+    let mut engine = CdpEngine::open(script.clone(), "https://example.test/signup").expect("opens");
+    engine.read().expect("reads");
+
+    assert_eq!(
+        script.params_of("Target.createTarget"),
+        [json!({"url": "about:blank"})]
+    );
+    assert_eq!(
+        script.params_of("Page.navigate"),
+        [json!({"url": "https://example.test/signup"})]
+    );
+    let order = script.order();
+    let loaded = order
+        .iter()
+        .position(|e| e == "received Page.loadEventFired")
+        .expect("the load is seen");
+    let first_read = order
+        .iter()
+        .position(|e| e == "sent Accessibility.getFullAXTree")
+        .expect("the page is read");
+    assert!(loaded < first_read, "read before its load: {order:?}");
 }
 
 /// A tab opened by an owned tab is owned too, and can then be switched to:

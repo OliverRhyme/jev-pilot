@@ -719,6 +719,10 @@ mod web {
         fn outcome(&mut self) -> Option<Box<str>> {
             self.device.outcome()
         }
+
+        fn refused(&mut self) -> bool {
+            self.device.refused()
+        }
     }
 
     impl Session {

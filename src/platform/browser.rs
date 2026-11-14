@@ -54,6 +54,14 @@ const CONTAINER_ROLES: &[&str] = &["listitem", "row", "article", "group"];
 /// The longest piece of surrounding text added to a row as context.
 const CONTEXT_CHARS: usize = 80;
 
+/// The longest a row's name, or what it says about itself, may be.
+///
+/// A clickable with no name of its own is named after the words inside it,
+/// and a region that takes the clicks for everything in it can hold a page
+/// of them: a repository header on GitHub carried its whole README, and
+/// TypeSafe refused the request for being too long.
+const ROW_CHARS: usize = 120;
+
 /// How many look-alikes still get context. Beyond this they are page
 /// furniture, which [`Catalog`](crate::act::Catalog) already drops.
 const MOST_LOOK_ALIKES: usize = 3;
@@ -428,7 +436,7 @@ impl<'a> Page<'a> {
             .map(squash)
             .filter(|c| !c.is_empty())
         {
-            return Some(clip(&context));
+            return Some(clip(&context, CONTEXT_CHARS));
         }
         let around = row.bounds;
         self.read
@@ -440,7 +448,7 @@ impl<'a> Page<'a> {
             .filter_map(|node| node.bounds.map(|b| (node, b)))
             .filter(|(_, b)| contains(*b, around))
             .min_by(|(_, a), (_, b)| (a.width * a.height).total_cmp(&(b.width * b.height)))
-            .map(|(node, _)| clip(&squash(&node.name)))
+            .map(|(node, _)| clip(&squash(&node.name), CONTEXT_CHARS))
     }
 
     /// What the screen says: the words in view that no row already carries, an
@@ -558,11 +566,11 @@ impl Words {
     /// `None` for a control that has nothing to be called.
     fn of(node: &PageNode, name: &str, states: NodeStates) -> Option<Self> {
         let role = lower(&node.role);
-        let name = squash(name);
+        let name = clip(&squash(name), ROW_CHARS);
         let description = node
             .description
             .as_deref()
-            .map(squash)
+            .map(|d| clip(&squash(d), ROW_CHARS))
             .filter(|d| !d.is_empty());
         let select = role == "combobox" && !states.editable && !node.options.is_empty();
         let editable =
@@ -597,7 +605,11 @@ impl Words {
         } else {
             (name, false)
         };
-        let value = node.value.as_deref().map(squash).filter(|v| !v.is_empty());
+        let value = node
+            .value
+            .as_deref()
+            .map(|v| clip(&squash(v), ROW_CHARS))
+            .filter(|v| !v.is_empty());
         let detail = if select {
             let current = value.unwrap_or_else(|| "nothing selected".to_owned());
             let options: Vec<&str> = node.options.iter().map(AsRef::as_ref).collect();
@@ -707,10 +719,11 @@ fn squash(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn clip(text: &str) -> String {
-    if text.chars().count() <= CONTEXT_CHARS {
+/// `text` cut to at most `limit` characters and an ellipsis.
+fn clip(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
         return text.to_owned();
     }
-    let kept: String = text.chars().take(CONTEXT_CHARS).collect();
+    let kept: String = text.chars().take(limit).collect();
     format!("{}…", kept.trim_end())
 }

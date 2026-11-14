@@ -25,6 +25,16 @@
 //! This program calls nothing and needs no key. It writes one request per
 //! line to standard output, band 0 first, and says which is which on
 //! standard error.
+//!
+//! With `--send` as the first argument it sends each request itself, with
+//! the key the command line uses (`TYPESAFE_API_KEY_FILE` or
+//! `TYPESAFE_API_KEY`), and writes one line per band instead: the band, the
+//! rows offered, the request, and Jev's answers.
+//!
+//! ```sh
+//! cargo run --quiet --features browser,http --example band -- --send \
+//!   tests/fixtures/browser/search-results.json "Open the seventh result"
+//! ```
 
 #[cfg(feature = "browser")]
 fn main() -> Result<(), Box<dyn core::error::Error>> {
@@ -33,8 +43,11 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         browser::{BAND_VIEWPORTS, Browser},
     };
 
-    let mut args = std::env::args().skip(1);
-    let path = args.next().ok_or("usage: band <page-read.json> [goal]")?;
+    let mut args = std::env::args().skip(1).peekable();
+    let send = args.next_if(|a| a == "--send").is_some();
+    let path = args
+        .next()
+        .ok_or("usage: band [--send] <page-read.json> [goal]")?;
     let goal = args
         .next()
         .unwrap_or_else(|| "Open the first result".to_owned());
@@ -44,19 +57,56 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         let browser = Browser::with_band(band);
         let rows = browser.parse_hierarchy(&raw)?.rows();
         eprintln!("band {band}: {rows} rows offered");
-        println!("{}", first_request(browser, &raw, &goal)?);
+        let request = first_request(browser, &raw, &goal)?;
+        if send {
+            println!("{}", sent(band, rows, &request)?);
+        } else {
+            println!("{request}");
+        }
     }
     Ok(())
 }
 
-/// The request a run's first step would send on this page, as one line of
-/// JSON.
+/// Send `request` to Jev, and say what came back, as one line of JSON.
+#[cfg(all(feature = "browser", feature = "http"))]
+fn sent(
+    band: f64,
+    rows: usize,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn core::error::Error>> {
+    use jev_pilot::client::{Evaluation, Request, http::SystemOne};
+    use jev_pilot::credential::ApiKey;
+
+    let jev = SystemOne::new(ApiKey::from_env()?);
+    let evaluation: Evaluation<serde_json::Value> = jev.evaluate(&Request::new(
+        request["state"].clone(),
+        request["questions"].clone(),
+    ))?;
+    Ok(serde_json::json!({
+        "band": band,
+        "rows": rows,
+        "model": &*evaluation.model,
+        "request": request,
+        "answers": evaluation.answers,
+    }))
+}
+
+#[cfg(all(feature = "browser", not(feature = "http")))]
+fn sent(
+    _: f64,
+    _: usize,
+    _: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn core::error::Error>> {
+    Err("--send needs the `http` feature too".into())
+}
+
+/// The request a run's first step would send on this page.
 #[cfg(feature = "browser")]
 fn first_request(
     browser: jev_pilot::platform::browser::Browser,
     raw: &str,
     goal: &str,
-) -> Result<String, Box<dyn core::error::Error>> {
+) -> Result<serde_json::Value, Box<dyn core::error::Error>> {
     use jev_pilot::pilot::{Judge, Pilot};
     use jev_pilot::platform::Platform;
     use jev_pilot::snapshot::Snapshot;
@@ -83,7 +133,7 @@ fn first_request(
     }
 
     /// Keeps the first request it is asked, and ends the run there.
-    struct Keep(Rc<RefCell<Option<String>>>);
+    struct Keep(Rc<RefCell<Option<serde_json::Value>>>);
 
     #[derive(Debug)]
     struct Kept;
@@ -105,7 +155,7 @@ fn first_request(
             questions: &StepQuestions<'_>,
         ) -> Result<StepAnswers, Kept> {
             let request = jev_pilot::client::Request::new(&state, questions);
-            *self.0.borrow_mut() = serde_json::to_string(&request).ok();
+            *self.0.borrow_mut() = serde_json::to_value(&request).ok();
             Err(Kept)
         }
     }

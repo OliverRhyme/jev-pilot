@@ -205,4 +205,16 @@ pub trait Device {
     fn outcome(&mut self) -> Option<Box<str>> {
         None
     }
+
+    /// Whether the last command was refused rather than carried out, as a
+    /// browser refuses a tap on a row it finds covered or replaced at click
+    /// time.
+    ///
+    /// A refused command was never made, so choosing it again is not a
+    /// repeat, and it is not an action the run has taken.
+    ///
+    /// Defaulted to `false`: a phone carries out every command it accepts.
+    fn refused(&mut self) -> bool {
+        false
+    }
 }

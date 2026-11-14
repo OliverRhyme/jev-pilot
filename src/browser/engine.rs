@@ -18,6 +18,7 @@ use crate::browser::transport::{Connection, TransportError, Waited, Wire};
 use crate::platform::page::{PageRead, PageTab, Viewport};
 use crate::snapshot::{Dialog, DialogKind, NodeKey, Point, TabKey};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// How a JavaScript dialog is answered.
@@ -95,6 +96,11 @@ pub trait BrowserEngine {
 
     /// What the last command did, as the engine saw it.
     fn outcome(&self) -> Option<&str>;
+
+    /// Whether the last command was refused at click time and never made.
+    fn refused(&self) -> bool {
+        false
+    }
 
     /// How long the page had gone without a DOM change at the last read.
     fn quiet_for_ms(&self) -> Option<u64> {
@@ -227,6 +233,10 @@ pub struct CdpEngine<W: Wire> {
     mutations: Option<u64>,
     world: Option<i64>,
     seen: Seen,
+    /// Each row of the last read, by node key: its role and its name.
+    rows: HashMap<Box<str>, (Box<str>, String)>,
+    /// Whether the last command was refused at click time.
+    refused: bool,
 }
 
 impl<W: Wire> CdpEngine<W> {
@@ -266,6 +276,8 @@ impl<W: Wire> CdpEngine<W> {
             mutations: None,
             world: None,
             seen: Seen::default(),
+            rows: HashMap::new(),
+            refused: false,
         };
         // Listed before discovery starts, because discovery reports every tab
         // already open as if it had just been created, opener and all.
@@ -295,9 +307,13 @@ impl<W: Wire> CdpEngine<W> {
     /// session.
     pub fn open(wire: W, url: &str) -> Result<Self, EngineError> {
         let mut connection = Connection::new(wire);
+        // Made blank and then sent to its address, so its load is waited for
+        // as any navigation's is. Created straight at the address, the tab
+        // was read before it had committed its navigation: no address, and
+        // no rows.
         let created = connection.call(
             "Target.createTarget",
-            json!({"url": url}),
+            json!({"url": "about:blank"}),
             None,
             Timeouts::default().call,
         )?;
@@ -307,7 +323,9 @@ impl<W: Wire> CdpEngine<W> {
             .unwrap_or_default()
             .to_owned();
         let wire = connection.into_wire();
-        Self::attach(wire, &TabKey::new(target), true)
+        let mut engine = Self::attach(wire, &TabKey::new(target), true)?;
+        engine.perform(&BrowserCommand::Navigate(url.into()))?;
+        Ok(engine)
     }
 
     /// The wire underneath.
@@ -572,6 +590,11 @@ impl<W: Wire> CdpEngine<W> {
         read.accepted_alert = self.accepted_alert.take();
         read.dialog.clone_from(&self.dialog);
         self.viewport = Some(read.viewport);
+        self.rows = read
+            .nodes
+            .iter()
+            .map(|n| (n.key.as_str().into(), (n.role.clone(), squash(&n.name))))
+            .collect();
         Ok(read)
     }
 
@@ -729,19 +752,40 @@ impl<W: Wire> CdpEngine<W> {
         let Some(hit) = hit else {
             return Ok(Err("nothing is drawn where it is".into()));
         };
-        if hit != parts.backend
-            && let Some(what) = self.covering(parts.backend, hit)?
-        {
-            return Ok(Err(format!("{what} covers it").into()));
+        if hit != parts.backend {
+            match self.object(parts.backend)? {
+                // The node read is gone: the page redrew the row after it was
+                // read, as GitHub does to its star button when the count
+                // changes. What is drawn there now is the same control when
+                // exactly one node at the point looks like the row did.
+                None if self.redrawn_at(hit, node)? => {}
+                None => return Ok(Err("the row was replaced since the page was read".into())),
+                Some(row) => {
+                    if let Some(what) = self.covering(&row, hit)? {
+                        return Ok(Err(format!("{what} covers it").into()));
+                    }
+                }
+            }
         }
         Ok(Ok((x, y)))
     }
 
+    /// Whether exactly one node at the point, the hit or one of its
+    /// accessibility ancestors, has the role and name `node` was read with.
+    fn redrawn_at(&mut self, hit: i64, node: &NodeKey) -> Result<bool, Stop> {
+        let Some((role, name)) = self.rows.get(node.as_str()).cloned() else {
+            return Ok(false);
+        };
+        let tree = gone(self.call(
+            "Accessibility.getPartialAXTree",
+            json!({"backendNodeId": hit, "fetchRelatives": true}),
+        ))?;
+        Ok(tree.is_some_and(|tree| look_alikes(&tree, hit, &role, &name) == 1))
+    }
+
     /// `None` when the hit node is inside the row's, else what it is.
-    fn covering(&mut self, row: i64, hit: i64) -> Result<Option<Box<str>>, Stop> {
-        let row_object = self.object(row)?;
-        let hit_object = self.object(hit)?;
-        let (Some(row_object), Some(hit_object)) = (row_object, hit_object) else {
+    fn covering(&mut self, row_object: &str, hit: i64) -> Result<Option<Box<str>>, Stop> {
+        let Some(hit_object) = self.object(hit)? else {
             return Ok(Some("something else".into()));
         };
         let answer = self.call(
@@ -788,6 +832,7 @@ impl<W: Wire> CdpEngine<W> {
         let Some(parts) = KeyParts::parse(node) else {
             self.outcome =
                 Some("the tap was not made: the row is not one this browser read".into());
+            self.refused = true;
             return Ok(());
         };
         let described = self.call("DOM.describeNode", json!({"backendNodeId": parts.backend}));
@@ -805,11 +850,13 @@ impl<W: Wire> CdpEngine<W> {
             // that is covered is not one a person could change.
             if let Err(reason) = self.aim(at, node)? {
                 self.outcome = Some(format!("nothing was chosen: {reason}").into());
+                self.refused = true;
                 return Ok(());
             }
             let Some(object) = self.object(parts.backend)? else {
                 self.outcome =
                     Some("the tap was not made: the row is no longer on the page".into());
+                self.refused = true;
                 return Ok(());
             };
             let answer = self.call(
@@ -827,6 +874,7 @@ impl<W: Wire> CdpEngine<W> {
         }
         if let Err(reason) = self.press(at, node)? {
             self.outcome = Some(format!("the tap was not made: {reason}").into());
+            self.refused = true;
             return Ok(());
         }
         for event in input::select_all() {
@@ -858,6 +906,7 @@ impl<W: Wire> CdpEngine<W> {
             BrowserCommand::Press { at, node } => {
                 if let Err(reason) = self.press(*at, node)? {
                     self.outcome = Some(format!("the tap was not made: {reason}").into());
+                    self.refused = true;
                 }
             }
             BrowserCommand::Fill { at, node, text } => self.fill(*at, node, text)?,
@@ -981,6 +1030,49 @@ fn gone(result: Result<Value, Stop>) -> Result<Option<Value>, Stop> {
     }
 }
 
+/// How many nodes on the way up from `hit` through its accessibility
+/// ancestors, in a `getPartialAXTree` reply, have this role and name. Its
+/// siblings and children, which the reply also holds, are not counted.
+fn look_alikes(tree: &Value, hit: i64, role: &str, name: &str) -> usize {
+    let nodes: Vec<&Value> = tree
+        .get("nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .collect();
+    let by_id = |id: &Value| nodes.iter().copied().find(|n| n.get("nodeId") == Some(id));
+    let mut at = nodes
+        .iter()
+        .copied()
+        .find(|n| n.get("backendDOMNodeId").and_then(Value::as_i64) == Some(hit));
+    let mut count = 0;
+    let mut steps = 0;
+    while let Some(node) = at {
+        let ignored = node.get("ignored").and_then(Value::as_bool) == Some(true);
+        let text = |field: &str| {
+            node.pointer(&format!("/{field}/value"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        };
+        if !ignored && text("role") == role && squash(text("name")) == name {
+            count += 1;
+        }
+        // A malformed reply whose parents loop is walked no further than the
+        // reply is long.
+        steps += 1;
+        if steps > nodes.len() {
+            break;
+        }
+        at = node.get("parentId").and_then(by_id);
+    }
+    count
+}
+
+/// Whitespace collapsed to single spaces.
+fn squash(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The scheme, host and port of an address.
 fn origin(url: &str) -> &str {
     let Some(scheme_end) = url.find("://") else {
@@ -1011,6 +1103,7 @@ impl<W: Wire> BrowserEngine for CdpEngine<W> {
     fn perform(&mut self, command: &BrowserCommand) -> Result<(), EngineError> {
         self.pump();
         self.outcome = None;
+        self.refused = false;
         self.seen = Seen::default();
         match self.run(command) {
             Ok(()) => {
@@ -1030,6 +1123,10 @@ impl<W: Wire> BrowserEngine for CdpEngine<W> {
 
     fn outcome(&self) -> Option<&str> {
         self.outcome.as_deref()
+    }
+
+    fn refused(&self) -> bool {
+        self.refused
     }
 
     fn quiet_for_ms(&self) -> Option<u64> {

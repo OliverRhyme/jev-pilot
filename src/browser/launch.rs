@@ -82,6 +82,9 @@ pub fn launch_args(profile: &Path, headless: bool) -> Vec<String> {
     ];
     if headless {
         args.push("--headless".to_owned());
+        // Headless Chrome's own window is 800 by 600, for which sites serve
+        // their narrow layout and fold controls into menus.
+        args.push("--window-size=1280,800".to_owned());
     }
     args.push("about:blank".to_owned());
     args

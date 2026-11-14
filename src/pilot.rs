@@ -1224,6 +1224,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         let mut lately: Vec<String> = Vec::new();
         // How many actions in a row have left the screen exactly as it was.
         let mut ineffective: u32 = 0;
+        // Whether the screen has already been looked at again, before asking,
+        // since the last action that seemed to change nothing.
+        let mut looked_again = false;
         // How many of `self.keys` have been pressed on the keypad now showing.
         let mut entered: usize = 0;
         // Whether the last action was seen to move the screen, so this step
@@ -1537,8 +1540,17 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // things and shown one of them is not finished. With no criteria
             // given there is nothing to be satisfied by, and the progress
             // score above remains the only word on it.
+            //
+            // A plan says there is work to do, so with one, criteria that hold
+            // before the run has done anything are not that work done.
+            // Measured on GitHub: "the star button reads Star" held on the
+            // unstarred repository, and a run told to star it and then unstar
+            // it ended achieved without touching it. Without a plan, a screen
+            // that already satisfies the criteria is where the run should
+            // stop, as for "make sure Wi-Fi is on".
             if !blind
                 && !self.criteria.is_empty()
+                && (self.plan.is_empty() || self.acted > 0)
                 && answers.unmet(&self.criteria, self.certainty).is_none()
             {
                 self.report(
@@ -1595,6 +1607,47 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             }
 
             let moved_before = core::mem::take(&mut just_moved);
+            // An action that seemed to change nothing may only be slow. A
+            // link that starts a network call leaves the old page up, quiet
+            // from just after the click, until the new one arrives, so the
+            // watch after acting can call it dead while it is on its way.
+            // Before asking about what may be the old screen, look again once,
+            // as patiently as a second try of the action would.
+            //
+            // Measured on GitHub: the Issues tab was tapped, judged to have
+            // done nothing in 627ms, and the question asked about the old
+            // page waited five minutes for an answer.
+            let arrived_late = matches!(decided, Err(Indecision::TooUncertain { .. }))
+                && ineffective > 0
+                && !core::mem::replace(&mut looked_again, true)
+                && self.settled_on_a_new_screen(snapshot.fingerprint(), ineffective + 1)?;
+            if arrived_late {
+                ineffective = 0;
+                looked_again = false;
+                just_moved = true;
+                previous = Some(format!(
+                    "{} — the screen changed after a wait",
+                    last_did.as_deref().unwrap_or("Acted")
+                ));
+                self.report(
+                    index,
+                    &snapshot,
+                    &answers,
+                    Some(&Act::Wait),
+                    Went {
+                        repeating: repeated,
+                        acted: false,
+                    },
+                    Spent {
+                        read_ms,
+                        step_ms: elapsed_ms(began),
+                        waited_ms: waited.get(),
+                        judged_ms,
+                        settled_ms,
+                    },
+                );
+                continue;
+            }
             let decision = match decided {
                 Ok(decision) => decision,
                 // A screen on its way from one thing to the next is read as it
@@ -1887,7 +1940,16 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                         continue;
                     }
                     self.device.perform(&command).map_err(RunError::Device)?;
-                    self.acted = self.acted.saturating_add(1);
+                    // A command the device refused was never made: choosing
+                    // it again is not a repeat, and it is not an action taken.
+                    // Measured on GitHub: Unstar was refused once, and the
+                    // guard against repeating turned the next two tries into
+                    // waits, so it was never pressed.
+                    if self.device.refused() {
+                        last_sent = None;
+                    } else {
+                        self.acted = self.acted.saturating_add(1);
+                    }
                     if let Act::Tap(row) = &act
                         && let Ok(pressed) = snapshot.resolve(*row)
                     {
@@ -1936,6 +1998,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     }
                     if moved {
                         ineffective = 0;
+                        looked_again = false;
                         just_moved = true;
                     } else {
                         // It never moved. That is worth saying: a run that

@@ -141,4 +141,8 @@ where
     fn outcome(&mut self) -> Option<Box<str>> {
         self.engine.outcome().map(Into::into)
     }
+
+    fn refused(&mut self) -> bool {
+        self.engine.refused()
+    }
 }

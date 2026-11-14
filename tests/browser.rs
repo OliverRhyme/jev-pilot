@@ -882,3 +882,37 @@ fn a_recorded_page_offers_each_field_once() {
         );
     }
 }
+
+/// A nameless clickable is named after the words inside it, and a region that
+/// takes the clicks for everything in it can hold a page of them: GitHub's
+/// repository header carried the whole README, and the request was refused
+/// for being too long. A row's name and what it says are cut short instead.
+#[test]
+fn a_row_is_never_named_at_length() {
+    let long = "word ".repeat(2000);
+    let mut region = node("generic", &long, 100.0);
+    region.clickable = true;
+    let mut link = node("link", "Docs", 300.0);
+    link.description = Some(long.clone().into());
+
+    let snapshot = Browser::default().snapshot_from(&read(vec![region, link]));
+
+    let rows = rows(&snapshot);
+    let (region, _) = &rows[0];
+    assert!(
+        region.chars().count() <= 121,
+        "{} chars",
+        region.chars().count()
+    );
+    assert!(
+        region.starts_with("word word") && region.ends_with('…'),
+        "{region}"
+    );
+    let (_, detail) = &rows[1];
+    let detail = detail.as_deref().expect("the link's description");
+    assert!(
+        detail.chars().count() <= 121,
+        "{} chars",
+        detail.chars().count()
+    );
+}

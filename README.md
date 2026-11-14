@@ -425,6 +425,12 @@ Each becomes its own judgment in the same parallel request, so confirming is
 free, and a rejected verdict is fed back into the next step rather than ending
 the run: *"Declared the goal done, but that was rejected: … was not true."*
 
+When every criterion holds, the run ends there, achieved, whatever the model
+chose next, except that a run given a plan (`following`, or `--then`) must first
+have done something, because criteria that held before any of the plan's work
+was done (a star button reading "Star" before a star-then-unstar) say nothing
+about it.
+
 **Write one claim per criterion.** Bundling them reads naturally and fails.
 Against a real player screen, `"A full-length video is playing, not a Short and
 not a search results page"` scored **0.31**, while the same three claims asked
