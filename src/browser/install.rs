@@ -1421,10 +1421,7 @@ fn apply_one(step: &Step, installer: &Installer, said: &mut Vec<String>) -> io::
             std::fs::create_dir_all(path)?;
             set_owner(path, *owner, *mode)?;
         }
-        Step::CreateFile { path, mode, owner } => {
-            OpenOptions::new().create(true).append(true).open(path)?;
-            set_owner(path, *owner, *mode)?;
-        }
+        Step::CreateFile { path, mode, owner } => make_file(path, *mode, *owner)?,
         Step::CopyBinary { from, to } => {
             if same_file(from, to) {
                 said.push(format!("jev-pilot is already at {}", to.display()));
@@ -1508,6 +1505,44 @@ fn apply_one(step: &Step, installer: &Installer, said: &mut Vec<String>) -> io::
         }
         Step::Tell(words) => said.push(words.clone()),
     }
+    Ok(())
+}
+
+/// Make a file if it is missing, keeping what an existing one holds, and
+/// give it its owner and mode: opened without following a link, checked to
+/// be a regular file, and changed through what was opened, so nothing
+/// planted in its place is changed instead.
+///
+/// # Errors
+/// When `path` is a link or not a regular file, or cannot be opened or
+/// changed.
+pub fn make_file(path: &Path, mode: u32, owner: Owner) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(nix::libc::O_NOFOLLOW).mode(0o600);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other(format!(
+            "{} is not a file",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        match owner {
+            Owner::User => {}
+            Owner::Root => std::os::unix::fs::fchown(&file, Some(0), Some(0))?,
+            Owner::RootGroup => std::os::unix::fs::fchown(&file, Some(0), Some(group_id()?))?,
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (mode, owner);
     Ok(())
 }
 

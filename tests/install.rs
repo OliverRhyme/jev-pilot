@@ -1615,3 +1615,38 @@ fn a_run_handed_to_an_installed_copy_of_another_version_says_so() {
     );
     assert_eq!(handing_over("0.4.0", "0.4.0"), None);
 }
+
+/// A file the install makes, or keeps, is opened without following a link,
+/// must be a regular file, and gets its owner and mode through what was
+/// opened: a link planted where it goes is refused.
+#[cfg(unix)]
+#[test]
+fn a_file_the_install_makes_is_never_reached_through_a_link() {
+    use jev_pilot::browser::install::make_file;
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-make-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("audit.log");
+    make_file(&file, 0o640, Owner::User).expect("made");
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    std::fs::write(&file, "kept").unwrap();
+    make_file(&file, 0o640, Owner::User).expect("kept");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "kept");
+
+    let target = dir.join("elsewhere");
+    std::fs::write(&target, "not this").unwrap();
+    let link = dir.join("audit.log.1");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(make_file(&link, 0o640, Owner::User).is_err());
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    std::fs::create_dir(dir.join("audit.log.2")).unwrap();
+    assert!(make_file(&dir.join("audit.log.2"), 0o640, Owner::User).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
