@@ -13,7 +13,7 @@
 pub mod channel;
 mod serve;
 
-pub use serve::{AUDIT_LIMIT, Diagnostics, Serve, append_audit, serve};
+pub use serve::{AUDIT_LIMIT, Diagnostics, ECHO_WAIT, Serve, append_audit, serve};
 
 use std::time::{Duration, Instant, SystemTime};
 

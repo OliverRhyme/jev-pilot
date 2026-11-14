@@ -19,7 +19,7 @@ use crate::browser::bridge::{self, ByteOrder, FrameError, Message, Nonce};
 use crate::peer::{Expected, PeerCheck, Verdict, decide, recheck};
 
 /// How long a run has to echo the nonce.
-const ECHO_WAIT: Duration = Duration::from_secs(10);
+pub const ECHO_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a write to a run may wait before the run is taken as gone.
 const SEND_WAIT: Duration = Duration::from_secs(3);
@@ -58,6 +58,8 @@ pub struct Serve {
     pub installed_version: Box<dyn Fn() -> Option<String> + Send>,
     /// Where the host notes what went wrong, apart from the audit log.
     pub diagnostics: Option<Diagnostics>,
+    /// How long a run has to echo the nonce: [`ECHO_WAIT`].
+    pub echo_wait: Duration,
 }
 
 impl core::fmt::Debug for Serve {
@@ -124,6 +126,7 @@ pub fn serve(
         events.clone(),
         stop.clone(),
         config.diagnostics.clone(),
+        config.echo_wait,
     );
     watch_install(config.installed_version, events);
 
@@ -278,6 +281,7 @@ fn accept_runs(
     events: mpsc::SyncSender<Event>,
     stop: Arc<AtomicBool>,
     diagnostics: Option<Diagnostics>,
+    echo_wait: Duration,
 ) {
     std::thread::spawn(move || {
         let mut next: RunId = 0;
@@ -306,7 +310,9 @@ fn accept_runs(
             next += 1;
             let (run, check, expected, events) =
                 (next, check.clone(), expected.clone(), events.clone());
-            std::thread::spawn(move || serve_run(run, stream, &*check, &expected, &events));
+            std::thread::spawn(move || {
+                serve_run(run, stream, &*check, &expected, &events, echo_wait);
+            });
         }
     });
 }
@@ -319,6 +325,7 @@ fn serve_run(
     check: &dyn PeerCheck,
     expected: &Expected,
     events: &mpsc::SyncSender<Event>,
+    echo_wait: Duration,
 ) {
     let stream = Arc::new(stream);
     let send = |input| {
@@ -344,12 +351,27 @@ fn serve_run(
         send(Input::RunGone { run });
         return;
     }
-    let _ = stream.set_recv_timeout(Some(ECHO_WAIT));
+    let _ = stream.set_recv_timeout(Some(echo_wait));
     // Gone before echoing: a host checking whether this one serves, or a
     // run that gave up. Nothing to audit.
-    let Some(echo) = read_run(&stream) else {
-        send(Input::RunGone { run });
-        return;
+    let echo = match bridge::decode(&mut &*stream, ByteOrder::Little) {
+        Ok(Some(frame)) => serde_json::from_slice(&frame).unwrap_or(Message::Absent),
+        // Silent past the wait: refused, and audited.
+        Err(FrameError::Io(e))
+            if matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            refuse("nonce: not echoed in time".into());
+            return;
+        }
+        // Closed before echoing: a check that a host answers, or a run that
+        // gave up. Nothing to audit.
+        Ok(None) | Err(_) => {
+            send(Input::RunGone { run });
+            return;
+        }
     };
     if !nonce.is_echoed_by(&echo) {
         refuse("nonce: not echoed".into());

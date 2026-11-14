@@ -1146,8 +1146,10 @@ fn only_a_host_manifest_named_as_its_file_is_copied() {
     let padded = r#"{"name": "com.example.x", "path": "/opt/x/host", "type": "stdio",
                      "allowed_origins": [], "payload": "x", "nested": {"a": 1}}"#;
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&manifest_to_copy(padded, "com.example.x").unwrap())
-            .unwrap(),
+        serde_json::from_str::<serde_json::Value>(
+            &manifest_to_copy(padded, "com.example.x").unwrap()
+        )
+        .unwrap(),
         json!({"name": "com.example.x", "path": "/opt/x/host", "type": "stdio", "allowed_origins": []})
     );
     for (text, stem) in [

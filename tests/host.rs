@@ -1057,6 +1057,7 @@ mod serving {
             extension_on_disk: Some("0.4.0".into()),
             installed_version: Box::new(|| Some("0.4.0".into())),
             diagnostics: None,
+            echo_wait: Duration::from_millis(300),
         };
         let stdout = out.clone();
         let done = std::thread::spawn(move || serve(config, stdin, stdout));
@@ -1212,6 +1213,7 @@ mod serving {
             extension_on_disk: None,
             installed_version: Box::new(|| None),
             diagnostics: None,
+            echo_wait: Duration::from_millis(300),
         };
         let error = serve(config, stdin, Out::default()).expect_err("refused");
         assert_eq!(
@@ -1306,6 +1308,30 @@ mod serving {
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0]["event"], "refused");
         assert_eq!(events[0]["check"], "nonce: not echoed");
+    }
+
+    /// A connection that takes the nonce and then says nothing is refused
+    /// once the echo's wait is over, and audited; one that closes, as a
+    /// check that a host answers does, is not.
+    #[test]
+    fn a_missing_echo_is_refused_and_audited() {
+        let place = place();
+        let mut host = host_at(&place, Arc::new(Vouched));
+        let mut silent = raw(&place);
+        assert_eq!(first_frame(&mut silent)["type"], "nonce");
+        let mut closing = raw(&place);
+        assert_eq!(first_frame(&mut closing)["type"], "nonce");
+        drop(closing);
+        assert_eq!(
+            first_frame(&mut silent),
+            json!({"type": "refused", "check": "nonce: not echoed in time"})
+        );
+        drop(silent);
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("ends cleanly");
+        let events = audit_events(&host.audit);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["check"], "nonce: not echoed in time");
     }
 
     /// The host checks the run again after its echo: a run whose facts have

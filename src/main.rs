@@ -1266,6 +1266,7 @@ mod bridge {
                 Some(record.version)
             }),
             diagnostics,
+            echo_wait: jev_pilot::browser::host::ECHO_WAIT,
         };
         serve(config, std::io::stdin(), std::io::stdout().lock())?;
         Ok(())
