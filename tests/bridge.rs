@@ -255,7 +255,7 @@ fn the_extension_reports_page_events_and_tabs_coming_and_going() {
         &json!({"type": "tab_created", "tab": 8, "target": "T8", "opener": 7, "url": "https://example.test/next", "title": "Next"}),
         &Message::TabCreated(TabInfo {
             tab: 8,
-            target: "T8".into(),
+            target: Some("T8".into()),
             url: "https://example.test/next".into(),
             title: "Next".into(),
             opener: Some(7),
@@ -818,6 +818,34 @@ fn the_targets_are_the_extensions_tabs() {
             {"targetId": "T8", "type": "page", "title": "Next", "url": "https://example.test/next", "attached": false, "canAccessOpener": false, "openerId": "T7"},
         ]}})
     );
+}
+
+/// The extension may report a tab without a target id (one Chrome has not
+/// given it yet): it is read, and passed over as a target, while the tabs
+/// that have one are listed.
+#[test]
+fn a_tab_without_a_target_id_is_passed_over() {
+    let reply = json!({"type": "reply", "id": 3, "result": {"tabs": [
+        {"tab": 6, "url": "chrome://newtab/", "title": "New Tab"},
+        {"tab": 7, "target": "T7", "url": "https://example.test/", "title": "Example"},
+    ]}});
+    let (mut wire, _) = wire_with(&[reply]);
+    wire.send(r#"{"id":3,"method":"Target.getTargets","params":{}}"#)
+        .expect("sends");
+    assert_eq!(
+        received(&mut wire),
+        json!({"id": 3, "result": {"targetInfos": [
+            {"targetId": "T7", "type": "page", "title": "Example", "url": "https://example.test/", "attached": false, "canAccessOpener": false},
+        ]}})
+    );
+    let created: Message = serde_json::from_value(
+        json!({"type": "tab_created", "tab": 9, "url": "about:blank", "title": ""}),
+    )
+    .expect("a tab without a target is a message");
+    assert!(matches!(
+        created,
+        Message::TabCreated(TabInfo { target: None, .. })
+    ));
 }
 
 /// Discovery cannot be switched on through an extension; the extension

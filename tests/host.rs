@@ -1057,6 +1057,7 @@ mod serving {
             extension_on_disk: Some("0.4.0".into()),
             installed_version: Box::new(|| Some("0.4.0".into())),
             diagnostics: None,
+            echo_wait: Duration::from_millis(300),
         };
         let stdout = out.clone();
         let done = std::thread::spawn(move || serve(config, stdin, stdout));
@@ -1212,6 +1213,7 @@ mod serving {
             extension_on_disk: None,
             installed_version: Box::new(|| None),
             diagnostics: None,
+            echo_wait: Duration::from_millis(300),
         };
         let error = serve(config, stdin, Out::default()).expect_err("refused");
         assert_eq!(
@@ -1306,6 +1308,30 @@ mod serving {
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0]["event"], "refused");
         assert_eq!(events[0]["check"], "nonce: not echoed");
+    }
+
+    /// A connection that takes the nonce and then says nothing is refused
+    /// once the echo's wait is over, and audited; one that closes, as a
+    /// check that a host answers does, is not.
+    #[test]
+    fn a_missing_echo_is_refused_and_audited() {
+        let place = place();
+        let mut host = host_at(&place, Arc::new(Vouched));
+        let mut silent = raw(&place);
+        assert_eq!(first_frame(&mut silent)["type"], "nonce");
+        let mut closing = raw(&place);
+        assert_eq!(first_frame(&mut closing)["type"], "nonce");
+        drop(closing);
+        assert_eq!(
+            first_frame(&mut silent),
+            json!({"type": "refused", "check": "nonce: not echoed in time"})
+        );
+        drop(silent);
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("ends cleanly");
+        let events = audit_events(&host.audit);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["check"], "nonce: not echoed in time");
     }
 
     /// The host checks the run again after its echo: a run whose facts have
@@ -1471,4 +1497,94 @@ fn watchdog() {
             std::process::exit(101);
         });
     });
+}
+
+/// The diagnostics file is written only when it is the owner's own regular
+/// file with one name: a link or a second name planted in its place leaves
+/// what it points at untouched.
+#[cfg(unix)]
+#[test]
+fn the_diagnostics_file_is_never_reached_through_a_link() {
+    use jev_pilot::browser::host::Diagnostics;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-diaglink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let precious = dir.join("precious");
+    std::fs::write(&precious, "x".repeat(500)).unwrap();
+
+    let link = dir.join("host.log");
+    std::os::unix::fs::symlink(&precious, &link).unwrap();
+    Diagnostics::new(link.clone(), 100).note("through a link");
+    assert_eq!(std::fs::read_to_string(&precious).unwrap(), "x".repeat(500));
+
+    std::fs::remove_file(&link).unwrap();
+    std::fs::hard_link(&precious, &link).unwrap();
+    Diagnostics::new(link, 100).note("through a second name");
+    assert_eq!(std::fs::read_to_string(&precious).unwrap(), "x".repeat(500));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A loop of refused connections cannot rotate the audit log away: at most
+/// one refusal a minute is written, and the next one written says how many
+/// were left out.
+#[test]
+fn refusals_are_written_at_most_once_a_minute() {
+    use jev_pilot::browser::host::Throttle;
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let refusal = |n: u32| Audit::Refused {
+        pid: Some(n),
+        check: "uid: not the expected value".into(),
+    };
+    let mut throttle = Throttle::default();
+    assert_eq!(throttle.admit(refusal(1), start), [refusal(1)]);
+    for n in 2..=100 {
+        assert_eq!(
+            throttle.admit(refusal(n), start + Duration::from_secs(u64::from(n) % 50)),
+            []
+        );
+    }
+    // Other events always pass.
+    let ended = Audit::RunEnded {
+        pid: 7,
+        how: "closed".into(),
+    };
+    assert_eq!(throttle.admit(ended.clone(), start), [ended]);
+    assert_eq!(
+        throttle.admit(refusal(101), start + Duration::from_secs(61)),
+        [Audit::NotWritten { refusals: 99 }, refusal(101)]
+    );
+    assert_eq!(
+        Audit::NotWritten { refusals: 99 }.line("2026-11-15T09:30:00Z"),
+        "{\"event\":\"refusals_not_written\",\"refusals\":99,\"time\":\"2026-11-15T09:30:00Z\"}\n"
+    );
+}
+
+/// Each refused host start is a process of its own: one within a minute of
+/// the last refused start in the log is not written again.
+#[test]
+fn a_refused_host_start_is_not_written_twice_in_a_minute() {
+    use jev_pilot::browser::host::{refused_start_lately, utc};
+    use std::time::{Duration, SystemTime};
+    let now = SystemTime::UNIX_EPOCH + Duration::from_mins(29_912_300);
+    let at = |ago: u64| utc(now - Duration::from_secs(ago));
+    let refused = |ago: u64| {
+        format!(
+            "{{\"browser\":\"refused\",\"event\":\"host_started\",\"parent_pid\":7,\"time\":\"{}\",\"why\":\"x\"}}\n",
+            at(ago)
+        )
+    };
+    let accepted = format!(
+        "{{\"browser\":\"accepted\",\"event\":\"host_started\",\"parent_pid\":7,\"time\":\"{}\"}}\n",
+        at(5)
+    );
+    assert!(refused_start_lately(&refused(30), now));
+    assert!(!refused_start_lately(&refused(90), now));
+    assert!(!refused_start_lately(&accepted, now));
+    assert!(refused_start_lately(
+        &format!("{}{}", refused(30), accepted),
+        now
+    ));
+    assert!(!refused_start_lately("", now));
+    assert!(!refused_start_lately("not json\n", now));
 }

@@ -9,9 +9,12 @@ use std::ptr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, INVALID_HANDLE_VALUE,
+    LocalFree,
 };
-use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+};
 use windows_sys::Win32::Security::Cryptography::{
     CERT_NAME_RDN_TYPE, CERT_NAME_STR_REVERSE_FLAG, CERT_X500_NAME_STR, CertGetNameStringW,
 };
@@ -22,13 +25,17 @@ use windows_sys::Win32::Security::WinTrust::{
     WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, LookupAccountSidW, PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
-    TokenElevation, TokenUser,
+    GetTokenInformation, LookupAccountNameW, LookupAccountSidW, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation,
+    TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
+use windows_sys::Win32::System::Registry::{
+    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY, RegCloseKey, RegOpenKeyExW,
 };
 use windows_sys::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_INFO_CLASS,
@@ -344,6 +351,116 @@ pub fn parent_process_id(pid: u32) -> io::Result<u32> {
         io::ErrorKind::NotFound,
         format!("no process {pid}"),
     ))
+}
+
+/// The string form of the SID that owns the file or folder at `path`.
+///
+/// # Errors
+///
+/// When its security cannot be read.
+#[allow(unsafe_code)]
+pub fn owner_sid(path: &Path) -> io::Result<String> {
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect();
+    let mut owner: PSID = ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: `wide` is a NUL-terminated path that outlives the call;
+    // `owner` and `descriptor` are valid places for what it returns, and
+    // the other out-pointers are null, which the call allows.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &raw mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &raw mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(
+            i32::try_from(status).unwrap_or(-1),
+        ));
+    }
+    // `owner` points into `descriptor`, freed below once it is read.
+    let sid = sid_string(owner);
+    // SAFETY: `descriptor` was allocated by GetNamedSecurityInfoW, which
+    // says to free it with LocalFree; nothing points into it after this.
+    unsafe { LocalFree(descriptor.cast()) };
+    sid
+}
+
+/// Whether the key `HKLM\<key>` exists, in the 64-bit view. Only a key
+/// Windows says is not found is absent; any other failure is an error.
+///
+/// # Errors
+///
+/// When the key cannot be told to exist or not.
+#[allow(unsafe_code)]
+pub fn machine_key_exists(key: &str) -> io::Result<bool> {
+    let wide: Vec<u16> = key.encode_utf16().chain(iter::once(0)).collect();
+    let mut handle: HKEY = ptr::null_mut();
+    // SAFETY: `wide` is a NUL-terminated key name that outlives the call;
+    // `handle` is a valid place for the opened key.
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide.as_ptr(),
+            0,
+            KEY_READ | KEY_WOW64_64KEY,
+            &raw mut handle,
+        )
+    };
+    match status {
+        0 => {
+            // SAFETY: the key was opened above and is not used after this.
+            unsafe { RegCloseKey(handle) };
+            Ok(true)
+        }
+        ERROR_FILE_NOT_FOUND => Ok(false),
+        other => Err(io::Error::from_raw_os_error(
+            i32::try_from(other).unwrap_or(-1),
+        )),
+    }
+}
+
+/// The SID of the account signed in to this process's session.
+///
+/// # Errors
+///
+/// When the session's account cannot be named or found.
+#[allow(unsafe_code)]
+pub fn session_user_sid() -> io::Result<String> {
+    let account = session_account()?;
+    let wide: Vec<u16> = account.encode_utf16().chain(iter::once(0)).collect();
+    let mut sid = vec![0u64; 16];
+    let mut sid_len = u32::try_from(sid.len() * 8).map_err(io::Error::other)?;
+    let mut domain = vec![0u16; 256];
+    let mut domain_len = 256u32;
+    let mut kind = 0;
+    // SAFETY: `wide` is a NUL-terminated account name; `sid` and `domain`
+    // hold the lengths given (a SID is at most 68 bytes), and the lengths
+    // and `kind` are valid places for what the call writes.
+    let ok = unsafe {
+        LookupAccountNameW(
+            ptr::null(),
+            wide.as_ptr(),
+            sid.as_mut_ptr().cast(),
+            &raw mut sid_len,
+            domain.as_mut_ptr(),
+            &raw mut domain_len,
+            &raw mut kind,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    sid_string(sid.as_mut_ptr().cast())
 }
 
 /// The account signed in to this process's session, as `DOMAIN\name`.

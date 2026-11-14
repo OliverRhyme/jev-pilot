@@ -55,6 +55,10 @@ tokio = { version = "1", default-features = false, features = ["rt", "macros", "
 [target.'cfg(windows)'.dev-dependencies]
 jev-pilot-os = { path = "jev-pilot-os" }
 
+# The macOS calls, tested against this process.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+jev-pilot-os = { path = "jev-pilot-os" }
+
 [features]
 default = ["android", "ios", "http"]
 # UIAutomator hierarchy parsing and the Android system gestures.

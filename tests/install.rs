@@ -284,21 +284,13 @@ use jev_pilot::browser::install::{
 const CHROME_MAC: &str = "/Library/Google/Chrome/NativeMessagingHosts";
 const CHROME_LINUX: &str = "/etc/opt/chrome/native-messaging-hosts";
 
-/// The host is registered only for the browsers it serves: on Linux each
-/// known install, whose channels share a folder (and Brave reads Chrome's);
-/// on macOS and Windows Chrome alone, which is all the host's check of its
-/// parent accepts there.
+/// The host is registered only for the browser it serves, Google Chrome,
+/// whose channels share one folder: all the host's check of its parent
+/// accepts.
 #[test]
 fn the_host_is_registered_for_the_browsers_it_serves() {
     assert_eq!(system_host_dirs(Os::MacOs), [PathBuf::from(CHROME_MAC)]);
-    assert_eq!(
-        system_host_dirs(Os::Linux),
-        [
-            PathBuf::from(CHROME_LINUX),
-            "/etc/chromium/native-messaging-hosts".into(),
-            "/etc/opt/edge/native-messaging-hosts".into(),
-        ]
-    );
+    assert_eq!(system_host_dirs(Os::Linux), [PathBuf::from(CHROME_LINUX)]);
     assert_eq!(system_host_dirs(Os::Windows), Vec::<PathBuf>::new());
 }
 
@@ -324,14 +316,12 @@ fn each_user_level_folder_maps_to_the_system_folder_its_browser_reads() {
         );
     }
     let linux = user_host_dirs(Os::Linux, Path::new("/home/owner"));
+    assert_eq!(linux.len(), 4, "Chrome's channels alone: {linux:?}");
     for (user, system) in [
         ("google-chrome", CHROME_LINUX),
         ("google-chrome-beta", CHROME_LINUX),
         ("google-chrome-unstable", CHROME_LINUX),
         ("google-chrome-canary", CHROME_LINUX),
-        ("chromium", "/etc/chromium/native-messaging-hosts"),
-        ("microsoft-edge", "/etc/opt/edge/native-messaging-hosts"),
-        ("BraveSoftware/Brave-Browser", CHROME_LINUX),
     ] {
         let user = PathBuf::from(format!("/home/owner/.config/{user}/NativeMessagingHosts"));
         assert!(
@@ -470,15 +460,12 @@ HKEY_CURRENT_USER\\SOFTWARE\\Google\\Chrome\\NativeMessagingHosts\\com.example.e
 }
 
 #[test]
-fn linux_turns_off_user_level_hosts_with_a_policy_file_per_family() {
+fn linux_turns_off_user_level_hosts_with_a_policy_file_for_chrome() {
     assert_eq!(
         linux_policy_files(),
-        [
-            PathBuf::from("/etc/opt/chrome/policies/managed/jev-pilot.json"),
-            "/etc/chromium/policies/managed/jev-pilot.json".into(),
-            "/etc/opt/edge/policies/managed/jev-pilot.json".into(),
-            "/etc/brave/policies/managed/jev-pilot.json".into(),
-        ]
+        [PathBuf::from(
+            "/etc/opt/chrome/policies/managed/jev-pilot.json"
+        )]
     );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&linux_policy()).expect("JSON"),
@@ -577,10 +564,7 @@ fn a_protected_linux_install_plan() {
     for file in [
         "/usr/local/share/jev-pilot/extension/manifest.json",
         "/etc/opt/chrome/native-messaging-hosts/dev.jevpilot.bridge.json",
-        "/etc/chromium/native-messaging-hosts/dev.jevpilot.bridge.json",
-        "/etc/opt/edge/native-messaging-hosts/dev.jevpilot.bridge.json",
         "/etc/opt/chrome/policies/managed/jev-pilot.json",
-        "/etc/brave/policies/managed/jev-pilot.json",
     ] {
         assert!(written.contains(&PathBuf::from(file)), "{file} is written");
     }
@@ -993,8 +977,8 @@ fn a_development_install_with_no_browser_says_so() {
     );
     assert!(
         steps.contains(&Step::Tell(
-            "no Chrome, Chromium, Edge or Brave profile was found in your home, so the host is \
-         registered with none: run the install again once one has started"
+            "no Google Chrome profile was found in your home, so the host is registered with \
+             none: run the install again once Chrome has started"
                 .into()
         ))
     );
@@ -1158,6 +1142,16 @@ fn only_a_host_manifest_named_as_its_file_is_copied() {
         serde_json::from_str::<serde_json::Value>(&copied).unwrap(),
         serde_json::from_str::<serde_json::Value>(good).unwrap()
     );
+    // Anything else in it is left behind.
+    let padded = r#"{"name": "com.example.x", "path": "/opt/x/host", "type": "stdio",
+                     "allowed_origins": [], "payload": "x", "nested": {"a": 1}}"#;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            &manifest_to_copy(padded, "com.example.x").unwrap()
+        )
+        .unwrap(),
+        json!({"name": "com.example.x", "path": "/opt/x/host", "type": "stdio", "allowed_origins": []})
+    );
     for (text, stem) in [
         (good, "com.example.other"),
         (
@@ -1199,6 +1193,12 @@ fn a_linked_or_foreign_host_file_is_not_read() {
     let link = dir.join("com.example.y.json");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     assert!(read_owners_host(&link, me).is_err(), "a link");
+    // A pipe would hold the install up forever on opening.
+    let fifo = dir.join("com.example.fifo.json");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+    let started = std::time::Instant::now();
+    assert!(read_owners_host(&fifo, me).is_err(), "a pipe");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
     let big = dir.join("com.example.big.json");
     std::fs::write(&big, vec![b' '; 1 << 20]).unwrap();
     assert!(read_owners_host(&big, me).is_err(), "too large");
@@ -1307,14 +1307,16 @@ fn a_protected_install_makes_the_audit_logs_files() {
 // --- where a protected install writes ---
 
 /// What a protected install writes is safe only if no folder above it can
-/// be changed by the owner: every one that exists must be root's, closed to
-/// group and others, and not a link.
+/// be changed by the owner: every one that exists must be root's, not a
+/// link, not writable by anyone, and writable by its group only when that
+/// group is root's or one the owner is not in.
 #[test]
 fn a_protected_install_writes_only_under_folders_only_root_can_change() {
     use jev_pilot::browser::install::{DirMeta, check_ancestors};
     let target = Path::new("/usr/local/libexec/jev-pilot/jev-pilot");
     let safe = DirMeta {
         uid: 0,
+        gid: 0,
         mode: 0o755,
         is_link: false,
     };
@@ -1331,22 +1333,53 @@ fn a_protected_install_writes_only_under_folders_only_root_can_change() {
             }
         }
     };
-    assert_eq!(check_ancestors(target, &lookup("/nowhere", safe)), Ok(()));
+    // The owner is in group 20 (staff on macOS), not in 50 or 104.
+    let member_of = |gid: u32| gid == 20;
+    assert_eq!(
+        check_ancestors(target, &lookup("/nowhere", safe), &member_of),
+        Ok(())
+    );
+    // Writable by a group the owner is not in, or root's own: Debian's
+    // /usr/local is root:staff 2775 and Ubuntu's /var/log root:syslog 0775.
+    for meta in [
+        DirMeta {
+            gid: 50,
+            mode: 0o2775,
+            ..safe
+        },
+        DirMeta {
+            gid: 104,
+            mode: 0o775,
+            ..safe
+        },
+        DirMeta {
+            gid: 0,
+            mode: 0o775,
+            ..safe
+        },
+    ] {
+        assert_eq!(
+            check_ancestors(target, &lookup("/usr/local", meta), &member_of),
+            Ok(()),
+            "{meta:?}"
+        );
+    }
     for (meta, why) in [
         (DirMeta { uid: 501, ..safe }, "is owned by uid 501"),
         (
             DirMeta {
+                gid: 20,
                 mode: 0o775,
                 ..safe
             },
-            "can be written by others (mode 775)",
+            "can be written by group 20, which you are in (mode 775)",
         ),
         (
             DirMeta {
                 mode: 0o757,
                 ..safe
             },
-            "can be written by others (mode 757)",
+            "can be written by anyone (mode 757)",
         ),
         (
             DirMeta {
@@ -1357,12 +1390,99 @@ fn a_protected_install_writes_only_under_folders_only_root_can_change() {
         ),
     ] {
         assert_eq!(
-            check_ancestors(target, &lookup("/usr/local", meta)),
+            check_ancestors(target, &lookup("/usr/local", meta), &member_of),
             Err(format!(
                 "/usr/local {why}, so a program running as you could change what jev-pilot \
                  installs under it"
             )),
         );
+    }
+}
+
+/// Every path a protected install writes passes the check, step by step,
+/// on systems as they come: each step's folders and files are what the
+/// steps before it made.
+#[test]
+fn every_step_of_a_protected_install_passes_the_folder_check() {
+    use jev_pilot::browser::install::{DirMeta, check_ancestors};
+    use std::collections::HashMap;
+    const GROUP: u32 = 977;
+    let dir = |gid: u32, mode: u32| DirMeta {
+        uid: 0,
+        gid,
+        mode,
+        is_link: false,
+    };
+    let systems = [
+        (
+            Os::Linux,
+            vec![
+                ("/", dir(0, 0o755)),
+                ("/usr", dir(0, 0o755)),
+                // Debian's, and Ubuntu's /var/log.
+                ("/usr/local", dir(50, 0o2775)),
+                ("/usr/local/share", dir(50, 0o2775)),
+                ("/var", dir(0, 0o755)),
+                ("/var/log", dir(104, 0o775)),
+                ("/etc", dir(0, 0o755)),
+            ],
+        ),
+        (
+            Os::MacOs,
+            vec![
+                ("/", dir(0, 0o755)),
+                ("/usr", dir(0, 0o755)),
+                ("/usr/local", dir(0, 0o755)),
+                ("/Library", dir(0, 0o755)),
+                ("/Library/Application Support", dir(80, 0o755)),
+                ("/Library/Logs", dir(0, 0o755)),
+                ("/Library/Google", dir(0, 0o755)),
+            ],
+        ),
+    ];
+    let member_of = |gid: u32| gid == 20 || gid == 1000;
+    for (os, existing) in systems {
+        let mut tree: HashMap<PathBuf, DirMeta> = existing
+            .into_iter()
+            .map(|(path, meta)| (PathBuf::from(path), meta))
+            .collect();
+        let layout = Layout::protected(os, &folders());
+        let steps = plan(
+            os,
+            InstallKind::Protected,
+            &layout,
+            Path::new(EXE),
+            &UserHosts::Files(vec![]),
+            &Existing::default(),
+        );
+        for step in &steps {
+            let (path, owner, mode) = match step {
+                Step::CreateDir { path, owner, mode }
+                | Step::CreateFile { path, owner, mode }
+                | Step::WriteFile {
+                    path, owner, mode, ..
+                } => (path, *owner, *mode),
+                Step::CopyBinary { to, .. } => (to, Owner::Root, 0o600),
+                Step::WritePolicy { path, .. } | Step::Record { path, .. } => {
+                    (path, Owner::Root, 0o644)
+                }
+                Step::CopyHost(copy) => (&copy.to, Owner::Root, 0o644),
+                _ => continue,
+            };
+            let lookup = |p: &Path| tree.get(p).copied();
+            assert_eq!(
+                check_ancestors(path, &lookup, &member_of),
+                Ok(()),
+                "{os:?}: {}",
+                path.display()
+            );
+            // create_dir_all makes missing folders root's, 0755.
+            for above in path.ancestors().skip(1) {
+                tree.entry(above.to_owned()).or_insert(dir(0, 0o755));
+            }
+            let gid = if owner == Owner::RootGroup { GROUP } else { 0 };
+            tree.insert(path.clone(), dir(gid, mode));
+        }
     }
 }
 
@@ -1411,6 +1531,7 @@ fn the_programs_an_install_runs_are_named_by_their_full_paths() {
         (Tool::Dseditgroup, "/usr/sbin/dseditgroup"),
         (Tool::Groupadd, "/usr/sbin/groupadd"),
         (Tool::Plutil, "/usr/bin/plutil"),
+        (Tool::Id, "/usr/bin/id"),
         (Tool::Reg, r"C:\Windows\System32\reg.exe"),
     ] {
         assert_eq!(tool_path(tool, system32), PathBuf::from(path), "{tool:?}");
@@ -1449,11 +1570,20 @@ fn the_policy_is_read_for_its_value_not_its_presence() {
 /// hosts: it is refused.
 #[test]
 fn an_install_elevated_as_another_account_is_refused() {
-    use jev_pilot::browser::install::elevated_as_signed_in;
-    assert_eq!(elevated_as_signed_in(r"PC\owner", r"pc\OWNER"), Ok(()));
+    use jev_pilot::browser::install::{Account, elevated_as_signed_in};
+    let account = |sid: &str, name: &str| Account {
+        sid: sid.into(),
+        name: name.into(),
+    };
+    let owner = account("S-1-5-21-1-2-3-1001", r"PC\owner");
+    // By SID: a name says nothing a renamed or look-alike account cannot.
     assert_eq!(
-        elevated_as_signed_in(r"PC\admin", r"PC\owner"),
-        Err(r"this runs elevated as PC\admin, not as PC\owner who is signed in: sign in as an administrator yourself and run the install from there, so the bridge is pinned to you".to_owned())
+        elevated_as_signed_in(&owner, &account("S-1-5-21-1-2-3-1001", r"PC\renamed")),
+        Ok(())
+    );
+    assert_eq!(
+        elevated_as_signed_in(&account("S-1-5-21-1-2-3-500", r"PC\owner"), &owner),
+        Err(r"this runs elevated as PC\owner (S-1-5-21-1-2-3-500), not as PC\owner (S-1-5-21-1-2-3-1001) who is signed in: sign in as an administrator yourself and run the install from there, so the bridge is pinned to you".to_owned())
     );
 }
 
@@ -1493,4 +1623,61 @@ fn a_run_handed_to_an_installed_copy_of_another_version_says_so() {
         )
     );
     assert_eq!(handing_over("0.4.0", "0.4.0"), None);
+}
+
+/// A file the install makes, or keeps, is opened without following a link,
+/// must be a regular file, and gets its owner and mode through what was
+/// opened: a link planted where it goes is refused.
+#[cfg(unix)]
+#[test]
+fn a_file_the_install_makes_is_never_reached_through_a_link() {
+    use jev_pilot::browser::install::make_file;
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-make-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("audit.log");
+    make_file(&file, 0o640, Owner::User).expect("made");
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    std::fs::write(&file, "kept").unwrap();
+    make_file(&file, 0o640, Owner::User).expect("kept");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "kept");
+
+    let target = dir.join("elsewhere");
+    std::fs::write(&target, "not this").unwrap();
+    let link = dir.join("audit.log.1");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(make_file(&link, 0o640, Owner::User).is_err());
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    std::fs::create_dir(dir.join("audit.log.2")).unwrap();
+    assert!(make_file(&dir.join("audit.log.2"), 0o640, Owner::User).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// On Windows a folder of the install's that is there already must be
+/// owned by Administrators, SYSTEM or TrustedInstaller: one the owner made
+/// beforehand is the owner's to change.
+#[test]
+fn a_windows_install_folder_must_be_owned_by_the_system() {
+    use jev_pilot::browser::install::trusted_owner;
+    for sid in [
+        "S-1-5-32-544",
+        "S-1-5-18",
+        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+    ] {
+        assert!(trusted_owner(sid), "{sid}");
+    }
+    for sid in [
+        "S-1-5-21-1004336348-1177238915-682003330-1001",
+        "S-1-1-0",
+        "",
+    ] {
+        assert!(!trusted_owner(sid), "{sid}");
+    }
 }

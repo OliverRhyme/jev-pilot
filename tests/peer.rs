@@ -996,13 +996,15 @@ mod browser_parent {
     };
     use std::path::Path;
 
-    /// On macOS the browser is Chrome, or Chrome for Testing, signed with
-    /// Google's Developer ID: Chrome's own designated requirement.
+    /// On macOS the browser is Google Chrome, signed with Google's
+    /// Developer ID: Chrome's own designated requirement. Chrome for Testing
+    /// is not: it loads any unpacked extension it is told to, so a fake with
+    /// jev-pilot's ID is easy there.
     #[test]
-    fn the_macos_browser_is_one_google_signed() {
+    fn the_macos_browser_is_google_chrome() {
         assert_eq!(
             macos_browser_requirement(),
-            r#"(identifier "com.google.Chrome" or identifier "com.google.Chrome.beta" or identifier "com.google.Chrome.dev" or identifier "com.google.Chrome.canary" or identifier "com.google.chrome.for.testing") and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "EQHXZ8M8AV""#
+            r#"(identifier "com.google.Chrome" or identifier "com.google.Chrome.beta" or identifier "com.google.Chrome.dev" or identifier "com.google.Chrome.canary") and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "EQHXZ8M8AV""#
         );
     }
 
@@ -1031,55 +1033,80 @@ mod browser_parent {
         );
     }
 
-    fn root_file() -> FileFacts {
+    fn root(ino: u64) -> FileFacts {
         FileFacts {
             uid: 0,
             mode: 0o755,
             is_link: false,
+            dev: 1,
+            ino,
         }
     }
 
-    /// On Linux the browser is one of the known installs, a root file no
-    /// one else can write, under folders only root can change.
-    #[test]
-    fn the_linux_browser_is_a_known_root_install() {
-        let facts = |_: &Path| Some(root_file());
-        for path in [
-            "/opt/google/chrome/chrome",
-            "/opt/google/chrome-beta/chrome",
-            "/opt/google/chrome-unstable/chrome",
-            "/opt/google/chrome-canary/chrome",
-            "/usr/lib/chromium/chromium",
-            "/usr/lib/chromium-browser/chromium-browser",
-            "/opt/microsoft/msedge/msedge",
-            "/opt/brave.com/brave/brave",
-        ] {
-            assert_eq!(linux_browser(Path::new(path), &facts), Ok(()), "{path}");
+    /// A tree with Chrome's install, and Chromium's, which is not served.
+    fn tree(path: &Path) -> Option<FileFacts> {
+        match path.to_str()? {
+            "/" => Some(root(2)),
+            "/opt" => Some(root(3)),
+            "/opt/google" => Some(root(4)),
+            "/opt/google/chrome" => Some(root(5)),
+            "/opt/google/chrome/chrome" => Some(root(42)),
+            "/usr/lib/chromium/chromium" => Some(root(43)),
+            _ => None,
         }
-        assert!(linux_browser(Path::new("/home/owner/chrome/chrome"), &facts).is_err());
-        assert!(linux_browser(Path::new("/usr/bin/python3"), &facts).is_err());
+    }
+
+    /// On Linux the browser is Google Chrome: the file the parent runs is,
+    /// by device and inode, one of Chrome's installs, a root file no one
+    /// else can write under folders only root can change. Chromium, Edge
+    /// and Brave load any unpacked extension they are told to, so a fake
+    /// with jev-pilot's ID is easy there.
+    #[test]
+    fn the_linux_browser_is_google_chrome_by_its_file() {
+        assert_eq!(
+            linux_browser((1, 42), &tree),
+            Ok(std::path::PathBuf::from("/opt/google/chrome/chrome"))
+        );
+        assert!(linux_browser((1, 43), &tree).is_err(), "Chromium");
+        assert!(linux_browser((1, 99), &tree).is_err(), "anything else");
+        assert!(linux_browser((2, 42), &tree).is_err(), "another device");
         let owned = |path: &Path| {
-            Some(if path == Path::new("/opt/google/chrome") {
-                FileFacts {
-                    uid: 1000,
-                    ..root_file()
-                }
-            } else {
-                root_file()
-            })
+            let mut facts = tree(path)?;
+            if path == Path::new("/opt/google/chrome") {
+                facts.uid = 1000;
+            }
+            Some(facts)
         };
-        assert!(linux_browser(Path::new("/opt/google/chrome/chrome"), &owned).is_err());
+        assert!(linux_browser((1, 42), &owned).is_err());
         let writable = |path: &Path| {
-            Some(if path == Path::new("/opt/google/chrome/chrome") {
-                FileFacts {
-                    mode: 0o777,
-                    ..root_file()
-                }
-            } else {
-                root_file()
-            })
+            let mut facts = tree(path)?;
+            if path == Path::new("/opt/google/chrome/chrome") {
+                facts.mode = 0o777;
+            }
+            Some(facts)
         };
-        assert!(linux_browser(Path::new("/opt/google/chrome/chrome"), &writable).is_err());
+        assert!(linux_browser((1, 42), &writable).is_err());
+        let linked = |path: &Path| {
+            let mut facts = tree(path)?;
+            if path == Path::new("/opt/google") {
+                facts.is_link = true;
+            }
+            Some(facts)
+        };
+        assert!(linux_browser((1, 42), &linked).is_err());
+    }
+
+    /// macOS names each process's pid version, and the version its parent
+    /// had when it started it: the harness's parent has run nothing else
+    /// since, so the two agree.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_parent_that_ran_nothing_else_since_has_the_version_recorded() {
+        let mine = jev_pilot_os::pid_versions(std::process::id()).expect("this process");
+        let parent =
+            jev_pilot_os::pid_versions(std::os::unix::process::parent_id()).expect("its parent");
+        assert_eq!(parent.version, mine.parent_at_start);
+        assert_ne!(mine.version, mine.parent_at_start);
     }
 
     /// The test harness was started by cargo, not a browser: its parent is
@@ -1141,5 +1168,8 @@ mod browser_parent {
             .is_err()
         );
         assert!(windows_browser(cmd, chrome, None, system32, &programs).is_err());
+        // Signed by Google, but not Chrome.
+        let drive = Path::new(r"C:\Program Files\Google\Drive File Stream\GoogleDriveFS.exe");
+        assert!(windows_browser(cmd, drive, Some(google), system32, &programs).is_err());
     }
 }
