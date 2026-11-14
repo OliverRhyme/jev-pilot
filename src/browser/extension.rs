@@ -11,7 +11,8 @@
 //! whoever opened the channel.
 
 use crate::browser::bridge::{
-    self, BridgeError, ByteOrder, FrameError, Hello, Message, Nonce, Op, Outcome, TabId, TabInfo,
+    self, BridgeError, ByteOrder, FrameError, Hello, Message, Nonce, Op, Outcome, Parent, TabId,
+    TabInfo,
 };
 use crate::browser::transport::{Wire, WireError};
 use serde_json::{Value, json};
@@ -37,9 +38,23 @@ impl<S: Read + Write> ExtensionWire<S> {
     /// # Errors
     /// Returns [`ConnectError`] when the other end is not the host, the host
     /// turns the run away, or the extension cannot serve it.
-    pub fn connect(mut stream: S, goal: &str, sites: &[String]) -> Result<Self, ConnectError> {
+    pub fn connect(stream: S, goal: &str, sites: &[String]) -> Result<Self, ConnectError> {
+        Self::connect_as(stream, goal, sites, &Parent::default())
+    }
+
+    /// [`connect`](Self::connect), also telling the host which process
+    /// started the run, for its audit log.
+    ///
+    /// # Errors
+    /// As [`connect`](Self::connect).
+    pub fn connect_as(
+        mut stream: S,
+        goal: &str,
+        sites: &[String],
+        parent: &Parent,
+    ) -> Result<Self, ConnectError> {
         let first = read_message(&mut stream)?;
-        let Some(echo) = Nonce::echoing(&first, goal, sites) else {
+        let Some(echo) = Nonce::echoing(&first, goal, sites, parent) else {
             return Err(ConnectError::NotTheHost {
                 why: "it did not open with a nonce".into(),
             });
@@ -124,6 +139,9 @@ impl<S: Read + Write> Wire for ExtensionWire<S> {
             };
             if let Message::Status(hello) = &message {
                 self.hello = hello.clone();
+            }
+            if let Message::Ended { reason } = &message {
+                return Err(WireError::Protocol(ended(reason).into()));
             }
             self.waiting.extend(self.translator.incoming(message));
         }
@@ -431,6 +449,14 @@ fn coded_refusal(id: &Value, error: &BridgeError, session: Option<&str>) -> Stri
 /// A DevTools error reply.
 fn refusal(id: &Value, message: &str) -> String {
     json!({"id": id, "error": {"code": -32000, "message": message}}).to_string()
+}
+
+/// What the host's reason for ending the bridge means, in words.
+fn ended(reason: &str) -> String {
+    match reason {
+        "too_large" => FrameError::TooLargeToRead { length: 0 }.to_string(),
+        other => format!("the bridge to Chrome's jev-pilot extension ended: {other}"),
+    }
 }
 
 /// Read one message from the local channel.

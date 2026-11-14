@@ -298,6 +298,51 @@ fn the_host_tells_the_extension_a_run_started_or_went_or_files_changed() {
     round_trip(&json!({"type": "reload"}), &Message::Reload);
 }
 
+/// A second host, started by another browser or profile, finds the first
+/// already serving: it tells its own extension so, and exits.
+#[test]
+fn the_host_tells_its_extension_another_browser_is_serving() {
+    round_trip(&json!({"type": "elsewhere"}), &Message::Elsewhere);
+}
+
+/// The host tells the run why the bridge ended, when it ended for a reason
+/// the run cannot see for itself.
+#[test]
+fn the_host_tells_the_run_why_the_bridge_ended() {
+    round_trip(
+        &json!({"type": "ended", "reason": "too_large"}),
+        &Message::Ended {
+            reason: "too_large".into(),
+        },
+    );
+}
+
+/// A run's echo may say which process started it, for the audit log. It is
+/// left out when not known, and an echo without it is still read.
+#[test]
+fn an_echo_may_name_the_runs_parent() {
+    round_trip(
+        &json!({"type": "echo", "nonce": "ab", "goal": "g", "sites": [], "parent_pid": 77, "parent_exe": "/bin/zsh"}),
+        &Message::Echo {
+            nonce: "ab".into(),
+            goal: "g".into(),
+            sites: vec![],
+            parent_pid: Some(77),
+            parent_exe: Some("/bin/zsh".into()),
+        },
+    );
+    round_trip(
+        &json!({"type": "echo", "nonce": "ab", "goal": "g", "sites": []}),
+        &Message::Echo {
+            nonce: "ab".into(),
+            goal: "g".into(),
+            sites: vec![],
+            parent_pid: None,
+            parent_exe: None,
+        },
+    );
+}
+
 // --- constants ---
 
 /// Chrome names an unpacked extension by the first 16 bytes of the SHA-256
@@ -443,7 +488,7 @@ fn sha256(message: &[u8]) -> [u8; 32] {
 
 // --- the handshake ---
 
-use bridge::Nonce;
+use bridge::{Nonce, Parent};
 
 /// The host opens the local channel with a fresh 32-byte nonce, and the run
 /// must echo it in its first frame. A nonce is new every time.
@@ -459,10 +504,15 @@ fn the_host_sends_a_fresh_nonce_and_the_run_echoes_it() {
 
     // The echo also says what the run is for, so the host can tell the
     // extension, which shows it to the owner.
+    let parent = Parent {
+        pid: Some(77),
+        exe: Some("/bin/zsh".into()),
+    };
     let echo = Nonce::echoing(
         &nonce.message(),
         "Star the repository",
         &["https://github.com".to_owned()],
+        &parent,
     )
     .expect("a nonce is echoed");
     assert_eq!(
@@ -471,6 +521,8 @@ fn the_host_sends_a_fresh_nonce_and_the_run_echoes_it() {
             nonce: sent.clone(),
             goal: "Star the repository".into(),
             sites: vec!["https://github.com".into()],
+            parent_pid: Some(77),
+            parent_exe: Some("/bin/zsh".into()),
         }
     );
     assert!(nonce.is_echoed_by(&echo));
@@ -481,14 +533,16 @@ fn the_host_sends_a_fresh_nonce_and_the_run_echoes_it() {
 fn a_wrong_or_missing_echo_fails_the_handshake() {
     let nonce = Nonce::fresh();
     let other = Nonce::fresh();
-    assert!(!nonce.is_echoed_by(&Nonce::echoing(&other.message(), "", &[]).expect("echoes")));
+    assert!(!nonce.is_echoed_by(
+        &Nonce::echoing(&other.message(), "", &[], &Parent::default()).expect("echoes")
+    ));
     let Message::Nonce { nonce: sent } = nonce.message() else {
         panic!("a nonce message");
     };
     assert!(!nonce.is_echoed_by(&Message::Nonce { nonce: sent }));
     assert!(!nonce.is_echoed_by(&Message::Absent));
     assert_eq!(
-        Nonce::echoing(&Message::Absent, "", &[]),
+        Nonce::echoing(&Message::Absent, "", &[], &Parent::default()),
         None,
         "only a nonce is echoed"
     );
@@ -635,6 +689,24 @@ fn a_run_turned_away_says_why() {
             "the extension in Chrome is 0.1.0, this jev-pilot needs {}: run the install again",
             env!("CARGO_PKG_VERSION")
         )
+    );
+}
+
+/// The real run says which process started it, for the host's audit log.
+#[test]
+fn a_run_can_say_which_process_started_it() {
+    let channel = Channel::new(&[nonce_frame(), ready_frame()]);
+    let sent = channel.handle();
+    let parent = Parent {
+        pid: Some(77),
+        exe: Some("/bin/zsh".into()),
+    };
+    ExtensionWire::connect_as(channel, "Star the repository", &[], &parent).expect("connects");
+    assert_eq!(
+        written_by(&sent),
+        [
+            json!({"type": "echo", "nonce": "ab".repeat(32), "goal": "Star the repository", "sites": [], "parent_pid": 77, "parent_exe": "/bin/zsh"})
+        ]
     );
 }
 
@@ -990,4 +1062,18 @@ fn each_refusal_is_an_error_on_the_call_with_its_code() {
             "{code}"
         );
     }
+}
+
+/// A page too large to pass through the extension ends the run in words
+/// that say so.
+#[test]
+fn a_bridge_ended_for_a_page_too_large_says_so() {
+    let (mut wire, _) = wire_with(&[json!({"type": "ended", "reason": "too_large"})]);
+    let error = wire.receive(WAIT).expect_err("the bridge ended");
+    assert!(
+        error
+            .to_string()
+            .ends_with("the page is too large to read through the extension"),
+        "{error}"
+    );
 }
