@@ -2616,3 +2616,190 @@ fn release_through_the_extension() {
     assert_eq!(last[2]["frame"]["op"], "detach");
     matches_recording("release", &log);
 }
+
+/// The bridge, with its writes failing once `fail` holds an error kind: the
+/// host gone, as a run sees it when it next writes.
+struct Failing {
+    bridge: Bridge,
+    fail: std::rc::Rc<std::cell::Cell<Option<std::io::ErrorKind>>>,
+}
+
+impl std::io::Read for Failing {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.bridge.read(buf)
+    }
+}
+
+impl std::io::Write for Failing {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self.fail.get() {
+            Some(kind) => Err(kind.into()),
+            None => self.bridge.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A host that has gone shows as Chrome having quit, however the OS words a
+/// write to a closed channel.
+#[test]
+fn a_write_to_a_host_that_has_gone_says_chrome_may_have_quit() {
+    use std::io::ErrorKind;
+    for kind in [
+        ErrorKind::BrokenPipe,
+        ErrorKind::ConnectionReset,
+        ErrorKind::ConnectionAborted,
+        ErrorKind::UnexpectedEof,
+    ] {
+        let fail = std::rc::Rc::new(std::cell::Cell::new(None));
+        let stream = Failing {
+            bridge: Bridge::new(hello(), signup_extension),
+            fail: std::rc::Rc::clone(&fail),
+        };
+        let mut wire = ExtensionWire::connect(stream, "Sign up", &[]).expect("connects");
+        fail.set(Some(kind));
+        let error = wire
+            .send(&json!({"id": 1, "method": "Target.getTargets"}).to_string())
+            .expect_err("the host is gone");
+        assert_eq!(
+            error.to_string(),
+            "the connection to Chrome's jev-pilot extension dropped: Chrome may have quit",
+            "{kind:?}"
+        );
+    }
+}
+
+/// A command over Chrome's 1 MiB limit ends the run in the failure table's
+/// words, not as a misbehaving websocket.
+#[test]
+fn a_command_too_large_for_chrome_says_so() {
+    let (mut wire, _) = through(signup_extension);
+    let text = "x".repeat(1 << 20);
+    let error = wire
+        .send(
+            &json!({"id": 1, "method": "Target.createTarget", "params": {"url": format!("https://example.test/{text}")}})
+                .to_string(),
+        )
+        .expect_err("too large");
+    assert_eq!(
+        error.to_string(),
+        "that command is too large to pass to Chrome (over 1 MiB)"
+    );
+}
+
+/// A message the run cannot read, or does not know, is passed over: a newer
+/// extension's event, or one missing a field, does not end the run.
+#[test]
+fn a_message_the_run_cannot_read_is_passed_over() {
+    let (mut wire, _) = through(|request| {
+        let mut answers = vec![
+            json!({"type": "tab_created", "tab": 51, "url": "about:blank", "title": ""}),
+            json!({"type": "something_new", "tab": 51}),
+        ];
+        answers.extend(signup_extension(request));
+        answers
+    });
+    wire.send(&json!({"id": 1, "method": "Target.getTargets"}).to_string())
+        .expect("sent");
+    let reply: Value = serde_json::from_str(
+        &wire
+            .receive(std::time::Duration::from_secs(1))
+            .expect("read")
+            .expect("a reply"),
+    )
+    .expect("JSON");
+    assert_eq!(reply["id"], 1, "{reply}");
+}
+
+/// One tab the extension cannot describe does not hide the others.
+#[test]
+fn a_tab_listed_without_a_target_leaves_the_others_listed() {
+    let (mut wire, _) = through(|request| {
+        vec![
+            json!({"type": "reply", "id": request["id"], "result": {"tabs": [
+                {"tab": 1, "url": "about:blank", "title": ""},
+                {"tab": 2, "target": "T2", "url": "https://example.test/", "title": "Example"},
+            ]}}),
+        ]
+    });
+    wire.send(&json!({"id": 1, "method": "Target.getTargets"}).to_string())
+        .expect("sent");
+    let reply: Value = serde_json::from_str(
+        &wire
+            .receive(std::time::Duration::from_secs(1))
+            .expect("read")
+            .expect("a reply"),
+    )
+    .expect("JSON");
+    let ids: Vec<&str> = reply["result"]["targetInfos"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .filter_map(|t| t["targetId"].as_str())
+        .collect();
+    assert_eq!(ids, ["T2"]);
+}
+
+/// A held tab closed before Chrome reports the debugger let go still ends
+/// its session, so no call waits on a tab that is gone.
+#[test]
+fn a_held_tab_closed_ends_its_session() {
+    let tab = signup_tab();
+    let (mut wire, _) = through(move |request| {
+        if request["op"] == "send" {
+            return vec![json!({"type": "tab_removed", "tab": tab})];
+        }
+        signup_extension(request)
+    });
+    let ask = |wire: &mut ExtensionWire<Bridge>, call: Value| -> Vec<Value> {
+        wire.send(&call.to_string()).expect("sent");
+        let mut got = Vec::new();
+        while let Some(text) = wire
+            .receive(std::time::Duration::from_millis(50))
+            .expect("read")
+        {
+            got.push(serde_json::from_str(&text).expect("JSON"));
+        }
+        got
+    };
+    ask(&mut wire, json!({"id": 1, "method": "Target.getTargets"}));
+    let attached = ask(
+        &mut wire,
+        json!({"id": 2, "method": "Target.attachToTarget", "params": {"targetId": signup::TARGET, "flatten": true}}),
+    );
+    let session = attached
+        .iter()
+        .find(|m| m["id"] == 2)
+        .and_then(|m| m["result"]["sessionId"].as_str())
+        .expect("a session")
+        .to_owned();
+    let after = ask(
+        &mut wire,
+        json!({"id": 3, "method": "Page.enable", "sessionId": session}),
+    );
+    assert!(
+        after
+            .iter()
+            .any(|m| m["method"] == "Target.detachedFromTarget"
+                && m["params"]["sessionId"] == session.as_str()
+                && m["params"]["reason"] == "target_closed"),
+        "{after:?}"
+    );
+}
+
+/// A host that answers the echo in a shape this run cannot read is a
+/// version apart, not a squatter: the goal has gone, and the fix is the
+/// install.
+#[test]
+fn a_garbled_answer_to_the_echo_says_to_install_again() {
+    let mut skewed = hello();
+    skewed.as_object_mut().expect("hello").remove("product");
+    let error = ExtensionWire::connect(Bridge::new(skewed, signup_extension), "Sign up", &[])
+        .err()
+        .expect("refused");
+    let said = error.to_string();
+    assert!(said.contains("run the install again"), "{said}");
+    assert!(!said.contains("nothing was sent"), "{said}");
+}
