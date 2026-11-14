@@ -156,7 +156,9 @@ fn serve_mcp() -> Result<(), Box<dyn core::error::Error>> {
 }
 
 fn run() -> Result<(), Box<dyn core::error::Error>> {
-    match cli::parse(std::env::args().skip(1))? {
+    let invocation = cli::parse(std::env::args().skip(1))?;
+    bridge::give_up_group(&invocation)?;
+    match invocation {
         Invocation::Help => {
             print!("{}", cli::USAGE);
             Ok(())
@@ -171,6 +173,8 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
             Ok(())
         }
         Invocation::Update => update(),
+        Invocation::Extension(command) => bridge::command(command),
+        Invocation::Host => bridge::host(),
         Invocation::Observe {
             device,
             browser: None,
@@ -594,7 +598,7 @@ mod web {
     };
     use jev_pilot::browser::engine::{BrowserCommand, BrowserEngine as _, CdpEngine};
     use jev_pilot::browser::launch::{Fresh, Interrupted, LaunchError, find_chrome};
-    use jev_pilot::browser::transport::{Connection, Socket};
+    use jev_pilot::browser::transport::{Connection, Socket, Wire, WireError};
     use jev_pilot::cli::{BrowserMode, BrowserTarget};
     use jev_pilot::credential::ApiKey;
     use jev_pilot::device::{Command, Device};
@@ -607,6 +611,46 @@ mod web {
     use std::time::Duration;
 
     type Error = Box<dyn core::error::Error>;
+
+    /// The connection a run drives: Chrome's websocket, or the bridge to
+    /// its extension.
+    pub enum AnyWire {
+        /// A DevTools websocket.
+        Socket(Socket),
+        /// The extension, through the host.
+        #[cfg(feature = "extension")]
+        Extension(
+            jev_pilot::browser::extension::ExtensionWire<
+                jev_pilot::browser::host::channel::RunStream,
+            >,
+        ),
+    }
+
+    impl Wire for AnyWire {
+        fn send(&mut self, text: &str) -> Result<(), WireError> {
+            match self {
+                Self::Socket(w) => w.send(text),
+                #[cfg(feature = "extension")]
+                Self::Extension(w) => w.send(text),
+            }
+        }
+
+        fn receive(&mut self, timeout: Duration) -> Result<Option<String>, WireError> {
+            match self {
+                Self::Socket(w) => w.receive(timeout),
+                #[cfg(feature = "extension")]
+                Self::Extension(w) => w.receive(timeout),
+            }
+        }
+
+        fn close(&mut self) {
+            match self {
+                Self::Socket(w) => w.close(),
+                #[cfg(feature = "extension")]
+                Self::Extension(w) => w.close(),
+            }
+        }
+    }
 
     /// What Ctrl-C has to undo while a browser session is open.
     ///
@@ -630,8 +674,11 @@ mod web {
                     Some(what @ Interrupted::Fresh { .. }) => {
                         what.clean_up(|endpoint| {
                             if let Ok(socket) = Socket::connect(endpoint, Duration::from_secs(2)) {
-                                let _ =
-                                    Connection::new(socket).send("Browser.close", json!({}), None);
+                                let _ = Connection::new(AnyWire::Socket(socket)).send(
+                                    "Browser.close",
+                                    json!({}),
+                                    None,
+                                );
                             }
                         });
                         eprintln!(
@@ -690,7 +737,7 @@ mod web {
     /// The fields drop in order, so the engine lets go of its tab before the
     /// browser it is in is reaped and its profile removed.
     pub struct Session {
-        device: BrowserDevice<CdpEngine<Socket>>,
+        device: BrowserDevice<CdpEngine<AnyWire>>,
         fresh: Started,
     }
 
@@ -706,7 +753,7 @@ mod web {
     }
 
     impl Device for Session {
-        type Error = <BrowserDevice<CdpEngine<Socket>> as Device>::Error;
+        type Error = <BrowserDevice<CdpEngine<AnyWire>> as Device>::Error;
 
         fn observe(&mut self) -> Result<Snapshot, Self::Error> {
             self.device.observe()
@@ -738,7 +785,7 @@ mod web {
 
     /// A connection to a browser that has proved to be Chrome, with its tabs.
     struct Connected {
-        socket: Socket,
+        socket: AnyWire,
         tabs: Vec<PageTab>,
         fresh: Started,
     }
@@ -748,7 +795,7 @@ mod web {
     /// In attach mode the handshake raises Chrome's prompt, so it is made as
     /// soon as the run starts and never retried; a retry would stack a second
     /// prompt on the first.
-    fn connect(target: &BrowserTarget) -> Result<Connected, Error> {
+    fn connect(target: &BrowserTarget, goal: &str) -> Result<Connected, Error> {
         let (socket, fresh, binary) = match &target.mode {
             BrowserMode::Attach {
                 channel,
@@ -770,7 +817,7 @@ mod web {
                 eprintln!("Click Allow in Chrome (Enter chooses Cancel)");
                 let socket = Socket::connect(&endpoint, Duration::from_secs(*allow_wait))
                     .map_err(AttachError::from)?;
-                (socket, Started(None), None)
+                (AnyWire::Socket(socket), Started(None), None)
             }
             BrowserMode::Fresh { chrome, headless } => {
                 let binary = find_chrome(
@@ -783,7 +830,11 @@ mod web {
                 let (fresh, port) = Fresh::start(&binary, *headless, FRESH_START)?;
                 let fresh = Started::new(fresh, &port);
                 let socket = Socket::connect(&port.endpoint(), CALL).map_err(AttachError::from)?;
-                (socket, fresh, Some(binary))
+                (AnyWire::Socket(socket), fresh, Some(binary))
+            }
+            BrowserMode::Extension { .. } => {
+                undo_on_interrupt(Interrupted::Attached);
+                (super::bridge::connect(target, goal)?, Started(None), None)
             }
         };
         let mut connection = Connection::new(socket);
@@ -843,7 +894,7 @@ mod web {
             BrowserMode::Attach {
                 sites_only: true,
                 ..
-            }
+            } | BrowserMode::Extension { sites_only: true }
         )
     }
 
@@ -868,12 +919,12 @@ mod web {
     /// A fresh browser starts on one blank tab the run owns, and `--open`
     /// loads its address there; in attach mode `--open` opens a new tab, so
     /// none of the owner's is touched.
-    fn session(target: &BrowserTarget) -> Result<Session, Error> {
+    fn session(target: &BrowserTarget, goal: &str) -> Result<Session, Error> {
         let Connected {
             socket,
             tabs,
             fresh,
-        } = connect(target)?;
+        } = connect(target, goal)?;
         let engine = match (&target.open, fresh.is_some()) {
             (Some(url), false) => CdpEngine::open(socket, url)?,
             (open, true) if target.tab.is_none() => {
@@ -901,7 +952,7 @@ mod web {
             socket,
             tabs,
             fresh,
-        } = connect(target)?;
+        } = connect(target, "")?;
         if tabs.is_empty() {
             println!("no tabs open");
         }
@@ -917,7 +968,7 @@ mod web {
 
     /// `observe --browser …`: what the next step would be offered on the tab.
     pub fn observe(target: &BrowserTarget) -> Result<(), Error> {
-        let mut session = session(target)?;
+        let mut session = session(target, "")?;
         let started = std::time::Instant::now();
         let screen = session.observe()?;
         println!("read by : DevTools Protocol");
@@ -932,15 +983,20 @@ mod web {
         // Read before Chrome is asked, so a missing key costs the owner no
         // click.
         let key = ApiKey::from_env()?;
-        let mut session = session(target)?;
+        let mut session = session(target, &plan.goal)?;
         println!(
             "browser: {}",
             match &target.mode {
                 BrowserMode::Attach { channel, .. } => format!("attached to Chrome ({channel})"),
                 BrowserMode::Fresh { headless: true, .. } => "fresh, headless".to_owned(),
                 BrowserMode::Fresh { .. } => "fresh".to_owned(),
+                BrowserMode::Extension { .. } =>
+                    "Chrome, through the jev-pilot extension".to_owned(),
             }
         );
+        if let Some(label) = super::bridge::development_label(target) {
+            println!("bridge : {label}");
+        }
         if let Some(tab) = session.describe_tab() {
             println!("tab    : {tab}");
         }
@@ -974,5 +1030,474 @@ mod web {
 
     pub fn pursue(_: &BrowserTarget, _: Plan) -> Result<(), Box<dyn core::error::Error>> {
         Err(REBUILD.into())
+    }
+}
+
+/// The bridge to Chrome's jev-pilot extension: the host, the `extension`
+/// commands, and a run's way onto the bridge.
+#[cfg(feature = "extension")]
+mod bridge {
+    use jev_pilot::browser::discover::Os;
+    use jev_pilot::browser::host::channel::{Place, connect_run, host_answers};
+    use jev_pilot::browser::host::{Serve, serve};
+    use jev_pilot::browser::install::{
+        self, Found, InstallKind, Installer, Layout, NOT_SET_UP, Status, UNPROTECTED, UserHosts,
+    };
+    use jev_pilot::cli::{BrowserMode, BrowserTarget, ExtensionCommand, Invocation};
+    use jev_pilot::peer::{Expected, Native};
+    use std::path::{Path, PathBuf};
+
+    type Error = Box<dyn core::error::Error>;
+
+    fn env(name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+
+    fn home() -> Result<PathBuf, Error> {
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(PathBuf::from)
+            .ok_or_else(|| "cannot tell where your home directory is".into())
+    }
+
+    fn read(path: &Path) -> Option<String> {
+        std::fs::read_to_string(path).ok()
+    }
+
+    /// The installed copy, or why there is none.
+    fn installed() -> Result<Found, Error> {
+        install::find_installed(Os::current(), &home()?, &env, &read)?
+            .ok_or_else(|| NOT_SET_UP.into())
+    }
+
+    /// Whether the invocation speaks to the host: drives Chrome through the
+    /// extension, or asks whether the bridge answers. Only the installed
+    /// copy passes the host's check, so these run as it.
+    fn through_extension(invocation: &Invocation) -> bool {
+        if matches!(invocation, Invocation::Extension(ExtensionCommand::Status)) {
+            return true;
+        }
+        let browser = match invocation {
+            Invocation::Run { browser, .. }
+            | Invocation::Observe { browser, .. }
+            | Invocation::Devices { browser } => browser.as_ref(),
+            _ => None,
+        };
+        matches!(
+            browser.map(|b| &b.mode),
+            Some(BrowserMode::Extension { .. })
+        )
+    }
+
+    /// Give up the setgid install's group, first thing, in every mode but
+    /// two: the host keeps it (a run reads the host's credentials as they
+    /// were when it listened, and only the group may append to the audit
+    /// log; the host starts no other program), and a run through the
+    /// extension gives it up right after connecting. Before that, a run
+    /// through the extension that is not the installed copy runs the
+    /// installed copy instead.
+    ///
+    /// A development install is never made non-dumpable: its peer could not
+    /// then read its executable to check its hash.
+    pub fn give_up_group(invocation: &Invocation) -> Result<(), Error> {
+        if through_extension(invocation) {
+            return run_the_installed_copy();
+        }
+        if matches!(invocation, Invocation::Host) {
+            return Ok(());
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        jev_pilot::peer::drop_install_group()?;
+        Ok(())
+    }
+
+    /// Carry on as the installed copy: exec it with the same arguments,
+    /// unless this is it.
+    fn run_the_installed_copy() -> Result<(), Error> {
+        let found = installed()?;
+        let this = std::env::current_exe()?;
+        let installed = found.record.expected.path();
+        if std::fs::canonicalize(&this).is_ok_and(|this| this == installed) {
+            return Ok(());
+        }
+        if let Some(differs) =
+            install::version_differs(env!("CARGO_PKG_VERSION"), &found.record.version)
+        {
+            eprintln!("jev-pilot: {differs}; going on with the installed copy");
+        }
+        let mut command = std::process::Command::new(installed);
+        command.args(std::env::args_os().skip(1));
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            Err(format!("cannot run {}: {}", installed.display(), command.exec()).into())
+        }
+        #[cfg(not(unix))]
+        {
+            let status = command.status()?;
+            std::process::exit(status.code().unwrap_or(1));
+        }
+    }
+
+    /// The label a development install carries in a run's header.
+    pub fn development_label(target: &BrowserTarget) -> Option<&'static str> {
+        let through = matches!(target.mode, BrowserMode::Extension { .. });
+        (through && installed().is_ok_and(|f| f.record.kind == InstallKind::Development))
+            .then_some(UNPROTECTED)
+    }
+
+    /// Where the channel is on this system.
+    fn place() -> Result<Place, Error> {
+        #[cfg(windows)]
+        {
+            use jev_pilot::browser::host::channel::pipe_name;
+            Ok(Place::Pipe(pipe_name(&jev_pilot::peer::own_sid()?)))
+        }
+        #[cfg(not(windows))]
+        {
+            use jev_pilot::browser::host::channel::{check_path, socket_dir, socket_path};
+            let os = Os::current();
+            let path = socket_path(&socket_dir(os, &home()?, &env));
+            check_path(os, &path)?;
+            Ok(Place::Socket(path))
+        }
+    }
+
+    /// What the other end must be: the installed copy, in this session.
+    #[cfg_attr(
+        not(windows),
+        allow(clippy::unnecessary_wraps, reason = "Windows can fail")
+    )]
+    fn expected(found: &Found) -> Result<Expected, Error> {
+        let expected = found.record.expected.clone();
+        #[cfg(windows)]
+        let expected = expected.with_session(Some(jev_pilot::peer::own_session()?));
+        Ok(expected)
+    }
+
+    /// A run's way onto the bridge: check the host, take the bridge, then
+    /// give up the install's group.
+    pub fn connect(target: &BrowserTarget, goal: &str) -> Result<super::web::AnyWire, Error> {
+        let found = installed()?;
+        let sites: Vec<String> = target.urls.iter().map(ToString::to_string).collect();
+        let wire = connect_run(
+            &place()?,
+            &expected(&found)?,
+            &Native,
+            goal,
+            &sites,
+            &jev_pilot::peer::parent(),
+        )?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        jev_pilot::peer::drop_install_group()?;
+        Ok(super::web::AnyWire::Extension(wire))
+    }
+
+    /// Host mode: Chrome started this program for the extension.
+    pub fn host() -> Result<(), Error> {
+        let found = installed()?;
+        let place = place()?;
+        #[cfg(unix)]
+        if let Place::Socket(path) = &place {
+            prepare_socket_dir(path.parent().unwrap_or(path))?;
+        }
+        let layout = found.layout.clone();
+        let install_json = layout.install_json.clone();
+        let config = Serve {
+            place,
+            expected: expected(&found)?,
+            check: std::sync::Arc::new(Native),
+            audit_dir: layout.audit_log.clone(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            extension_on_disk: extension_version(&layout.extension),
+            installed_version: Box::new(move || {
+                let text = std::fs::read_to_string(&install_json).ok()?;
+                let record: install::InstallRecord = serde_json::from_str(&text).ok()?;
+                Some(record.version)
+            }),
+        };
+        serve(config, std::io::stdin(), std::io::stdout().lock())?;
+        Ok(())
+    }
+
+    /// The socket's directory: made if missing, the owner's and closed to
+    /// everyone else, or refused.
+    #[cfg(unix)]
+    fn prepare_socket_dir(dir: &Path) -> Result<(), Error> {
+        use jev_pilot::browser::host::channel::{DirFacts, check_dir};
+        use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+        if !dir.exists() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
+        }
+        let meta = std::fs::symlink_metadata(dir)?;
+        let facts = DirFacts {
+            is_dir: meta.is_dir(),
+            owner: meta.uid(),
+            mode: meta.mode(),
+        };
+        check_dir(dir, facts, rustix::process::getuid().as_raw())?;
+        Ok(())
+    }
+
+    /// The version in the extension's manifest on disk.
+    fn extension_version(folder: &Path) -> Option<String> {
+        let text = std::fs::read_to_string(folder.join("manifest.json")).ok()?;
+        let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+        manifest["version"].as_str().map(str::to_owned)
+    }
+
+    /// `jev-pilot extension …`.
+    pub fn command(command: ExtensionCommand) -> Result<(), Error> {
+        match command {
+            ExtensionCommand::Install { dev } => install_bridge(dev),
+            ExtensionCommand::Status => status(),
+            ExtensionCommand::Uninstall => uninstall(),
+            ExtensionCommand::Log => log(),
+            ExtensionCommand::Sites { add, origin } => {
+                edit_policy(|policy| install::with_site(policy, &origin, add))
+            }
+            ExtensionCommand::OwnerTabs(rule) => {
+                edit_policy(|policy| install::with_owner_tabs(policy, rule))
+            }
+        }
+    }
+
+    /// Whether this process has an administrator's rights.
+    #[cfg_attr(
+        not(windows),
+        allow(clippy::unnecessary_wraps, reason = "Windows can fail")
+    )]
+    fn is_admin() -> Result<bool, Error> {
+        #[cfg(unix)]
+        return Ok(rustix::process::geteuid().is_root());
+        #[cfg(windows)]
+        return Ok(jev_pilot::peer::elevated()?);
+    }
+
+    const NEEDS_ADMIN: &str = "this changes what only an administrator may: run it with sudo \
+                               (an elevated prompt on Windows)";
+
+    /// Who the install is for, and where their home is.
+    fn installer(dev: bool) -> Result<(Installer, PathBuf), Error> {
+        #[cfg(unix)]
+        {
+            if dev {
+                return Ok((Installer::Uid(rustix::process::getuid().as_raw()), home()?));
+            }
+            // Run with sudo: the owner is who ran sudo.
+            let uid: u32 = env("SUDO_UID")
+                .and_then(|u| u.parse().ok())
+                .ok_or("run it with sudo from your own account, so the bridge is pinned to you")?;
+            let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))?
+                .ok_or("cannot find the account that ran sudo")?;
+            Ok((Installer::Uid(uid), user.dir))
+        }
+        #[cfg(windows)]
+        {
+            let _ = dev;
+            Ok((Installer::Sid(jev_pilot::peer::own_sid()?), home()?))
+        }
+    }
+
+    fn install_bridge(dev: bool) -> Result<(), Error> {
+        let os = Os::current();
+        if !dev && !is_admin()? {
+            return Err(format!(
+                "{NEEDS_ADMIN}, or `jev-pilot extension install --dev` for a development \
+                 install"
+            )
+            .into());
+        }
+        let (installer, owner_home) = installer(dev)?;
+        let (kind, layout) = if dev {
+            (
+                InstallKind::Development,
+                Layout::development(os, &owner_home, &env),
+            )
+        } else {
+            (InstallKind::Protected, Layout::protected(os, &env))
+        };
+        let hosts = user_hosts(os, kind, &owner_home)?;
+        let steps = install::plan(os, kind, &layout, &std::env::current_exe()?, &hosts);
+        for line in install::apply(&steps, &installer)? {
+            println!("{line}");
+        }
+        println!(
+            "installed jev-pilot {} at {}",
+            env!("CARGO_PKG_VERSION"),
+            layout.binary.display()
+        );
+        if dev {
+            println!("{UNPROTECTED}");
+        }
+        println!(
+            "\nNext, in Chrome: open chrome://extensions, turn on Developer mode (Chrome \
+             reminds you of it when it starts), choose \"Load unpacked\", and pick\n  {}\n\
+             Then `jev-pilot extension status` says whether the bridge answers.",
+            layout.extension.display()
+        );
+        Ok(())
+    }
+
+    /// The owner's user-level hosts, as the install deals with them.
+    fn user_hosts(os: Os, kind: InstallKind, home: &Path) -> Result<UserHosts, Error> {
+        if kind == InstallKind::Development {
+            // Registered for each browser the owner has.
+            let dirs = install::user_host_dirs(os, home)
+                .into_iter()
+                .map(|(user, _)| user)
+                .filter(|dir| dir.parent().is_some_and(Path::exists))
+                .collect();
+            return Ok(UserHosts::Register(dirs));
+        }
+        if os == Os::Windows {
+            let mut found = Vec::new();
+            for key in install::windows_host_keys() {
+                let output = std::process::Command::new("reg")
+                    .args(["query", &format!(r"HKCU\{key}"), "/s"])
+                    .output()?;
+                for (name, manifest) in
+                    install::reg_hosts_in(&String::from_utf8_lossy(&output.stdout))
+                {
+                    found.push((key.to_owned(), name, manifest));
+                }
+            }
+            return Ok(UserHosts::Registry(found));
+        }
+        let mut found = Vec::new();
+        for (user, system) in install::user_host_dirs(os, home) {
+            let Ok(entries) = std::fs::read_dir(&user) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                found.push((entry.path(), system.clone()));
+            }
+        }
+        Ok(UserHosts::Files(install::host_copies(&found, &|p| {
+            p.exists()
+        })))
+    }
+
+    fn status() -> Result<(), Error> {
+        let os = Os::current();
+        let found = install::find_installed(os, &home()?, &env, &read)?;
+        let host_answers = match &found {
+            Some(found) => host_answers(&place()?, &expected(found)?, &Native),
+            None => false,
+        };
+        let policy = found
+            .as_ref()
+            .and_then(|f| read(&f.layout.extension.join("policy.json")))
+            .and_then(|text| serde_json::from_str(&text).ok());
+        let status = Status {
+            os,
+            found,
+            this_version: env!("CARGO_PKG_VERSION").into(),
+            policy_in_place: policy_in_place(os),
+            host_answers,
+            policy,
+        };
+        for line in install::status_lines(&status)? {
+            println!("{line}");
+        }
+        Ok(())
+    }
+
+    /// Whether Chrome's policy turning user-level hosts off is in place.
+    fn policy_in_place(os: Os) -> bool {
+        match os {
+            // A profile the owner approved puts it in the managed
+            // preferences.
+            Os::MacOs => Path::new("/Library/Managed Preferences/com.google.Chrome.plist").exists(),
+            Os::Linux => install::linux_policy_files().iter().all(|p| p.exists()),
+            Os::Windows => std::process::Command::new("reg")
+                .args([
+                    "query",
+                    &format!(r"HKLM\{}", install::windows_policy_keys()[0]),
+                    "/v",
+                    "NativeMessagingUserLevelHosts",
+                ])
+                .output()
+                .is_ok_and(|o| o.status.success()),
+        }
+    }
+
+    fn uninstall() -> Result<(), Error> {
+        let found = installed()?;
+        if found.record.kind == InstallKind::Protected && !is_admin()? {
+            return Err(NEEDS_ADMIN.into());
+        }
+        let (installer, _) = installer(found.record.kind == InstallKind::Development)?;
+        let steps = install::uninstall_plan(Os::current(), &found.layout, &found.record);
+        for line in install::apply(&steps, &installer)? {
+            println!("{line}");
+        }
+        println!(
+            "removed jev-pilot's bridge; the audit log stays in {}",
+            found.layout.audit_log.display()
+        );
+        Ok(())
+    }
+
+    fn log() -> Result<(), Error> {
+        let found = installed()?;
+        match std::fs::read_to_string(found.layout.audit_log.join("audit.log")) {
+            Ok(text) => print!("{text}"),
+            Err(_) => println!("the audit log is empty"),
+        }
+        Ok(())
+    }
+
+    fn edit_policy(change: impl Fn(&serde_json::Value) -> serde_json::Value) -> Result<(), Error> {
+        let found = installed()?;
+        if found.record.kind == InstallKind::Protected && !is_admin()? {
+            return Err(NEEDS_ADMIN.into());
+        }
+        let path = found.layout.extension.join("policy.json");
+        let policy: serde_json::Value = serde_json::from_str(
+            &read(&path).ok_or("the extension's policy.json is missing: run the install again")?,
+        )?;
+        let changed = change(&policy);
+        std::fs::write(&path, serde_json::to_string_pretty(&changed)?)?;
+        println!("{}", serde_json::to_string_pretty(&changed)?);
+        Ok(())
+    }
+}
+
+/// Without the `extension` feature, the bridge says how to get it.
+#[cfg(not(feature = "extension"))]
+mod bridge {
+    use jev_pilot::cli::{ExtensionCommand, Invocation};
+
+    type Error = Box<dyn core::error::Error>;
+
+    const REBUILD: &str = "this build has no bridge to Chrome's extension; rebuild with \
+                           `cargo install --features extension`";
+
+    pub fn give_up_group(_: &Invocation) -> Result<(), Error> {
+        Ok(())
+    }
+
+    pub fn command(_: ExtensionCommand) -> Result<(), Error> {
+        Err(REBUILD.into())
+    }
+
+    pub fn host() -> Result<(), Error> {
+        Err(REBUILD.into())
+    }
+
+    #[cfg(feature = "browser")]
+    pub fn connect(
+        _: &jev_pilot::cli::BrowserTarget,
+        _: &str,
+    ) -> Result<super::web::AnyWire, Error> {
+        Err(REBUILD.into())
+    }
+
+    #[cfg(feature = "browser")]
+    pub fn development_label(_: &jev_pilot::cli::BrowserTarget) -> Option<&'static str> {
+        None
     }
 }

@@ -18,6 +18,30 @@ use super::{Code, Expected, Facts, MacosPin};
 /// requirement. Any other failure means the check could not be made.
 const REQUIREMENT_FAILED: i32 = -67050;
 
+/// Sets the real, effective and saved gid to the real gid, and checks that
+/// they held.
+pub(super) fn drop_install_group() -> std::io::Result<()> {
+    use nix::unistd::{getegid, geteuid, getgid, setegid};
+    let real = getgid();
+    let held = getegid();
+    jev_pilot_os::set_real_and_effective_gid(real.as_raw(), real.as_raw())?;
+    if getgid() != real || getegid() != real {
+        return Err(std::io::Error::other(
+            "the install group is still held after setregid",
+        ));
+    }
+    // macOS has no getresgid. A process that is not root may set its
+    // effective gid only to its real or its saved gid, so if the gid it held
+    // can be taken back, the saved gid still holds it.
+    if held != real && !geteuid().is_root() && setegid(held).is_ok() {
+        let _ = setegid(real);
+        return Err(std::io::Error::other(
+            "the install group is still held as the saved gid",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn facts(stream: &Stream, expected: &Expected) -> Facts {
     let Stream::UdSocket(socket) = stream;
     let fd = socket.as_fd();
@@ -50,6 +74,17 @@ pub(super) fn facts(stream: &Stream, expected: &Expected) -> Facts {
         facts.code = satisfies(&code, pin);
     }
     facts
+}
+
+/// The executable of process `pid`, as the Security framework finds it.
+pub(super) fn path_of(pid: u32) -> Option<std::path::PathBuf> {
+    let mut attributes = GuestAttributes::new();
+    attributes.set_pid(i32::try_from(pid).ok()?);
+    SecCode::copy_guest_with_attribues(None, &attributes, Flags::NONE)
+        .ok()?
+        .path(Flags::NONE)
+        .ok()?
+        .to_path()
 }
 
 fn guest(token: &[u32; 8]) -> Option<SecCode> {

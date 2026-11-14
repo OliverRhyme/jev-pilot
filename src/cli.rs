@@ -73,6 +73,50 @@ pub enum Invocation {
     Version,
     /// Bring this copy up to date with the latest release.
     Update,
+    /// Set up, inspect or remove the bridge to Chrome's jev-pilot extension.
+    Extension(ExtensionCommand),
+    /// Serve as the bridge's host: Chrome started this program for the
+    /// jev-pilot extension.
+    Host,
+}
+
+/// What `jev-pilot extension` was asked to do.
+///
+/// Not `#[non_exhaustive]`, for the reason [`Invocation`] is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtensionCommand {
+    /// Install the host, the extension and Chrome's policy.
+    Install {
+        /// A user-owned development install, not protected against other
+        /// programs running as the owner.
+        dev: bool,
+    },
+    /// Say what is installed and whether the bridge answers.
+    Status,
+    /// Remove what the install made.
+    Uninstall,
+    /// Show the audit log.
+    Log,
+    /// Add a site to the allowed sites, or remove one.
+    Sites {
+        /// Whether to add it, rather than remove it.
+        add: bool,
+        /// The site, as an origin.
+        origin: Box<str>,
+    },
+    /// Say which of the owner's own tabs `--tab` may take.
+    OwnerTabs(OwnerTabs),
+}
+
+/// Which of the owner's tabs, not opened by a run, a run may take with
+/// `--tab` in extension mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OwnerTabs {
+    /// Only tabs the owner put in the "jev-pilot" tab group.
+    Group,
+    /// None.
+    Never,
 }
 
 /// How many steps a run takes before giving up, unless told otherwise.
@@ -103,6 +147,12 @@ pub enum BrowserMode {
         /// Name the owner's tabs by id and site alone, never by title or
         /// path, wherever they are listed: for a caller other than the
         /// owner, such as an agent over MCP.
+        sites_only: bool,
+    },
+    /// The owner's running Chrome, through the jev-pilot extension: no
+    /// prompt, and only what the extension's policy allows.
+    Extension {
+        /// Name the owner's tabs by id and site alone, as in attach mode.
         sites_only: bool,
     },
     /// A browser started for the run, on a throwaway profile.
@@ -173,6 +223,9 @@ pub enum CliError {
     /// happened to be attached. A goal is a sentence; a one-word goal meant
     /// as one goes after `--`.
     NotACommand(String),
+    /// Started as a native messaging host by an extension other than
+    /// jev-pilot's.
+    ForeignOrigin(String),
 }
 
 impl core::fmt::Display for CliError {
@@ -196,6 +249,9 @@ impl core::fmt::Display for CliError {
             ),
             Self::TooManyGoals => {
                 f.write_str("more than one goal given: put the whole goal in quotes")
+            }
+            Self::ForeignOrigin(origin) => {
+                write!(f, "jev-pilot serves only its own extension, not {origin}")
             }
         }
     }
@@ -311,6 +367,13 @@ fn subcommand(
     }
 
     Some(match args.peek().map(String::as_str)? {
+        // Chrome passes the caller's origin first, and on Windows a
+        // `--parent-window` after it, which the host has no use for.
+        origin if origin.starts_with("chrome-extension://") => host(origin),
+        "extension" => {
+            let _ = args.next();
+            extension(args)
+        }
         "--help" | "-h" | "help" => Ok(Invocation::Help),
         "--version" | "-V" | "version" => Ok(Invocation::Version),
         "devices" => {
@@ -329,6 +392,102 @@ fn subcommand(
         }
         _ => return None,
     })
+}
+
+/// Host mode, for the extension whose origin Chrome passed.
+fn host(origin: &str) -> Result<Invocation, CliError> {
+    #[cfg(feature = "browser")]
+    {
+        let ours = format!(
+            "chrome-extension://{}/",
+            crate::browser::bridge::EXTENSION_ID
+        );
+        if origin != ours {
+            return Err(CliError::ForeignOrigin(origin.to_owned()));
+        }
+    }
+    // Without the browser, the binary cannot serve and says so when asked.
+    let _ = origin;
+    Ok(Invocation::Host)
+}
+
+/// The rest of `extension`.
+fn extension(mut args: impl Iterator<Item = String>) -> Result<Invocation, CliError> {
+    let word = |got: Option<String>| got.ok_or(CliError::MissingValue("extension"));
+    let command = match word(args.next())?.as_str() {
+        "install" => match args.next().as_deref() {
+            None => ExtensionCommand::Install { dev: false },
+            Some("--dev") => ExtensionCommand::Install { dev: true },
+            Some(other) => return Err(CliError::UnknownFlag(other.to_owned())),
+        },
+        "status" => ExtensionCommand::Status,
+        "uninstall" => ExtensionCommand::Uninstall,
+        "log" => ExtensionCommand::Log,
+        "policy" => match word(args.next())?.as_str() {
+            "sites" => {
+                let add = match word(args.next())?.as_str() {
+                    "add" => true,
+                    "remove" => false,
+                    other => return Err(CliError::NotACommand(other.to_owned())),
+                };
+                let got = value(&mut args, "sites")?;
+                let origin = site_origin(&got).ok_or(CliError::BadValue { flag: "sites", got })?;
+                ExtensionCommand::Sites {
+                    add,
+                    origin: origin.into(),
+                }
+            }
+            "owner-tabs" => {
+                let got = value(&mut args, "owner-tabs")?;
+                ExtensionCommand::OwnerTabs(match got.as_str() {
+                    "group" => OwnerTabs::Group,
+                    "never" => OwnerTabs::Never,
+                    _ => {
+                        return Err(CliError::BadValue {
+                            flag: "owner-tabs",
+                            got,
+                        });
+                    }
+                })
+            }
+            other => return Err(CliError::NotACommand(other.to_owned())),
+        },
+        other => return Err(CliError::NotACommand(other.to_owned())),
+    };
+    match args.next() {
+        Some(other) => Err(CliError::UnknownFlag(other)),
+        None => Ok(Invocation::Extension(command)),
+    }
+}
+
+/// A site for the allowed list, as its origin in lower case: `http` or
+/// `https`, a host, and perhaps a port. A `*.` before the host also allows
+/// its subdomains. `None` for anything else.
+#[must_use]
+pub fn site_origin(site: &str) -> Option<String> {
+    let site = site.to_ascii_lowercase();
+    let (scheme, rest) = site.split_once("://")?;
+    if !matches!(scheme, "http" | "https") {
+        return None;
+    }
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (rest, None),
+    };
+    if port.is_some_and(|p| p.is_empty() || p.parse::<u16>().is_err()) {
+        return None;
+    }
+    let name = host.strip_prefix("*.").unwrap_or(host);
+    let label_ok = |label: &str| {
+        !label.is_empty()
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    };
+    if !name.split('.').all(label_ok) {
+        return None;
+    }
+    Some(site)
 }
 
 /// The rest of `observe`: which device, or which browser.
@@ -406,7 +565,7 @@ impl BrowserFlags {
         match word {
             "--browser" => {
                 let got = value(args, "--browser")?;
-                if !matches!(got.as_str(), "attach" | "fresh") {
+                if !matches!(got.as_str(), "attach" | "fresh" | "extension") {
                     return Err(CliError::BadValue {
                         flag: "--browser",
                         got,
@@ -456,17 +615,17 @@ impl BrowserFlags {
 
     /// The browser target, checked against the rest of the command line.
     fn finish(self, device: bool, app: bool) -> Result<Option<BrowserTarget>, CliError> {
-        let Some(mode) = self.mode else {
+        let Some(mode) = self.mode.clone() else {
             let stray = [
                 (self.channel.is_some(), "--channel", "attach"),
                 (self.endpoint.is_some(), "--endpoint", "attach"),
                 (self.allow_wait.is_some(), "--allow-wait", "attach"),
-                (self.sites_only, "--sites-only", "attach"),
+                (self.sites_only, "--sites-only", "extension|attach"),
                 (self.chrome.is_some(), "--chrome", "fresh"),
                 (self.headless, "--headless", "fresh"),
-                (self.tab.is_some(), "--tab", "attach|fresh"),
-                (self.open.is_some(), "--open", "attach|fresh"),
-                (!self.urls.is_empty(), "--url", "attach|fresh"),
+                (self.tab.is_some(), "--tab", "extension|attach|fresh"),
+                (self.open.is_some(), "--open", "extension|attach|fresh"),
+                (!self.urls.is_empty(), "--url", "extension|attach|fresh"),
             ];
             return match stray.into_iter().find(|(set, ..)| *set) {
                 Some((_, flag, mode)) => Err(CliError::NeedsMode { flag, mode }),
@@ -494,7 +653,50 @@ impl BrowserFlags {
                 instead: "drive an existing tab, or open a new one, not both",
             });
         }
-        let mode = if mode == "attach" {
+        let mode = self.mode(&mode)?;
+        let mut urls: Vec<Box<str>> = Vec::new();
+        for url in self.open.iter().chain(&self.urls) {
+            if !urls.iter().any(|u| **u == **url) {
+                urls.push(url.as_str().into());
+            }
+        }
+        Ok(Some(BrowserTarget {
+            mode,
+            tab: self.tab.map(Into::into),
+            open: self.open.map(Into::into),
+            urls,
+        }))
+    }
+
+    /// The mode `--browser` named, refusing the flags of the other modes.
+    fn mode(&self, mode: &str) -> Result<BrowserMode, CliError> {
+        let attach_only = [
+            (self.channel.is_some(), "--channel"),
+            (self.endpoint.is_some(), "--endpoint"),
+            (self.allow_wait.is_some(), "--allow-wait"),
+        ];
+        let fresh_only = [
+            (self.chrome.is_some(), "--chrome"),
+            (self.headless, "--headless"),
+        ];
+        Ok(if mode == "extension" {
+            let stray = attach_only
+                .into_iter()
+                .map(|(set, flag)| (set, flag, "attach"))
+                .chain(
+                    fresh_only
+                        .into_iter()
+                        .map(|(set, flag)| (set, flag, "fresh")),
+                );
+            for (set, flag, mode) in stray {
+                if set {
+                    return Err(CliError::NeedsMode { flag, mode });
+                }
+            }
+            BrowserMode::Extension {
+                sites_only: self.sites_only,
+            }
+        } else if mode == "attach" {
             for (set, flag) in [
                 (self.chrome.is_some(), "--chrome"),
                 (self.headless, "--headless"),
@@ -507,8 +709,12 @@ impl BrowserFlags {
                 }
             }
             BrowserMode::Attach {
-                channel: self.channel.unwrap_or_else(|| "stable".to_owned()).into(),
-                endpoint: self.endpoint.map(Into::into),
+                channel: self
+                    .channel
+                    .clone()
+                    .unwrap_or_else(|| "stable".to_owned())
+                    .into(),
+                endpoint: self.endpoint.clone().map(Into::into),
                 allow_wait: self.allow_wait.unwrap_or(DEFAULT_ALLOW_WAIT),
                 sites_only: self.sites_only,
             }
@@ -527,22 +733,10 @@ impl BrowserFlags {
                 }
             }
             BrowserMode::Fresh {
-                chrome: self.chrome.map(std::path::PathBuf::from),
+                chrome: self.chrome.clone().map(std::path::PathBuf::from),
                 headless: self.headless,
             }
-        };
-        let mut urls: Vec<Box<str>> = Vec::new();
-        for url in self.open.iter().chain(&self.urls) {
-            if !urls.iter().any(|u| **u == **url) {
-                urls.push(url.as_str().into());
-            }
-        }
-        Ok(Some(BrowserTarget {
-            mode,
-            tab: self.tab.map(Into::into),
-            open: self.open.map(Into::into),
-            urls,
-        }))
+        })
     }
 }
 
@@ -609,6 +803,19 @@ USAGE
                                       --browser, a browser's tabs)
   jev-pilot observe                   print what the next step would be offered
   jev-pilot helper [install]          report on, or install, the on-device helper
+  jev-pilot extension install [--dev] set up the bridge to Chrome's jev-pilot
+                                      extension (as an administrator; --dev is a
+                                      user-owned install, not protected against
+                                      other programs running as you)
+  jev-pilot extension status          say what is set up, and whether Chrome answers
+  jev-pilot extension uninstall       remove the bridge (as an administrator)
+  jev-pilot extension log             show the bridge's audit log
+  jev-pilot extension policy sites add|remove <origin>
+                                      allow a site, or stop allowing it; an empty
+                                      list allows every site (as an administrator)
+  jev-pilot extension policy owner-tabs group|never
+                                      whether --tab may take your own tabs in the
+                                      'jev-pilot' tab group (as an administrator)
   jev-pilot mcp                       serve MCP over stdio, for an agent to drive runs
   jev-pilot update                    update to the latest release
   jev-pilot --version                 say which version this is
@@ -638,6 +845,10 @@ OPTIONS
   -h, --help              this text
 
 BROWSER (runs, observe and devices; needs a build with the `browser` feature)
+      --browser extension drive your running Chrome through the jev-pilot
+                          extension, with no prompt, within the sites and tabs
+                          its policy allows. Set it up once with
+                          `jev-pilot extension install`
       --browser attach    drive your running Chrome. Turn on remote debugging
                           at chrome://inspect/#remote-debugging, then click
                           Allow when Chrome asks (Enter chooses Cancel)
@@ -646,8 +857,8 @@ BROWSER (runs, observe and devices; needs a build with the `browser` feature)
       --channel <name>    attach: stable (default), beta, dev or canary
       --endpoint <ws-url> attach: this browser websocket, instead of finding it
       --allow-wait <s>    attach: how long to wait for Allow (default 120)
-      --sites-only        attach: list tabs by id and site, with no titles or
-                          paths
+      --sites-only        extension, attach: list tabs by id and site, with no
+                          titles or paths
       --chrome <path>     fresh: the browser binary (else JEV_PILOT_CHROME,
                           else Chrome for Testing, Chromium or Chrome)
       --headless          fresh: run without a window

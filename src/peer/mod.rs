@@ -18,7 +18,7 @@
 //! refusal, never an assumption.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 #[cfg(target_os = "linux")]
@@ -90,8 +90,13 @@ pub fn set_not_dumpable() -> std::io::Result<()> {
 }
 
 /// Gives up the setgid install's group for good: sets the real, effective
-/// and saved gid to the real gid, then reads them back and fails unless all
-/// three are.
+/// and saved gid to the real gid, then checks all three are.
+///
+/// Linux reads them back with `getresgid`. macOS sets them with `setregid`,
+/// which moves the saved gid with the effective one, and has no way to read
+/// the saved gid; it is checked by trying to take the group back with
+/// `setegid`, which a process that is not root can do only for its real or
+/// saved gid.
 ///
 /// A setgid process's children inherit its effective gid, and the group is
 /// what the bridge trusts. jev-pilot starts other programs found on `PATH`
@@ -111,10 +116,13 @@ pub fn set_not_dumpable() -> std::io::Result<()> {
 /// # Errors
 ///
 /// When the kernel refuses the change, or the group is still held after it.
-#[cfg(target_os = "linux")]
-#[cfg_attr(docsrs, doc(cfg(target_os = "linux")))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(docsrs, doc(cfg(any(target_os = "linux", target_os = "macos"))))]
 pub fn drop_install_group() -> std::io::Result<()> {
-    linux::drop_install_group()
+    #[cfg(target_os = "linux")]
+    return linux::drop_install_group();
+    #[cfg(target_os = "macos")]
+    return macos::drop_install_group();
 }
 
 /// The string form of the SID of the user this process runs as: what a
@@ -139,6 +147,41 @@ pub fn own_sid() -> std::io::Result<String> {
 #[cfg_attr(docsrs, doc(cfg(windows)))]
 pub fn own_session() -> std::io::Result<u32> {
     jev_pilot_os::current_session()
+}
+
+/// Whether this process runs elevated, with an administrator's rights.
+///
+/// # Errors
+///
+/// When this process's token cannot be read.
+#[cfg(windows)]
+#[cfg_attr(docsrs, doc(cfg(windows)))]
+pub fn elevated() -> std::io::Result<bool> {
+    jev_pilot_os::is_elevated()
+}
+
+/// The process that started this one, as far as the OS says without
+/// asking anything of it: its pid on Unix, and its executable on Linux
+/// (from `/proc`) and macOS (from the Security framework). For the audit
+/// log, where the run says who started it.
+#[must_use]
+pub fn parent() -> crate::browser::bridge::Parent {
+    #[cfg(unix)]
+    {
+        let pid = std::os::unix::process::parent_id();
+        #[cfg(target_os = "linux")]
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+        #[cfg(target_os = "macos")]
+        let exe = macos::path_of(pid);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let exe: Option<PathBuf> = None;
+        crate::browser::bridge::Parent {
+            pid: Some(pid),
+            exe: exe.map(|e| e.to_string_lossy().into_owned()),
+        }
+    }
+    #[cfg(not(unix))]
+    crate::browser::bridge::Parent::default()
 }
 
 /// The SHA-256 of everything `file` holds from where it is.
@@ -474,6 +517,16 @@ pub enum WindowsPin {
 }
 
 impl Expected {
+    /// Where the installed copy lives.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Macos { path, .. } | Self::Linux { path, .. } | Self::Windows { path, .. } => {
+                path
+            }
+        }
+    }
+
     /// The same pin, with the session a Windows peer must be in. Other OSes
     /// have no session, and are returned unchanged.
     #[must_use]

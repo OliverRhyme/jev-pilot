@@ -186,6 +186,14 @@ pub enum Message {
         /// The sites the run may go to.
         #[serde(default)]
         sites: Vec<String>,
+        /// The process that started the run, for the audit log. The run
+        /// says it of itself, and the host believes it only because it has
+        /// already found the run to be the installed jev-pilot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_pid: Option<u32>,
+        /// That process's executable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_exe: Option<String>,
     },
     /// Extension to host, on connecting.
     Hello(Hello),
@@ -212,6 +220,12 @@ pub enum Message {
     Refused {
         /// Which check failed.
         check: String,
+    },
+    /// Host to run: the bridge ended, for a reason the run cannot see for
+    /// itself. The host exits after sending it.
+    Ended {
+        /// Why: `too_large`, a message from Chrome over [`READ_LIMIT`].
+        reason: String,
     },
     /// Run to extension: one operation.
     Request {
@@ -272,6 +286,18 @@ pub enum Message {
     Release,
     /// Host to extension: the files on disk are newer than what is running.
     Reload,
+    /// Host to extension: another browser, or another profile, already
+    /// serves jev-pilot. The host exits after sending it.
+    Elsewhere,
+}
+
+/// The process that started a run, as the run knows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Parent {
+    /// Its process id.
+    pub pid: Option<u32>,
+    /// Its executable.
+    pub exe: Option<String>,
 }
 
 /// What the extension says about itself and its browser.
@@ -421,14 +447,22 @@ impl Nonce {
     }
 
     /// A run's answer to the host's first frame, when it is a nonce: the
-    /// nonce, with the run's goal and the sites it may go to.
+    /// nonce, with the run's goal, the sites it may go to, and the process
+    /// that started it.
     #[must_use]
-    pub fn echoing(first: &Message, goal: &str, sites: &[String]) -> Option<Message> {
+    pub fn echoing(
+        first: &Message,
+        goal: &str,
+        sites: &[String],
+        parent: &Parent,
+    ) -> Option<Message> {
         match first {
             Message::Nonce { nonce } => Some(Message::Echo {
                 nonce: nonce.clone(),
                 goal: goal.to_owned(),
                 sites: sites.to_vec(),
+                parent_pid: parent.pid,
+                parent_exe: parent.exe.clone(),
             }),
             _ => None,
         }

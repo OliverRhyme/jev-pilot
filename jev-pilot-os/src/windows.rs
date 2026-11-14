@@ -21,7 +21,9 @@ use windows_sys::Win32::Security::WinTrust::{
     WTD_STATEACTION_VERIFY, WTD_UI_NONE, WTHelperGetProvCertFromChain,
     WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
 };
-use windows_sys::Win32::Security::{GetTokenInformation, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
+};
 use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
@@ -208,6 +210,43 @@ pub fn current_session() -> io::Result<u32> {
         return Err(io::Error::last_os_error());
     }
     Ok(session)
+}
+
+/// Whether this process runs elevated, with an administrator's rights.
+///
+/// # Errors
+///
+/// When this process's token cannot be read.
+#[allow(unsafe_code)]
+pub fn is_elevated() -> io::Result<bool> {
+    let mut token: HANDLE = ptr::null_mut();
+    // SAFETY: GetCurrentProcess takes nothing and returns a pseudo-handle.
+    let me = unsafe { GetCurrentProcess() };
+    // SAFETY: `me` is this process; `token` is a valid place for the new
+    // handle.
+    if unsafe { OpenProcessToken(me, TOKEN_QUERY, &raw mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `token` is a valid token handle that nothing else owns.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut length = 0u32;
+    let size = u32::try_from(size_of::<TOKEN_ELEVATION>()).map_err(io::Error::other)?;
+    // SAFETY: `elevation` is a TOKEN_ELEVATION of `size` bytes, and
+    // `length` a valid u32.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevation,
+            (&raw mut elevation).cast(),
+            size,
+            &raw mut length,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(elevation.TokenIsElevated != 0)
 }
 
 #[allow(unsafe_code)]

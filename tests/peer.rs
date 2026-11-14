@@ -815,16 +815,20 @@ mod gather {
         assert!(status.success());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_process_can_give_up_the_install_group_for_good() {
         const CHILD: &str = "JEV_PILOT_PEER_TEST_DROP_GROUP";
         // It changes the whole process, so it runs in a child of its own.
         if std::env::var_os(CHILD).is_some() {
             jev_pilot::peer::drop_install_group().unwrap();
-            let ids = nix::unistd::getresgid().unwrap();
             let real = nix::unistd::getgid();
-            assert_eq!((ids.real, ids.effective, ids.saved), (real, real, real));
+            assert_eq!(nix::unistd::getegid(), real);
+            #[cfg(target_os = "linux")]
+            {
+                let ids = nix::unistd::getresgid().unwrap();
+                assert_eq!((ids.real, ids.effective, ids.saved), (real, real, real));
+            }
             return;
         }
         let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -882,4 +886,33 @@ mod gather {
             Verdict::refuse(Check::Signer, Reason::Missing)
         );
     }
+}
+
+/// The run tells the host which process started it: here, the test
+/// harness's parent.
+#[cfg(unix)]
+#[test]
+fn the_parent_is_this_processs_parent() {
+    let parent = jev_pilot::peer::parent();
+    assert_eq!(parent.pid, Some(std::os::unix::process::parent_id()));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    assert!(parent.exe.is_some(), "{parent:?}");
+}
+
+/// Authenticode names the signer of a signed image: PowerShell 7, signed
+/// by Microsoft, where the system has it (GitHub's Windows runners do).
+#[cfg(windows)]
+#[test]
+fn authenticode_names_the_signer_of_a_signed_image() {
+    let pwsh = std::path::Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe");
+    if !pwsh.exists() {
+        eprintln!("no PowerShell 7 here to check a signature against");
+        return;
+    }
+    let signer = jev_pilot_os::authenticode_signer(pwsh).expect("pwsh.exe is signed");
+    assert!(
+        signer.subject.contains("O=Microsoft Corporation"),
+        "{}",
+        signer.subject
+    );
 }

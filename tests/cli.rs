@@ -1,7 +1,9 @@
 //! Reading a command line. Pure: nothing here touches a device.
 
 use jev_pilot::act::Operation;
-use jev_pilot::cli::{BrowserMode, BrowserTarget, CliError, Invocation, parse};
+use jev_pilot::cli::{
+    BrowserMode, BrowserTarget, CliError, ExtensionCommand, Invocation, OwnerTabs, parse,
+};
 
 fn parsed(words: &[&str]) -> Invocation {
     parse(words.iter().map(|w| (*w).to_owned())).expect("a valid command line")
@@ -646,4 +648,189 @@ fn sites_only_belongs_to_attach_mode() {
     let refused = |words: &[&str]| parse(words.iter().map(|w| (*w).to_owned())).is_err();
     assert!(refused(&["devices", "--browser", "fresh", "--sites-only"]));
     assert!(refused(&["devices", "--sites-only"]));
+}
+
+// --- the extension ---
+
+#[test]
+fn extension_mode_drives_the_owners_chrome_through_the_extension() {
+    let target = browser_of(parsed(&[
+        "--browser",
+        "extension",
+        "--open",
+        "https://example.test/",
+        "Open the page",
+    ]))
+    .expect("a browser target");
+    assert_eq!(target.mode, BrowserMode::Extension { sites_only: false });
+    assert_eq!(target.open.as_deref(), Some("https://example.test/"));
+    assert_eq!(
+        browser_of(parsed(&["observe", "--browser", "extension", "--tab", "7"]))
+            .map(|t| (t.mode, t.tab)),
+        Some((
+            BrowserMode::Extension { sites_only: false },
+            Some("7".into())
+        ))
+    );
+    assert_eq!(
+        browser_of(parsed(&[
+            "devices",
+            "--browser",
+            "extension",
+            "--sites-only"
+        ]))
+        .map(|t| t.mode),
+        Some(BrowserMode::Extension { sites_only: true })
+    );
+}
+
+/// The attach and fresh flags are refused in extension mode, naming the mode
+/// they belong to.
+#[test]
+fn attach_and_fresh_flags_are_refused_in_extension_mode() {
+    for (flag, value, mode) in [
+        ("--channel", Some("beta"), "attach"),
+        (
+            "--endpoint",
+            Some("ws://127.0.0.1:1/devtools/browser/x"),
+            "attach",
+        ),
+        ("--allow-wait", Some("40"), "attach"),
+        ("--chrome", Some("/opt/chrome"), "fresh"),
+        ("--headless", None, "fresh"),
+    ] {
+        let mut words = vec!["--browser", "extension", flag];
+        words.extend(value);
+        words.push("Open the page");
+        let error = refused(&words);
+        assert_eq!(error, CliError::NeedsMode { flag, mode }, "{words:?}");
+        assert_eq!(error.to_string(), format!("{flag} needs --browser {mode}"));
+    }
+}
+
+fn extension(words: &[&str]) -> ExtensionCommand {
+    let mut all = vec!["extension"];
+    all.extend_from_slice(words);
+    match parsed(&all) {
+        Invocation::Extension(command) => command,
+        other => panic!("not an extension command: {other:?}"),
+    }
+}
+
+#[test]
+fn the_extension_subcommand_installs_reports_and_removes() {
+    assert_eq!(
+        extension(&["install"]),
+        ExtensionCommand::Install { dev: false }
+    );
+    assert_eq!(
+        extension(&["install", "--dev"]),
+        ExtensionCommand::Install { dev: true }
+    );
+    assert_eq!(extension(&["status"]), ExtensionCommand::Status);
+    assert_eq!(extension(&["uninstall"]), ExtensionCommand::Uninstall);
+    assert_eq!(extension(&["log"]), ExtensionCommand::Log);
+}
+
+#[test]
+fn the_extension_policy_is_edited_from_the_command_line() {
+    assert_eq!(
+        extension(&["policy", "sites", "add", "https://example.test"]),
+        ExtensionCommand::Sites {
+            add: true,
+            origin: "https://example.test".into()
+        }
+    );
+    assert_eq!(
+        extension(&["policy", "sites", "remove", "https://*.example.test"]),
+        ExtensionCommand::Sites {
+            add: false,
+            origin: "https://*.example.test".into()
+        }
+    );
+    assert_eq!(
+        extension(&["policy", "sites", "add", "HTTP://LocalHost:8080"]),
+        ExtensionCommand::Sites {
+            add: true,
+            origin: "http://localhost:8080".into()
+        }
+    );
+    assert_eq!(
+        extension(&["policy", "owner-tabs", "group"]),
+        ExtensionCommand::OwnerTabs(OwnerTabs::Group)
+    );
+    assert_eq!(
+        extension(&["policy", "owner-tabs", "never"]),
+        ExtensionCommand::OwnerTabs(OwnerTabs::Never)
+    );
+}
+
+#[test]
+fn a_bad_extension_command_is_refused() {
+    for words in [
+        &["extension"][..],
+        &["extension", "launch"],
+        &["extension", "install", "--now"],
+        &["extension", "status", "extra"],
+        &["extension", "policy"],
+        &["extension", "policy", "sites", "add"],
+        &[
+            "extension",
+            "policy",
+            "sites",
+            "toggle",
+            "https://example.test",
+        ],
+        &["extension", "policy", "owner-tabs", "always"],
+    ] {
+        assert!(
+            parse(words.iter().map(|w| (*w).to_owned())).is_err(),
+            "{words:?} is refused"
+        );
+    }
+}
+
+/// A site is an origin: a scheme of http or https, a host, and perhaps a
+/// port. A `*.` before the host takes its subdomains too. Anything else, a
+/// path or a pattern elsewhere, is refused rather than guessed at.
+#[test]
+fn a_site_must_be_an_origin() {
+    for origin in [
+        "example.test",
+        "ftp://example.test",
+        "https://example.test/path",
+        "https://",
+        "https://exa*mple.test",
+        "https://*.",
+        "https://example.test:port",
+        "chrome://settings",
+        "https://user@example.test",
+    ] {
+        assert!(
+            matches!(
+                parse(["extension", "policy", "sites", "add", origin].map(str::to_owned)),
+                Err(CliError::BadValue { flag: "sites", .. })
+            ),
+            "{origin} is refused"
+        );
+    }
+}
+
+/// Chrome starts the host with the extension's origin as its first argument
+/// (and, on Windows, a `--parent-window` after it).
+#[cfg(feature = "browser")]
+#[test]
+fn chrome_starts_the_host_with_the_extensions_origin() {
+    let origin = format!(
+        "chrome-extension://{}/",
+        jev_pilot::browser::bridge::EXTENSION_ID
+    );
+    assert_eq!(parsed(&[&origin]), Invocation::Host);
+    assert_eq!(parsed(&[&origin, "--parent-window=0"]), Invocation::Host);
+    let other = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/";
+    assert_eq!(refused(&[other]), CliError::ForeignOrigin(other.to_owned()));
+    assert_eq!(
+        refused(&[other]).to_string(),
+        format!("jev-pilot serves only its own extension, not {other}")
+    );
 }

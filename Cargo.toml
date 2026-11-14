@@ -41,12 +41,19 @@ rustix = { version = "1.1.6", optional = true, default-features = false, feature
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3.7.0", optional = true }
 core-foundation = { version = "0.10.1", optional = true }
+jev-pilot-os = { path = "jev-pilot-os", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 jev-pilot-os = { path = "jev-pilot-os", optional = true }
+# The named pipe's security descriptor, from SDDL, as interprocess takes it.
+widestring = { version = "1.2.1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
+
+# The Windows calls, tested against files the system ships.
+[target.'cfg(windows)'.dev-dependencies]
+jev-pilot-os = { path = "jev-pilot-os" }
 
 [features]
 default = ["android", "ios", "http"]
@@ -79,6 +86,7 @@ extension = [
     "dep:security-framework",
     "dep:core-foundation",
     "dep:jev-pilot-os",
+    "dep:widestring",
 ]
 
 # docs.rs renders every feature, and marks which items need which.
