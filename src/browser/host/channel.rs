@@ -313,6 +313,13 @@ pub enum RunError {
     NoHost,
     /// What answered failed the run's check of the host.
     NotTheHost(Refusal),
+    /// The host found the run is not the installed jev-pilot.
+    Refused {
+        /// The installed jev-pilot, the only one the bridge serves.
+        installed: PathBuf,
+        /// The check the run failed.
+        check: String,
+    },
     /// The host turned the run away, or the handshake failed.
     Connect(ConnectError),
 }
@@ -325,6 +332,11 @@ impl core::fmt::Display for RunError {
                 why: refusal.to_string().into(),
             }
             .fmt(f),
+            Self::Refused { installed, check } => write!(
+                f,
+                "the bridge only serves the installed jev-pilot at {} ({check})",
+                installed.display()
+            ),
             Self::Connect(e) => e.fmt(f),
         }
     }
@@ -353,6 +365,12 @@ pub fn connect_run(
         return Err(RunError::NotTheHost(refusal));
     }
     let (stream, pacer) = RunStream::new(stream);
-    let wire = ExtensionWire::connect_as(stream, goal, sites, parent).map_err(RunError::Connect)?;
+    let wire = ExtensionWire::connect_as(stream, goal, sites, parent).map_err(|e| match e {
+        ConnectError::Refused { check } => RunError::Refused {
+            installed: expected.path().to_owned(),
+            check,
+        },
+        other => RunError::Connect(other),
+    })?;
     Ok(wire.paced_by(pacer))
 }

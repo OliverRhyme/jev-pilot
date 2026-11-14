@@ -18,7 +18,7 @@
 //! refusal, never an assumption.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 #[cfg(target_os = "linux")]
@@ -482,6 +482,16 @@ pub enum WindowsPin {
 }
 
 impl Expected {
+    /// Where the installed copy lives.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Macos { path, .. } | Self::Linux { path, .. } | Self::Windows { path, .. } => {
+                path
+            }
+        }
+    }
+
     /// The same pin, with the session a Windows peer must be in. Other OSes
     /// have no session, and are returned unchanged.
     #[must_use]

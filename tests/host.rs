@@ -1027,8 +1027,8 @@ mod serving {
         let error = run_at(&place, "x").err().expect("refused");
         assert_eq!(
             error.to_string(),
-            "the bridge only serves the installed jev-pilot (process id: not reported by the OS \
-             failed)"
+            "the bridge only serves the installed jev-pilot at \
+             /usr/local/libexec/jev-pilot/jev-pilot (process id: not reported by the OS)"
         );
         drop(host.stdin.take());
         host.done.join().unwrap().expect("the host ends cleanly");
