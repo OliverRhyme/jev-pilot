@@ -859,30 +859,57 @@ mod gather {
         assert!(status.success());
     }
 
+    /// A setgid process gives up its group for good. The test binary is
+    /// copied, given one of the user's other groups with the setgid bit, and
+    /// run: the child holds the group, gives it up, and cannot take it back.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_process_can_give_up_the_install_group_for_good() {
+        use nix::unistd::{getegid, getgid};
+        use std::os::unix::fs::PermissionsExt as _;
         const CHILD: &str = "JEV_PILOT_PEER_TEST_DROP_GROUP";
-        // It changes the whole process, so it runs in a child of its own.
-        if std::env::var_os(CHILD).is_some() {
+        if let Some(group) = std::env::var_os(CHILD) {
+            let held = nix::unistd::Gid::from_raw(group.to_str().unwrap().parse().unwrap());
+            let real = getgid();
+            assert_eq!(getegid(), held, "the setgid bit gave the group");
+            assert_ne!(real, held);
             jev_pilot::peer::drop_install_group().unwrap();
-            let real = nix::unistd::getgid();
-            assert_eq!(nix::unistd::getegid(), real);
+            assert_eq!((getgid(), getegid()), (real, real));
             #[cfg(target_os = "linux")]
             {
                 let ids = nix::unistd::getresgid().unwrap();
                 assert_eq!((ids.real, ids.effective, ids.saved), (real, real, real));
             }
+            assert!(
+                nix::unistd::setegid(held).is_err(),
+                "the group cannot be taken back"
+            );
             return;
         }
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let real = getgid();
+        let groups = std::process::Command::new("id").arg("-G").output().unwrap();
+        let other = String::from_utf8_lossy(&groups.stdout)
+            .split_whitespace()
+            .filter_map(|g| g.parse().ok())
+            .map(nix::unistd::Gid::from_raw)
+            .find(|g| *g != real)
+            .expect("the user is in a group other than their own");
+        let dir = std::env::temp_dir().join(format!("jev-pilot-setgid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join("peer-test");
+        std::fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+        std::os::unix::fs::chown(&copy, None, Some(other.as_raw())).unwrap();
+        std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o2755)).unwrap();
+        let status = std::process::Command::new(&copy)
             .args([
                 "--exact",
                 "gather::a_process_can_give_up_the_install_group_for_good",
             ])
-            .env(CHILD, "1")
+            .env(CHILD, other.as_raw().to_string())
             .status()
             .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(status.success());
     }
 
