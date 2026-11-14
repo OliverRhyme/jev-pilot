@@ -171,6 +171,9 @@ fn run() -> Result<(), Box<dyn core::error::Error>> {
             Ok(())
         }
         Invocation::Update => update(),
+        Invocation::Extension(_) | Invocation::Host => {
+            Err("the bridge to Chrome's extension is not available in this build".into())
+        }
         Invocation::Observe {
             device,
             browser: None,
@@ -785,6 +788,11 @@ mod web {
                 let socket = Socket::connect(&port.endpoint(), CALL).map_err(AttachError::from)?;
                 (socket, fresh, Some(binary))
             }
+            BrowserMode::Extension { .. } => {
+                return Err(
+                    "the bridge to Chrome's extension is not available in this build".into(),
+                );
+            }
         };
         let mut connection = Connection::new(socket);
         // Nothing is typed into a browser until it has said it is Chrome: a
@@ -843,7 +851,7 @@ mod web {
             BrowserMode::Attach {
                 sites_only: true,
                 ..
-            }
+            } | BrowserMode::Extension { sites_only: true }
         )
     }
 
@@ -939,6 +947,8 @@ mod web {
                 BrowserMode::Attach { channel, .. } => format!("attached to Chrome ({channel})"),
                 BrowserMode::Fresh { headless: true, .. } => "fresh, headless".to_owned(),
                 BrowserMode::Fresh { .. } => "fresh".to_owned(),
+                BrowserMode::Extension { .. } =>
+                    "Chrome, through the jev-pilot extension".to_owned(),
             }
         );
         if let Some(tab) = session.describe_tab() {
