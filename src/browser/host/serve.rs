@@ -134,10 +134,10 @@ pub fn serve(
     let mut runs: HashMap<RunId, Arc<Stream>> = HashMap::new();
     let mut pending: VecDeque<Input> = VecDeque::new();
     let mut throttle = Throttle::default();
+    let watch = SendWatch::start(SEND_WAIT);
     'serving: for event in heard {
         match event {
             Event::Joined(run, stream) => {
-                let _ = stream.set_send_timeout(Some(SEND_WAIT));
                 runs.insert(run, stream);
                 continue;
             }
@@ -155,14 +155,18 @@ pub fn serve(
                         }
                     }
                     Output::ToRun { run, message } => {
-                        // A run that stops reading is taken as gone once a
-                        // write has waited SEND_WAIT, so it cannot hold up the
-                        // extension or the other runs.
-                        if let Some(stream) = runs.get(&run)
-                            && send_to_run(stream, &message).is_err()
-                        {
-                            hang_up(stream);
-                            pending.push_back(Input::RunGone { run });
+                        // A run that stops reading is hung up on once a
+                        // write has waited SEND_WAIT, and taken as gone, so
+                        // it cannot hold up the extension or the other runs.
+                        if let Some(stream) = runs.get(&run) {
+                            let sent = {
+                                let _watched = watch.watch(stream);
+                                send_to_run(stream, &message)
+                            };
+                            if sent.is_err() {
+                                hang_up(stream);
+                                pending.push_back(Input::RunGone { run });
+                            }
                         }
                     }
                     Output::Close { run } => {
@@ -358,21 +362,24 @@ fn serve_run(
         send(Input::RunGone { run });
         return;
     }
-    let _ = stream.set_recv_timeout(Some(echo_wait));
-    // Gone before echoing: a host checking whether this one serves, or a
-    // run that gave up. Nothing to audit.
-    let echo = match bridge::decode(&mut &*stream, ByteOrder::Little) {
-        Ok(Some(frame)) => serde_json::from_slice(&frame).unwrap_or(Message::Absent),
-        // Silent past the wait: refused, and audited.
-        Err(FrameError::Io(e))
-            if matches!(
-                e.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) =>
-        {
-            refuse("nonce: not echoed in time".into());
-            return;
+    // Silent past the wait: refused, and audited, by the timer, which the
+    // relay then hangs up on; the read below then ends, and says nothing.
+    let timer = EchoTimer::start(echo_wait, {
+        let events = events.clone();
+        move || {
+            let _ = events.send(Event::Input(Input::RunRefused {
+                run,
+                pid: first.pid,
+                check: "nonce: not echoed in time".into(),
+            }));
         }
+    });
+    let read = bridge::decode(&mut &*stream, ByteOrder::Little);
+    if !timer.stop() {
+        return;
+    }
+    let echo = match read {
+        Ok(Some(frame)) => serde_json::from_slice(&frame).unwrap_or(Message::Absent),
         // Not a frame of the bridge: refused, and audited.
         Err(e @ (FrameError::Truncated | FrameError::TooLargeToRead { .. })) => {
             refuse(format!("nonce: echo malformed: {e}"));
@@ -396,7 +403,6 @@ fn serve_run(
         refuse(refusal.to_string());
         return;
     }
-    let _ = stream.set_recv_timeout(None);
     let Message::Echo {
         goal,
         sites,
@@ -462,15 +468,128 @@ fn send_to_chrome(stdout: &mut impl Write, message: &Message) -> io::Result<()> 
     stdout.flush()
 }
 
-/// End a connection now, so its reader sees it close.
+/// End a connection now, so its reader sees it close, and a write waiting
+/// on it gives up.
 fn hang_up(stream: &Stream) {
-    #[cfg(unix)]
-    {
-        let Stream::UdSocket(socket) = stream;
-        let _ = socket.inner().shutdown(std::net::Shutdown::Both);
+    super::channel::hang_up(stream, true);
+}
+
+/// Cuts a write to a run short when it has waited too long: one thread,
+/// watching whichever write the relay is making.
+struct SendWatch {
+    shared: Arc<(std::sync::Mutex<Watched>, std::sync::Condvar)>,
+}
+
+/// The write being watched, if any, and whether the watch is over.
+#[derive(Default)]
+struct Watched {
+    write: Option<(Arc<Stream>, std::time::Instant)>,
+    over: bool,
+}
+
+impl SendWatch {
+    /// Watch writes, hanging up on a run whose write takes longer than
+    /// `wait`.
+    fn start(wait: Duration) -> Self {
+        let shared = Arc::new((
+            std::sync::Mutex::new(Watched::default()),
+            std::sync::Condvar::new(),
+        ));
+        let watching = shared.clone();
+        std::thread::spawn(move || {
+            let (lock, wake) = &*watching;
+            let Ok(mut watched) = lock.lock() else {
+                return;
+            };
+            while !watched.over {
+                let now = std::time::Instant::now();
+                watched = match &watched.write {
+                    None => match wake.wait(watched) {
+                        Ok(guard) => guard,
+                        Err(_) => return,
+                    },
+                    Some((stream, started)) if now.duration_since(*started) >= wait => {
+                        hang_up(stream);
+                        watched.write = None;
+                        watched
+                    }
+                    Some((_, started)) => {
+                        let left = wait.saturating_sub(now.duration_since(*started));
+                        match wake.wait_timeout(watched, left) {
+                            Ok((guard, _)) => guard,
+                            Err(_) => return,
+                        }
+                    }
+                };
+            }
+        });
+        Self { shared }
     }
-    #[cfg(not(unix))]
-    let _ = stream;
+
+    /// Watch a write to `stream` until what this returns is dropped.
+    fn watch(&self, stream: &Arc<Stream>) -> WatchedWrite<'_> {
+        self.set(Some((stream.clone(), std::time::Instant::now())));
+        WatchedWrite(self)
+    }
+
+    fn set(&self, write: Option<(Arc<Stream>, std::time::Instant)>) {
+        let (lock, wake) = &*self.shared;
+        if let Ok(mut watched) = lock.lock() {
+            watched.write = write;
+        }
+        wake.notify_one();
+    }
+}
+
+impl Drop for SendWatch {
+    fn drop(&mut self) {
+        let (lock, wake) = &*self.shared;
+        if let Ok(mut watched) = lock.lock() {
+            watched.over = true;
+        }
+        wake.notify_one();
+    }
+}
+
+/// A write being watched; done with when dropped.
+struct WatchedWrite<'a>(&'a SendWatch);
+
+impl Drop for WatchedWrite<'_> {
+    fn drop(&mut self) {
+        self.0.set(None);
+    }
+}
+
+/// The wait for a run's echo: when it runs out first, `expired` is called.
+struct EchoTimer {
+    done: mpsc::Sender<()>,
+    expired: Arc<AtomicBool>,
+}
+
+impl EchoTimer {
+    fn start(wait: Duration, expire: impl FnOnce() + Send + 'static) -> Self {
+        let (done, told) = mpsc::channel::<()>();
+        let expired = Arc::new(AtomicBool::new(false));
+        let flag = expired.clone();
+        std::thread::spawn(move || {
+            if matches!(
+                told.recv_timeout(wait),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) && !flag.swap(true, Ordering::SeqCst)
+            {
+                expire();
+            }
+        });
+        Self { done, expired }
+    }
+
+    /// Stop the wait: whether the echo came first, so the timer will not
+    /// refuse the run.
+    fn stop(self) -> bool {
+        let first = !self.expired.swap(true, Ordering::SeqCst);
+        let _ = self.done.send(());
+        first
+    }
 }
 
 /// Append `line` to `dir`'s `audit.log`, first rotating it into

@@ -5,6 +5,8 @@
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use interprocess::local_socket::traits::Stream as _;
@@ -212,52 +214,167 @@ impl Place {
 /// How long the handshake may wait for each of the host's frames.
 const HANDSHAKE_WAIT: Duration = Duration::from_secs(10);
 
-/// The run's end of the channel, kept in step with its frames, whose
-/// little-endian length prefixes it reads as they pass.
+/// End a connection now, from any thread, so that a read or write waiting
+/// on it gives up: the socket is shut down, or on Windows, where a named
+/// pipe takes no timeouts, the host's end (`server`) forces the run's
+/// closed and every wait on the pipe is cancelled.
 ///
-/// Between frames, a read waits only as long as its [`Pacer`] allows, and
-/// says "nothing yet" ([`io::ErrorKind::WouldBlock`]) when nothing came.
-/// Once a frame has started, reads wait for the rest of it however long it
-/// takes, because giving up part way would leave the stream out of step.
-#[derive(Debug)]
-pub struct RunStream {
-    stream: Stream,
-    pacer: Pacer,
-    /// The length prefix of the frame being read, as far as it has come.
-    prefix: [u8; 4],
-    /// How many of its bytes have come.
-    prefix_read: usize,
-    /// How many bytes of the frame's message are still to come.
-    message_left: usize,
-    /// Whole frames read already and put back, to be read again first.
-    again: io::Cursor<Vec<u8>>,
+/// This, not a socket timeout, is what cuts a wait short on every system.
+pub fn hang_up(stream: &Stream, server: bool) {
+    #[cfg(unix)]
+    {
+        let Stream::UdSocket(socket) = stream;
+        let _ = socket.inner().shutdown(std::net::Shutdown::Both);
+        let _ = server;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsHandle as _;
+        let Stream::NamedPipe(pipe) = stream;
+        jev_pilot_os::hang_up_pipe(pipe.as_handle(), server);
+    }
 }
 
+/// The run's end of the channel, read a whole frame at a time.
+///
+/// A thread of its own reads the host's frames whole, as they come, and
+/// hands them over, reading at most a couple ahead, so a run that stops
+/// reading still stops the host's writes. Between frames, a read waits for
+/// the next only as long as its [`Pacer`] allows, and says "nothing yet"
+/// ([`io::ErrorKind::WouldBlock`]) when none has begun; one that has begun
+/// is waited for however long it takes, and never torn. Named pipes take no
+/// read timeouts, so the wait is on the hand-over, never on the channel.
+#[derive(Debug)]
+pub struct RunStream {
+    stream: Arc<Stream>,
+    pacer: Pacer,
+    /// Whole frames, length prefix and all, or why reading stopped. It
+    /// ends when the host closes the channel.
+    frames: mpsc::Receiver<io::Result<Vec<u8>>>,
+    /// How many frames the reader has begun.
+    begun: Arc<AtomicU64>,
+    /// How many have been handed over.
+    taken: u64,
+    /// The frame being read, as far as it has been.
+    current: io::Cursor<Vec<u8>>,
+    /// Told when the run lets go, so the reader stops.
+    closing: Arc<AtomicBool>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+/// How many whole frames the reader may hold ahead of the run.
+const READ_AHEAD: usize = 2;
+
 impl RunStream {
-    /// `stream`, kept in step, and the pacer that says how long to wait
-    /// between frames.
+    /// `stream`, read a whole frame at a time, and the pacer that says how
+    /// long to wait between frames.
     #[must_use]
     pub fn new(stream: Stream) -> (Self, Pacer) {
         let pacer = Pacer::new(HANDSHAKE_WAIT);
+        let stream = Arc::new(stream);
+        let closing = Arc::new(AtomicBool::new(false));
+        let begun = Arc::new(AtomicU64::new(0));
+        let (frames, receive) = mpsc::sync_channel(READ_AHEAD);
+        let reader = {
+            let (stream, closing, begun) = (stream.clone(), closing.clone(), begun.clone());
+            std::thread::spawn(move || read_frames(&stream, &closing, &begun, &frames))
+        };
         let run = Self {
             stream,
             pacer: pacer.clone(),
-            prefix: [0; 4],
-            prefix_read: 0,
-            message_left: 0,
-            again: io::Cursor::new(Vec::new()),
+            frames: receive,
+            begun,
+            taken: 0,
+            current: io::Cursor::new(Vec::new()),
+            closing,
+            reader: Some(reader),
         };
         (run, pacer)
     }
 
     /// Read `frame`, a whole frame read before, again before anything new.
     fn put_back(&mut self, frame: Vec<u8>) {
-        self.again = io::Cursor::new(frame);
+        let mut again = frame;
+        let position = usize::try_from(self.current.position()).unwrap_or(usize::MAX);
+        again.extend_from_slice(self.current.get_ref().get(position..).unwrap_or_default());
+        self.current = io::Cursor::new(again);
     }
 
-    fn between_frames(&self) -> bool {
-        self.prefix_read == 0 && self.message_left == 0
+    fn take(&mut self, next: io::Result<Vec<u8>>, buf: &mut [u8]) -> io::Result<usize> {
+        self.taken += 1;
+        self.current = io::Cursor::new(next?);
+        self.current.read(buf)
     }
+}
+
+/// Hand over the host's frames whole, counting each as it begins, until it
+/// closes, reading fails, or the run lets go.
+fn read_frames(
+    stream: &Stream,
+    closing: &AtomicBool,
+    begun: &AtomicU64,
+    frames: &mpsc::SyncSender<io::Result<Vec<u8>>>,
+) {
+    let mut stream = stream;
+    while !closing.load(Ordering::SeqCst) {
+        let mut prefix = [0u8; 4];
+        match stream.read(&mut prefix[..1]) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                let _ = frames.send(Err(e));
+                return;
+            }
+        }
+        begun.fetch_add(1, Ordering::SeqCst);
+        let (whole, cut_short) = match read_rest(&mut stream, prefix) {
+            Ok(read) => read,
+            Err(e) => {
+                let _ = frames.send(Err(e));
+                return;
+            }
+        };
+        // A frame the host cut short is handed over as far as it came, and
+        // nothing after it: the run then sees the close in mid-message.
+        if frames.send(Ok(whole)).is_err() || cut_short {
+            return;
+        }
+    }
+}
+
+/// The rest of a frame whose first byte is in `prefix`: the frame, and
+/// whether the channel closed before it was whole.
+fn read_rest(stream: &mut &Stream, mut prefix: [u8; 4]) -> io::Result<(Vec<u8>, bool)> {
+    let mut filled = 1;
+    while filled < 4 {
+        match stream.read(&mut prefix[filled..]) {
+            Ok(0) => return Ok((prefix[..filled].to_vec(), true)),
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let length = u32::from_le_bytes(prefix) as usize;
+    if length > bridge::READ_LIMIT {
+        // Handed over as it is: the run's own reading refuses it.
+        return Ok((prefix.to_vec(), true));
+    }
+    let mut whole = vec![0u8; 4 + length];
+    whole[..4].copy_from_slice(&prefix);
+    let mut filled = 4;
+    while filled < whole.len() {
+        match stream.read(&mut whole[filled..]) {
+            Ok(0) => {
+                whole.truncate(filled);
+                return Ok((whole, true));
+            }
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok((whole, false))
 }
 
 impl Read for RunStream {
@@ -265,57 +382,60 @@ impl Read for RunStream {
         if buf.is_empty() {
             return Ok(0);
         }
-        if usize::try_from(self.again.position()).unwrap_or(usize::MAX) < self.again.get_ref().len()
-        {
-            return self.again.read(buf);
+        let position = usize::try_from(self.current.position()).unwrap_or(usize::MAX);
+        if position < self.current.get_ref().len() {
+            return self.current.read(buf);
         }
-        let between = self.between_frames();
-        let wait = between.then(|| self.pacer.wait().max(Duration::from_millis(1)));
-        // A socket the other end has closed may refuse a timeout (macOS
-        // says EINVAL); the read below then reports the close.
-        let _ = self.stream.set_recv_timeout(wait);
-        // Read no further than the part of the frame being read, so the
-        // prefix and the message are each counted.
-        let limit = if self.message_left > 0 {
-            self.message_left
-        } else {
-            4 - self.prefix_read
-        };
-        let limit = limit.min(buf.len());
-        let n = match self.stream.read(&mut buf[..limit]) {
-            Ok(n) => n,
-            Err(e)
-                if between
-                    && matches!(
-                        e.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) =>
-            {
-                return Err(io::ErrorKind::WouldBlock.into());
+        let wait = self.pacer.wait().max(Duration::from_millis(1));
+        match self.frames.recv_timeout(wait) {
+            Ok(next) => self.take(next, buf),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // A frame that has begun is waited for whole.
+                if self.begun.load(Ordering::SeqCst) > self.taken {
+                    match self.frames.recv() {
+                        Ok(next) => self.take(next, buf),
+                        Err(_) => Ok(0),
+                    }
+                } else {
+                    Err(io::ErrorKind::WouldBlock.into())
+                }
             }
-            Err(e) => return Err(e),
-        };
-        if self.message_left > 0 {
-            self.message_left -= n;
-        } else {
-            self.prefix[self.prefix_read..self.prefix_read + n].copy_from_slice(&buf[..n]);
-            self.prefix_read += n;
-            if self.prefix_read == 4 {
-                self.prefix_read = 0;
-                self.message_left = u32::from_le_bytes(self.prefix) as usize;
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Ok(0),
         }
-        Ok(n)
+    }
+}
+
+impl Drop for RunStream {
+    /// Let go of the channel, and stop the reader: a pipe's wait is
+    /// cancelled only while it waits, so the run asks until the reader has
+    /// gone.
+    fn drop(&mut self) {
+        self.closing.store(true, Ordering::SeqCst);
+        let Some(reader) = self.reader.take() else {
+            return;
+        };
+        for _ in 0..200 {
+            hang_up(&self.stream, false);
+            // Frames still coming are not wanted.
+            while self.frames.try_recv().is_ok() {}
+            if reader.is_finished() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if reader.is_finished() {
+            let _ = reader.join();
+        }
     }
 }
 
 impl Write for RunStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.stream.write(buf)
+        (&*self.stream).write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.stream.flush()
+        (&*self.stream).flush()
     }
 }
 
