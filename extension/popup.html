@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>jev-pilot</title>
+<style>
+  body { font: 13px system-ui, sans-serif; width: 320px; margin: 12px; color: #1f1f1f; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0 0 10px; }
+  dt { color: #5f6368; }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  .warn { color: #b3261e; }
+  label { display: flex; gap: 6px; align-items: center; }
+  @media (prefers-color-scheme: dark) { body { background: #202124; color: #e8eaed; } dt { color: #9aa0a6; } .warn { color: #f28b82; } }
+</style>
+</head>
+<body>
+<h1>jev-pilot</h1>
+<dl>
+  <dt>Bridge</dt><dd id="status">…</dd>
+  <dt>Browser</dt><dd id="browser">…</dd>
+  <dt>Install</dt><dd id="install">…</dd>
+  <dt>Run</dt><dd id="run">…</dd>
+  <dt>Sites</dt><dd id="sites">…</dd>
+  <dt>Owner's tabs</dt><dd id="owner-tabs">…</dd>
+</dl>
+<label><input type="checkbox" id="paused"> Paused: no run may drive Chrome</label>
+<script type="module" src="popup.js"></script>
+</body>
+</html>

@@ -153,3 +153,18 @@ test("a command to a tab the run does not hold is refused", async () => {
   });
   assert.equal(fake.calls.some(([call]) => call === "debugger.sendCommand"), false);
 });
+
+test("the bridge says what run it serves and which tabs it holds, for the popup", async () => {
+  const { fake, bridge } = bridged();
+  assert.deepEqual(bridge.state(), { running: false, goal: "", sites: [], tabs: [] });
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  assert.deepEqual(bridge.state(), {
+    running: true,
+    goal: "Star the repository",
+    sites: ["https://github.com"],
+    tabs: [7],
+  });
+  await bridge.receive({ type: "release" });
+  assert.deepEqual(bridge.state(), { running: false, goal: "", sites: [], tabs: [] });
+});

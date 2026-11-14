@@ -31,6 +31,8 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
   /** Tabs opened with no opener yet, waiting to hear what opened them. */
   const unclaimed = new Map();
   let running = false;
+  /** The run being served: its goal and its sites. */
+  let run = { goal: "", sites: [] };
 
   const paused = async () => (await chrome.storage.local.get("paused")).paused === true;
 
@@ -48,6 +50,7 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
     held.clear();
     owned.clear();
     running = false;
+    run = { goal: "", sites: [] };
     for (const tabId of tabs) {
       await chrome.debugger.detach({ tabId }).catch(() => {});
     }
@@ -187,6 +190,9 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
   };
 
   return {
+    /** The run being served and the tabs it holds, for the popup. */
+    state: () => ({ running, goal: run.goal, sites: run.sites, tabs: [...held] }),
+
     /** Say hello to the host, on connecting. */
     connect: () => say("hello"),
 
@@ -202,6 +208,7 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
         case "run_started": {
           await releaseAll();
           running = true;
+          run = { goal: read.goal, sites: read.sites };
           const where = read.sites.length > 0 ? read.sites.join(", ") : "any site";
           const goal = read.goal.length > 80 ? `${read.goal.slice(0, 79)}…` : read.goal;
           await chrome.notifications.create(`jev-pilot-run-${read.pid}`, {
