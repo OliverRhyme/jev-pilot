@@ -149,6 +149,41 @@ pub fn own_session() -> std::io::Result<u32> {
     jev_pilot_os::current_session()
 }
 
+/// Whether this process runs elevated, with an administrator's rights.
+///
+/// # Errors
+///
+/// When this process's token cannot be read.
+#[cfg(windows)]
+#[cfg_attr(docsrs, doc(cfg(windows)))]
+pub fn elevated() -> std::io::Result<bool> {
+    jev_pilot_os::is_elevated()
+}
+
+/// The process that started this one, as far as the OS says without
+/// asking anything of it: its pid on Unix, and its executable on Linux
+/// (from `/proc`) and macOS (from the Security framework). For the audit
+/// log, where the run says who started it.
+#[must_use]
+pub fn parent() -> crate::browser::bridge::Parent {
+    #[cfg(unix)]
+    {
+        let pid = std::os::unix::process::parent_id();
+        #[cfg(target_os = "linux")]
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+        #[cfg(target_os = "macos")]
+        let exe = macos::path_of(pid);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let exe: Option<PathBuf> = None;
+        crate::browser::bridge::Parent {
+            pid: Some(pid),
+            exe: exe.map(|e| e.to_string_lossy().into_owned()),
+        }
+    }
+    #[cfg(not(unix))]
+    crate::browser::bridge::Parent::default()
+}
+
 /// The SHA-256 of everything `file` holds from where it is.
 #[cfg(any(target_os = "linux", windows))]
 fn sha256_file(mut file: std::fs::File) -> std::io::Result<Sha256Digest> {

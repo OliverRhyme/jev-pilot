@@ -887,3 +887,14 @@ mod gather {
         );
     }
 }
+
+/// The run tells the host which process started it: here, the test
+/// harness's parent.
+#[cfg(unix)]
+#[test]
+fn the_parent_is_this_processs_parent() {
+    let parent = jev_pilot::peer::parent();
+    assert_eq!(parent.pid, Some(std::os::unix::process::parent_id()));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    assert!(parent.exe.is_some(), "{parent:?}");
+}

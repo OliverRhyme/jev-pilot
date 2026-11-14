@@ -76,6 +76,17 @@ pub(super) fn facts(stream: &Stream, expected: &Expected) -> Facts {
     facts
 }
 
+/// The executable of process `pid`, as the Security framework finds it.
+pub(super) fn path_of(pid: u32) -> Option<std::path::PathBuf> {
+    let mut attributes = GuestAttributes::new();
+    attributes.set_pid(i32::try_from(pid).ok()?);
+    SecCode::copy_guest_with_attribues(None, &attributes, Flags::NONE)
+        .ok()?
+        .path(Flags::NONE)
+        .ok()?
+        .to_path()
+}
+
 fn guest(token: &[u32; 8]) -> Option<SecCode> {
     let bytes: Vec<u8> = token.iter().flat_map(|v| v.to_ne_bytes()).collect();
     let data = CFData::from_buffer(&bytes);

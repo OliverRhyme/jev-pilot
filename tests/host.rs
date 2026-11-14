@@ -1054,6 +1054,21 @@ mod serving {
         first.done.join().unwrap().expect("ends cleanly");
     }
 
+    /// `status` asks whether a verified host answers, without taking the
+    /// bridge or telling the extension anything.
+    #[test]
+    fn status_can_ask_whether_the_host_answers() {
+        use jev_pilot::browser::host::channel::host_answers;
+        let place = place();
+        assert!(!host_answers(&place, &expected(), &Vouched));
+        let mut host = host_at(&place, Arc::new(Vouched));
+        wait_for("the host", || host_answers(&place, &expected(), &Vouched));
+        assert!(!host_answers(&place, &expected(), &Unknown));
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("ends cleanly");
+        assert_eq!(host.out.messages(), Vec::<serde_json::Value>::new());
+    }
+
     /// A socket left by a host that has gone is removed, and a new host
     /// listens in its place.
     #[cfg(unix)]

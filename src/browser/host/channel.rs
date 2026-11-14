@@ -344,6 +344,22 @@ impl core::fmt::Display for RunError {
 
 impl core::error::Error for RunError {}
 
+/// Whether a host that passes `check` answers at `place`. Nothing is sent:
+/// the bridge is not taken, and the extension is not told.
+#[must_use]
+pub fn host_answers(place: &Place, expected: &Expected, check: &dyn PeerCheck) -> bool {
+    let Ok(name) = place.name() else {
+        return false;
+    };
+    let Ok(stream) = Stream::connect(name) else {
+        return false;
+    };
+    matches!(
+        decide(&check.facts(&stream, expected), expected),
+        Verdict::Accept
+    )
+}
+
 /// Connect a run to the host at `place`: check with `check` that the host
 /// is the installed jev-pilot before anything is sent, then answer its
 /// nonce with the run's goal, sites and parent.
