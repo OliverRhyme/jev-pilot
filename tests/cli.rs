@@ -827,6 +827,16 @@ fn chrome_starts_the_host_with_the_extensions_origin() {
     );
     assert_eq!(parsed(&[&origin]), Invocation::Host);
     assert_eq!(parsed(&[&origin, "--parent-window=0"]), Invocation::Host);
+    for extra in [
+        &[&origin[..], "--parent-window=0", "--parent-window=1"][..],
+        &[&origin[..], "--something"],
+        &[&origin[..], "Open the page"],
+    ] {
+        assert!(
+            parse(extra.iter().map(|w| (*w).to_owned())).is_err(),
+            "{extra:?}"
+        );
+    }
     let other = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/";
     assert_eq!(refused(&[other]), CliError::ForeignOrigin(other.to_owned()));
     assert_eq!(
