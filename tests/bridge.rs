@@ -1087,10 +1087,20 @@ fn each_refusal_is_an_error_on_the_call_with_its_code() {
 fn a_bridge_ended_for_a_page_too_large_says_so() {
     let (mut wire, _) = wire_with(&[json!({"type": "ended", "reason": "too_large"})]);
     let error = wire.receive(WAIT).expect_err("the bridge ended");
-    assert!(
-        error
-            .to_string()
-            .ends_with("the page is too large to read through the extension"),
-        "{error}"
+    assert_eq!(
+        error.to_string(),
+        "the page is too large to read through the extension"
+    );
+}
+
+/// Chrome quitting, or the host being killed, closes the bridge mid-run,
+/// and the run says so in the bridge's own words.
+#[test]
+fn a_bridge_that_drops_mid_run_says_chrome_may_have_quit() {
+    let (mut wire, _) = wire_with(&[]);
+    let error = wire.receive(WAIT).expect_err("the bridge dropped");
+    assert_eq!(
+        error.to_string(),
+        "the connection to Chrome's jev-pilot extension dropped: Chrome may have quit"
     );
 }

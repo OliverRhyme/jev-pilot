@@ -193,7 +193,7 @@ impl<S: Read + Write> Wire for ExtensionWire<S> {
                 self.hello = hello.clone();
             }
             if let Message::Ended { reason } = &message {
-                return Err(WireError::Protocol(ended(reason).into()));
+                return Err(WireError::Ended(ended(reason).into()));
             }
             self.waiting.extend(self.translator.incoming(message));
         }
@@ -203,7 +203,7 @@ impl<S: Read + Write> Wire for ExtensionWire<S> {
 /// What a failure on the channel means to the engine.
 fn wire_error(e: ConnectError) -> WireError {
     match e {
-        ConnectError::Closed => WireError::Closed,
+        ConnectError::Closed => WireError::Ended(ConnectError::Closed.to_string().into()),
         ConnectError::Frame(FrameError::Io(e)) => WireError::Io(e),
         other => WireError::Protocol(other.to_string().into()),
     }

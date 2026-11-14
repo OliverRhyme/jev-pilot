@@ -46,6 +46,10 @@ pub enum WireError {
     Io(io::Error),
     /// The websocket itself misbehaved.
     Protocol(Box<str>),
+    /// The connection ended for a reason the wire states in its own words,
+    /// shown as they are: the extension's bridge says what happened to
+    /// Chrome, which a websocket's wording would not.
+    Ended(Box<str>),
 }
 
 impl core::fmt::Display for WireError {
@@ -54,6 +58,7 @@ impl core::fmt::Display for WireError {
             Self::Closed => f.write_str("the browser closed the connection"),
             Self::Io(e) => write!(f, "the connection to the browser failed: {e}"),
             Self::Protocol(e) => write!(f, "the browser's websocket misbehaved: {e}"),
+            Self::Ended(why) => f.write_str(why),
         }
     }
 }
