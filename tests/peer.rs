@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 
 use jev_pilot::peer::{
-    Check, Code, Expected, Facts, LinuxPin, Reason, Sha256Digest, Verdict, WindowsPin, decide,
-    recheck,
+    Check, Code, Expected, Facts, LinuxPin, MacosPin, Reason, Sha256Digest, Verdict, WindowsPin,
+    decide, recheck,
 };
 
 const UID: u32 = 501;
@@ -19,8 +19,10 @@ const USER_GROUP: u32 = 20;
 const PID: u32 = 4242;
 const SID: &str = "S-1-5-21-1004336348-1177238915-682003330-1001";
 const SESSION: u32 = 1;
-const CDHASH_REQUIREMENT: &str = r#"cdhash H"32e719c23c33eb097271b746f2a09f3127b57e5a""#;
-const TEAM_REQUIREMENT: &str = r#"anchor apple generic and identifier "jev-pilot" and certificate leaf[subject.OU] = "ABCDE12345""#;
+const CDHASH: [u8; 20] = [
+    0x32, 0xe7, 0x19, 0xc2, 0x3c, 0x33, 0xeb, 0x09, 0x72, 0x71, 0xb7, 0x46, 0xf2, 0xa0, 0x9f, 0x31,
+    0x27, 0xb5, 0x7e, 0x5a,
+];
 const SIGNER: &str = "CN=Oliver Rhyme, O=Oliver Rhyme, C=PH";
 
 fn digest(byte: u8) -> Sha256Digest {
@@ -37,63 +39,56 @@ fn mac_path() -> PathBuf {
     PathBuf::from("/usr/local/libexec/jev-pilot/jev-pilot")
 }
 
-fn mac_expected(requirement: &str) -> Expected {
+fn cdhash_pin() -> MacosPin {
+    MacosPin::Cdhash(CDHASH)
+}
+
+fn team_pin() -> MacosPin {
+    MacosPin::developer_id("dev.jevpilot.jev-pilot", "ABCDE12345").unwrap()
+}
+
+fn mac_expected(pin: MacosPin) -> Expected {
     Expected::Macos {
         uid: UID,
         path: mac_path(),
-        requirement: requirement.to_owned(),
+        pin,
     }
 }
 
-fn mac_facts(requirement: &str, satisfied: bool) -> Facts {
+fn mac_facts(pin: MacosPin, satisfied: bool) -> Facts {
     Facts {
         uid: Some(UID),
         pid: Some(PID),
         path: Some(mac_path()),
         token: Some([0, UID, USER_GROUP, UID, USER_GROUP, PID, 100_003, 7]),
-        code: Some(Code::Requirement {
-            requirement: requirement.to_owned(),
-            satisfied,
-        }),
+        code: Some(Code::Requirement { pin, satisfied }),
         ..Facts::default()
     }
 }
 
 #[test]
 fn macos_accepts_a_peer_that_satisfies_the_pinned_cdhash() {
-    let verdict = decide(
-        &mac_facts(CDHASH_REQUIREMENT, true),
-        &mac_expected(CDHASH_REQUIREMENT),
-    );
+    let verdict = decide(&mac_facts(cdhash_pin(), true), &mac_expected(cdhash_pin()));
     assert_eq!(verdict, Verdict::Accept);
 }
 
 #[test]
 fn macos_accepts_a_peer_that_satisfies_the_pinned_developer_id() {
-    let verdict = decide(
-        &mac_facts(TEAM_REQUIREMENT, true),
-        &mac_expected(TEAM_REQUIREMENT),
-    );
+    let verdict = decide(&mac_facts(team_pin(), true), &mac_expected(team_pin()));
     assert_eq!(verdict, Verdict::Accept);
 }
 
 #[test]
 fn macos_refuses_a_peer_that_does_not_satisfy_the_requirement() {
-    let verdict = decide(
-        &mac_facts(CDHASH_REQUIREMENT, false),
-        &mac_expected(CDHASH_REQUIREMENT),
-    );
+    let verdict = decide(&mac_facts(cdhash_pin(), false), &mac_expected(cdhash_pin()));
     assert_eq!(verdict, refused(Check::Requirement, Reason::Mismatch));
 }
 
 #[test]
 fn macos_refuses_a_satisfied_requirement_that_is_not_the_pinned_one() {
     let verdict = decide(
-        &mac_facts(
-            r#"cdhash H"0000000000000000000000000000000000000000""#,
-            true,
-        ),
-        &mac_expected(CDHASH_REQUIREMENT),
+        &mac_facts(MacosPin::Cdhash([0; 20]), true),
+        &mac_expected(cdhash_pin()),
     );
     assert_eq!(verdict, refused(Check::Requirement, Reason::Mismatch));
 }
@@ -102,9 +97,9 @@ fn macos_refuses_a_satisfied_requirement_that_is_not_the_pinned_one() {
 fn macos_refuses_another_uid() {
     let facts = Facts {
         uid: Some(UID + 1),
-        ..mac_facts(CDHASH_REQUIREMENT, true)
+        ..mac_facts(cdhash_pin(), true)
     };
-    let verdict = decide(&facts, &mac_expected(CDHASH_REQUIREMENT));
+    let verdict = decide(&facts, &mac_expected(cdhash_pin()));
     assert_eq!(verdict, refused(Check::Uid, Reason::Mismatch));
 }
 
@@ -112,17 +107,17 @@ fn macos_refuses_another_uid() {
 fn macos_refuses_a_copy_outside_the_installed_path() {
     let facts = Facts {
         path: Some(PathBuf::from("/Users/someone/Downloads/jev-pilot")),
-        ..mac_facts(CDHASH_REQUIREMENT, true)
+        ..mac_facts(cdhash_pin(), true)
     };
-    let verdict = decide(&facts, &mac_expected(CDHASH_REQUIREMENT));
+    let verdict = decide(&facts, &mac_expected(cdhash_pin()));
     assert_eq!(verdict, refused(Check::Path, Reason::Mismatch));
 }
 
 #[test]
 fn macos_recheck_accepts_the_same_token_after_the_first_frame() {
-    let first = mac_facts(CDHASH_REQUIREMENT, true);
+    let first = mac_facts(cdhash_pin(), true);
     let again = first.clone();
-    let verdict = recheck(&first, &again, &mac_expected(CDHASH_REQUIREMENT));
+    let verdict = recheck(&first, &again, &mac_expected(cdhash_pin()));
     assert_eq!(verdict, Verdict::Accept);
 }
 
@@ -130,23 +125,23 @@ fn macos_recheck_accepts_the_same_token_after_the_first_frame() {
 fn macos_recheck_refuses_a_token_that_changed_after_the_first_frame() {
     // A forked child, or an exec in the same pid, writes the frame: the pid
     // version in the token moves even though the code still passes.
-    let first = mac_facts(CDHASH_REQUIREMENT, true);
+    let first = mac_facts(cdhash_pin(), true);
     let again = Facts {
         token: Some([0, UID, USER_GROUP, UID, USER_GROUP, PID, 100_003, 8]),
         ..first.clone()
     };
-    let verdict = recheck(&first, &again, &mac_expected(CDHASH_REQUIREMENT));
+    let verdict = recheck(&first, &again, &mac_expected(cdhash_pin()));
     assert_eq!(verdict, refused(Check::Token, Reason::Mismatch));
 }
 
 #[test]
 fn macos_recheck_refuses_when_either_token_is_missing() {
-    let first = mac_facts(CDHASH_REQUIREMENT, true);
+    let first = mac_facts(cdhash_pin(), true);
     let again = Facts {
         token: None,
         ..first.clone()
     };
-    let expected = mac_expected(CDHASH_REQUIREMENT);
+    let expected = mac_expected(cdhash_pin());
     assert_eq!(
         recheck(&first, &again, &expected),
         refused(Check::Token, Reason::Missing)
@@ -161,20 +156,20 @@ fn macos_recheck_refuses_when_either_token_is_missing() {
 fn recheck_refuses_first_facts_that_never_passed() {
     // The same process both times, but the first read never passed: it
     // must not be let through by a second read that does.
-    let first = mac_facts(CDHASH_REQUIREMENT, false);
+    let first = mac_facts(cdhash_pin(), false);
     let again = Facts {
-        code: mac_facts(CDHASH_REQUIREMENT, true).code,
+        code: mac_facts(cdhash_pin(), true).code,
         ..first.clone()
     };
-    let verdict = recheck(&first, &again, &mac_expected(CDHASH_REQUIREMENT));
+    let verdict = recheck(&first, &again, &mac_expected(cdhash_pin()));
     assert_eq!(verdict, refused(Check::Requirement, Reason::Mismatch));
 }
 
 #[test]
 fn macos_recheck_still_decides_on_the_new_facts() {
-    let first = mac_facts(CDHASH_REQUIREMENT, true);
-    let again = mac_facts(CDHASH_REQUIREMENT, false);
-    let verdict = recheck(&first, &again, &mac_expected(CDHASH_REQUIREMENT));
+    let first = mac_facts(cdhash_pin(), true);
+    let again = mac_facts(cdhash_pin(), false);
+    let verdict = recheck(&first, &again, &mac_expected(cdhash_pin()));
     assert_eq!(verdict, refused(Check::Requirement, Reason::Mismatch));
 }
 
@@ -453,8 +448,8 @@ fn without(facts: &Facts, check: Check) -> Facts {
 fn every_missing_fact_is_refused_and_named() {
     let cases: Vec<(Facts, Expected, Vec<Check>)> = vec![
         (
-            mac_facts(CDHASH_REQUIREMENT, true),
-            mac_expected(CDHASH_REQUIREMENT),
+            mac_facts(cdhash_pin(), true),
+            mac_expected(cdhash_pin()),
             vec![Check::Uid, Check::Pid, Check::Path, Check::Requirement],
         ),
         (
@@ -501,7 +496,7 @@ fn every_missing_fact_is_refused_and_named() {
 #[test]
 fn no_facts_at_all_is_refused_everywhere() {
     for expected in [
-        mac_expected(CDHASH_REQUIREMENT),
+        mac_expected(cdhash_pin()),
         linux_expected(),
         linux_dev_expected(),
         windows_expected(hash_pin()),
@@ -536,8 +531,66 @@ fn a_refusal_names_the_failed_check() {
 // ---- what install.json pins ----
 
 #[test]
+fn a_macos_pin_is_rendered_as_a_code_requirement() {
+    assert_eq!(
+        cdhash_pin().requirement(),
+        r#"cdhash H"32e719c23c33eb097271b746f2a09f3127b57e5a""#
+    );
+    assert_eq!(
+        team_pin().requirement(),
+        r#"anchor apple generic and identifier "dev.jevpilot.jev-pilot" and certificate leaf[subject.OU] = "ABCDE12345""#
+    );
+    assert_eq!(
+        MacosPin::from_cdhash_hex("32E719C23C33EB097271B746F2A09F3127B57E5A").unwrap(),
+        cdhash_pin()
+    );
+}
+
+#[test]
+fn a_developer_id_pin_takes_only_a_team_id_and_a_reverse_dns_identifier() {
+    for (identifier, team) in [
+        ("dev.jevpilot.jev-pilot", "abcde12345"),
+        ("dev.jevpilot.jev-pilot", "ABCDE1234"),
+        ("dev.jevpilot.jev-pilot", "ABCDE123456"),
+        ("dev.jevpilot.jev-pilot", r#"ABCDE1234""#),
+        ("", "ABCDE12345"),
+        (r#"x" or anchor apple"#, "ABCDE12345"),
+        ("dev jevpilot", "ABCDE12345"),
+        ("dev_jevpilot", "ABCDE12345"),
+    ] {
+        assert!(
+            MacosPin::developer_id(identifier, team).is_err(),
+            "{identifier:?} {team:?}"
+        );
+    }
+    assert!(MacosPin::from_cdhash_hex(&"3".repeat(39)).is_err());
+    assert!(MacosPin::from_cdhash_hex(&"g".repeat(40)).is_err());
+}
+
+#[test]
+fn install_json_with_an_invalid_macos_pin_is_not_read() {
+    let mut json = serde_json::to_value(mac_expected(team_pin())).unwrap();
+    assert_eq!(
+        json["pin"],
+        serde_json::json!({
+            "developer_id": { "identifier": "dev.jevpilot.jev-pilot", "team": "ABCDE12345" }
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<Expected>(json.clone()).unwrap(),
+        mac_expected(team_pin())
+    );
+    json["pin"]["developer_id"]["team"] = serde_json::json!(r#"X" or anchor apple"#);
+    assert!(serde_json::from_value::<Expected>(json).is_err());
+    let json = serde_json::json!({
+        "os": "macos", "uid": 501, "path": "/x", "pin": { "cdhash": "00" }
+    });
+    assert!(serde_json::from_value::<Expected>(json).is_err());
+}
+
+#[test]
 fn expected_round_trips_through_json() {
-    let expected = mac_expected(CDHASH_REQUIREMENT);
+    let expected = mac_expected(cdhash_pin());
     let json = serde_json::to_value(&expected).unwrap();
     assert_eq!(
         json,
@@ -545,7 +598,7 @@ fn expected_round_trips_through_json() {
             "os": "macos",
             "uid": 501,
             "path": "/usr/local/libexec/jev-pilot/jev-pilot",
-            "requirement": CDHASH_REQUIREMENT,
+            "pin": { "cdhash": "32e719c23c33eb097271b746f2a09f3127b57e5a" },
         })
     );
     assert_eq!(serde_json::from_value::<Expected>(json).unwrap(), expected);
@@ -643,11 +696,14 @@ mod gather {
     }
 
     #[cfg(target_os = "macos")]
-    fn mac_expected(requirement: String) -> Expected {
+    use jev_pilot::peer::MacosPin;
+
+    #[cfg(target_os = "macos")]
+    fn mac_expected(pin: MacosPin) -> Expected {
         Expected::Macos {
             uid: rustix::process::geteuid().as_raw(),
             path: own_exe(),
-            requirement,
+            pin,
         }
     }
 
@@ -655,7 +711,7 @@ mod gather {
     #[test]
     fn macos_gathers_this_process_from_either_end() {
         let (server, client) = pair();
-        let expected = mac_expected(format!(r#"cdhash H"{}""#, own_cdhash()));
+        let expected = mac_expected(MacosPin::from_cdhash_hex(&own_cdhash()).unwrap());
         for end in [&server, &client] {
             let facts = Native.facts(end, &expected);
             assert_eq!(facts.uid, Some(rustix::process::geteuid().as_raw()));
@@ -672,7 +728,7 @@ mod gather {
     fn macos_refuses_this_process_against_another_cdhash() {
         use jev_pilot::peer::{Check, Reason};
         let (server, _client) = pair();
-        let expected = mac_expected(format!(r#"cdhash H"{}""#, "0".repeat(40)));
+        let expected = mac_expected(MacosPin::Cdhash([0; 20]));
         let facts = Native.facts(&server, &expected);
         assert_eq!(
             decide(&facts, &expected),
