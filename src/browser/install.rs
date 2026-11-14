@@ -1151,13 +1151,116 @@ pub enum Installer {
 ///
 /// # Errors
 /// The first step that fails, naming it.
-pub fn apply(steps: &[Step], installer: &Installer) -> io::Result<Vec<String>> {
+pub fn apply(steps: &[Step], installer: &Installer, kind: InstallKind) -> io::Result<Vec<String>> {
     let mut said = Vec::new();
     for step in steps {
+        if kind == InstallKind::Protected
+            && let Some(target) = written(step)
+        {
+            check_ancestors(target, &dir_meta).map_err(io::Error::other)?;
+        }
         apply_one(step, installer, &mut said)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", describe(step))))?;
     }
     Ok(said)
+}
+
+/// What a step writes, whose folders must be safe.
+fn written(step: &Step) -> Option<&Path> {
+    match step {
+        Step::CreateDir { path, .. }
+        | Step::CreateFile { path, .. }
+        | Step::WriteFile { path, .. }
+        | Step::WritePolicy { path, .. }
+        | Step::Record { path, .. }
+        | Step::CopyBinary { to: path, .. }
+        | Step::CopyHost(HostCopy { to: path, .. }) => Some(path),
+        _ => None,
+    }
+}
+
+/// What the OS says of a folder, for [`check_ancestors`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirMeta {
+    /// Its owner's uid.
+    pub uid: u32,
+    /// Its permission bits.
+    pub mode: u32,
+    /// Whether it is a symbolic link.
+    pub is_link: bool,
+}
+
+/// Whether every folder above `path` that exists is root's, closed to
+/// group and others for writing, and not a link: what a protected install
+/// writes is safe only under folders the owner cannot change. Folders that
+/// do not exist yet are made by the install, as root.
+///
+/// # Errors
+/// The first folder that is not, and why.
+pub fn check_ancestors(path: &Path, meta: &dyn Fn(&Path) -> Option<DirMeta>) -> Result<(), String> {
+    let mut above: Vec<&Path> = path.ancestors().skip(1).collect();
+    above.reverse();
+    for dir in above {
+        let Some(found) = meta(dir) else {
+            continue;
+        };
+        let why = if found.is_link {
+            "is a link".to_owned()
+        } else if found.uid != 0 {
+            format!("is owned by uid {}", found.uid)
+        } else if found.mode & 0o022 != 0 {
+            format!("can be written by others (mode {:o})", found.mode & 0o777)
+        } else {
+            continue;
+        };
+        return Err(format!(
+            "{} {why}, so a program running as you could change what jev-pilot installs under it",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn dir_meta(dir: &Path) -> Option<DirMeta> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::symlink_metadata(dir).ok()?;
+    Some(DirMeta {
+        uid: meta.uid(),
+        mode: meta.mode(),
+        is_link: meta.file_type().is_symlink(),
+    })
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps, reason = "the same signature as on Unix")]
+fn dir_meta(_: &Path) -> Option<DirMeta> {
+    // Program Files and ProgramData give their own access to what is made
+    // in them.
+    None
+}
+
+/// Copy `from` into `to`: into a new file beside it that must not exist
+/// yet, made by this process and closed to everyone else, then renamed over
+/// `to`. A running copy is replaced, not rewritten, and nothing someone
+/// else made or still has open is written into.
+///
+/// # Errors
+/// When the new file exists already, or the copy fails.
+pub fn copy_into_place(from: &Path, to: &Path) -> io::Result<()> {
+    let fresh = to.with_extension("new");
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&fresh)?;
+    io::copy(&mut std::fs::File::open(from)?, &mut file)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&fresh, to)
 }
 
 /// A step in words.
@@ -1195,11 +1298,10 @@ fn apply_one(step: &Step, installer: &Installer, said: &mut Vec<String>) -> io::
             if same_file(from, to) {
                 said.push(format!("jev-pilot is already at {}", to.display()));
             } else {
-                // Copied beside it and renamed over it, so a copy that is
-                // running is replaced, not rewritten in place.
-                let fresh = to.with_extension("new");
-                std::fs::copy(from, &fresh)?;
-                std::fs::rename(&fresh, to)?;
+                // A copy left by an install that failed part way: in a
+                // folder only root can change, so it is the installer's own.
+                let _ = std::fs::remove_file(to.with_extension("new"));
+                copy_into_place(from, to)?;
                 said.push(format!("copied jev-pilot to {}", to.display()));
             }
         }

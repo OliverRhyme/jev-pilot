@@ -1330,3 +1330,98 @@ fn a_protected_install_makes_the_audit_logs_files() {
         );
     }
 }
+
+// --- where a protected install writes ---
+
+/// What a protected install writes is safe only if no folder above it can
+/// be changed by the owner: every one that exists must be root's, closed to
+/// group and others, and not a link.
+#[test]
+fn a_protected_install_writes_only_under_folders_only_root_can_change() {
+    use jev_pilot::browser::install::{DirMeta, check_ancestors};
+    let target = Path::new("/usr/local/libexec/jev-pilot/jev-pilot");
+    let safe = DirMeta {
+        uid: 0,
+        mode: 0o755,
+        is_link: false,
+    };
+    let lookup = |unsafe_dir: &'static str, meta: DirMeta| {
+        move |dir: &Path| -> Option<DirMeta> {
+            if dir == Path::new("/usr/local/libexec")
+                || dir == Path::new("/usr/local/libexec/jev-pilot")
+            {
+                None
+            } else if dir == Path::new(unsafe_dir) {
+                Some(meta)
+            } else {
+                Some(safe)
+            }
+        }
+    };
+    assert_eq!(check_ancestors(target, &lookup("/nowhere", safe)), Ok(()));
+    for (meta, why) in [
+        (DirMeta { uid: 501, ..safe }, "is owned by uid 501"),
+        (
+            DirMeta {
+                mode: 0o775,
+                ..safe
+            },
+            "can be written by others (mode 775)",
+        ),
+        (
+            DirMeta {
+                mode: 0o757,
+                ..safe
+            },
+            "can be written by others (mode 757)",
+        ),
+        (
+            DirMeta {
+                is_link: true,
+                ..safe
+            },
+            "is a link",
+        ),
+    ] {
+        assert_eq!(
+            check_ancestors(target, &lookup("/usr/local", meta)),
+            Err(format!(
+                "/usr/local {why}, so a program running as you could change what jev-pilot \
+                 installs under it"
+            )),
+        );
+    }
+}
+
+/// The binary is copied into a new file that must not exist yet, made by
+/// the installer and closed to everyone else, then put in place: never into
+/// a file someone else could have made or still writes.
+#[cfg(unix)]
+#[test]
+fn the_binary_is_copied_into_a_new_file_closed_to_others() {
+    use jev_pilot::browser::install::copy_into_place;
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-copy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let from = dir.join("from");
+    let to = dir.join("jev-pilot");
+    std::fs::write(&from, b"new binary").unwrap();
+    std::fs::write(&to, b"old binary").unwrap();
+    copy_into_place(&from, &to).expect("copied");
+    assert_eq!(std::fs::read(&to).unwrap(), b"new binary");
+    let mode = std::fs::metadata(&to).unwrap().permissions().mode();
+    assert_eq!(
+        mode & 0o077,
+        0,
+        "closed to others until its owner and mode are set"
+    );
+    // A file already where the copy is made is refused, not written into.
+    std::fs::write(dir.join("jev-pilot.new"), b"planted").unwrap();
+    assert!(copy_into_place(&from, &to).is_err());
+    assert_eq!(
+        std::fs::read(dir.join("jev-pilot.new")).unwrap(),
+        b"planted"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

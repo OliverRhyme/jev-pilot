@@ -1375,7 +1375,7 @@ mod bridge {
             &hosts,
             &existing,
         );
-        for line in install::apply(&steps, &installer)? {
+        for line in install::apply(&steps, &installer, kind)? {
             println!("{line}");
         }
         println!(
@@ -1521,7 +1521,7 @@ mod bridge {
             &found.record,
             &user_host_dirs(Os::current(), &owner_home),
         );
-        for line in install::apply(&steps, &installer)? {
+        for line in install::apply(&steps, &installer, found.record.kind)? {
             println!("{line}");
         }
         println!(
