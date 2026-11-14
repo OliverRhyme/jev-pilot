@@ -976,7 +976,9 @@ mod run_side {
             // A Windows pipe skips a client gone before it was accepted, so
             // the squatter may still be waiting: a second client, kept until
             // it is taken, lets it finish, having heard nothing either way.
-            let nudge = Stream::connect(place.name().expect("a name")).expect("connects");
+            // One the channel refuses finds the squatter done already, its
+            // listener gone with it.
+            let nudge = Stream::connect(place.name().expect("a name")).ok();
             took.recv().expect("the squatter took a connection");
             drop(nudge);
             assert_eq!(
