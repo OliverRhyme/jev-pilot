@@ -1412,8 +1412,7 @@ mod bridge {
         let moved_hosts = std::fs::read_to_string(&layout.install_json)
             .ok()
             .and_then(|text| serde_json::from_str::<install::InstallRecord>(&text).ok())
-            .map(|record| record.moved_hosts)
-            .unwrap_or_default();
+            .map_or_else(Vec::new, |record| record.moved_hosts);
         let existing = install::Existing {
             moved_hosts,
             user_host_dirs: user_host_dirs(os, &owner_home),
