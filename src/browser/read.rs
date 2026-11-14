@@ -682,16 +682,14 @@ pub fn translate(
     placed.sort_by(|a, b| a.sort.cmp(&b.sort));
 
     let main = raw.frame_tree.pointer("/frameTree/frame");
-    let url = main
-        .map(|f| {
-            let url = f.get("url").and_then(Value::as_str).unwrap_or_default();
-            let fragment = f
-                .get("urlFragment")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            format!("{url}{fragment}")
-        })
-        .unwrap_or_default();
+    let url = main.map_or_else(String::new, |f| {
+        let url = f.get("url").and_then(Value::as_str).unwrap_or_default();
+        let fragment = f
+            .get("urlFragment")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        format!("{url}{fragment}")
+    });
     let current_info = targets.iter().find(|t| t.target_id == current);
     let title = snapshot
         .documents
@@ -803,8 +801,7 @@ fn read_frame(
         .backend
         .and_then(|b| layout.by_backend.get(&b))
         .and_then(|dom| layout.iframe_of(dom))
-        .map(|iframe| sort_path(layout, &iframe))
-        .unwrap_or_default();
+        .map_or_else(Vec::new, |iframe| sort_path(layout, &iframe));
 
     let mut ancestors: Vec<Ancestor> = Vec::new();
     let mut heading: Option<(usize, Box<str>)> = None;
