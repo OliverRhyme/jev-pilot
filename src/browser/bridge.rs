@@ -406,8 +406,10 @@ pub enum ErrorCode {
 pub struct TabInfo {
     /// The extension's id for it.
     pub tab: TabId,
-    /// Its DevTools target id, which is the run's key for it.
-    pub target: String,
+    /// Its DevTools target id, which is the run's key for it, when Chrome
+    /// has given it one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     /// Where it is.
     pub url: String,
     /// Its title.

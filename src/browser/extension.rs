@@ -312,11 +312,13 @@ impl Translator {
         vec![Action::Ask(Message::Request { id, op })]
     }
 
-    /// A tab as a DevTools target, remembering its target id.
-    fn target_info(&mut self, tab: &TabInfo) -> Value {
-        self.targets.insert(tab.tab, tab.target.clone());
+    /// A tab as a DevTools target, remembering its target id; `None` for a
+    /// tab with no target id, which cannot be one.
+    fn target_info(&mut self, tab: &TabInfo) -> Option<Value> {
+        let target = tab.target.clone()?;
+        self.targets.insert(tab.tab, target.clone());
         let mut info = json!({
-            "targetId": tab.target,
+            "targetId": target,
             "type": "page",
             "title": tab.title,
             "url": tab.url,
@@ -326,7 +328,7 @@ impl Translator {
         if let Some(opener) = tab.opener.and_then(|o| self.targets.get(&o)) {
             info["openerId"] = opener.clone().into();
         }
-        info
+        Some(info)
     }
 
     /// What one DevTools message from the engine becomes.
@@ -430,13 +432,13 @@ impl Translator {
                 };
                 vec![json!({"method": method, "params": params, "sessionId": session}).to_string()]
             }
-            Message::TabCreated(tab) => {
-                let info = self.target_info(&tab);
-                vec![
+            Message::TabCreated(tab) => match self.target_info(&tab) {
+                Some(info) => vec![
                     json!({"method": "Target.targetCreated", "params": {"targetInfo": info}})
                         .to_string(),
-                ]
-            }
+                ],
+                None => Vec::new(),
+            },
             Message::TabRemoved { tab } => {
                 let mut said = Vec::new();
                 // Closed before Chrome said the debugger let go of it: its
@@ -491,9 +493,11 @@ impl Translator {
                     .collect();
                 // Openers are named by target id, so every tab is known first.
                 for tab in &tabs {
-                    self.targets.insert(tab.tab, tab.target.clone());
+                    if let Some(target) = &tab.target {
+                        self.targets.insert(tab.tab, target.clone());
+                    }
                 }
-                let infos: Vec<Value> = tabs.iter().map(|t| self.target_info(t)).collect();
+                let infos: Vec<Value> = tabs.iter().filter_map(|t| self.target_info(t)).collect();
                 reply(id, &json!({"targetInfos": infos}))
             }
             Pending::Create => {
