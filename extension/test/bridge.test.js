@@ -565,3 +565,32 @@ test("a command's reply is held back when its tab is off the sites by the time i
   await settle();
   assert.deepEqual(posted.map((m) => m.type), ["detached"]);
 });
+
+test("an event that cannot be passed on does not stop the tab's later ones", async () => {
+  const fake = fakeChrome();
+  const posted = [];
+  let failOnce = true;
+  const bridge = createBridge({
+    chrome: fake.chrome,
+    post: (m) => {
+      if (m.type === "cdp" && failOnce) {
+        failOnce = false;
+        throw new Error("the port closed under it");
+      }
+      posted.push(m);
+    },
+    loadPolicy: async () => ({ sites: [], owner_tabs: "group" }),
+    scripts: SCRIPTS,
+    userAgent: UA,
+  });
+  listen(fake.chrome, bridge);
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  await fake.emit("debugger.onEvent", { tabId: 7 }, "Page.loadEventFired", {}).catch(() => {});
+  await fake.emit("debugger.onEvent", { tabId: 7 }, "Page.domContentEventFired", {}).catch(() => {});
+  await settle();
+  assert.deepEqual(
+    posted.filter((m) => m.type === "cdp").map((m) => m.method),
+    ["Page.domContentEventFired"],
+  );
+});

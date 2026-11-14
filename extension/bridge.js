@@ -400,9 +400,12 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
             post(protocol.cdp(tabId, source.sessionId, method, params));
           }
         });
-      queues.set(tabId, passed);
-      passed.finally(() => {
-        if (queues.get(tabId) === passed) {
+      // Queued as settled either way, so that one event that could not be
+      // passed on does not stop the tab's later ones.
+      const queued = passed.catch(() => {});
+      queues.set(tabId, queued);
+      queued.finally(() => {
+        if (queues.get(tabId) === queued) {
           queues.delete(tabId);
         }
       });
