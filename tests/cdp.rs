@@ -1908,9 +1908,10 @@ fn a_tab_let_go_of_ends_every_call_with_the_reason() {
             "the tab was closed, or went to a page extensions may not drive",
         ),
         (
-            // Chrome's own event, in attach mode, gives no reason.
+            // Chrome's own event, in attach and fresh mode, gives no reason,
+            // and there no extension stands between the run and the tab.
             json!({}),
-            "the tab was closed, or went to a page extensions may not drive",
+            "the tab was closed",
         ),
         (
             json!({"reason": "left_allowed_sites", "url": "https://elsewhere.test/account?x=1"}),

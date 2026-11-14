@@ -165,8 +165,8 @@ pub enum EngineError {
     NoSuchTab(TabKey),
     /// Chrome let go of the driven tab, and nothing more can be done in it.
     Detached {
-        /// Why: `canceled_by_user`, `target_closed`, `left_allowed_sites`, or
-        /// Chrome's own word.
+        /// Why: `canceled_by_user`, `target_closed`, `left_allowed_sites`,
+        /// Chrome's own word, or `closed` when Chrome's event gave none.
         reason: Box<str>,
         /// Where the tab went, when it left the allowed sites.
         url: Option<Box<str>>,
@@ -191,6 +191,7 @@ impl core::fmt::Display for EngineError {
                 "target_closed" => f.write_str(
                     "the tab was closed, or went to a page extensions may not drive",
                 ),
+                "closed" => f.write_str("the tab was closed"),
                 "left_allowed_sites" => write!(
                     f,
                     "the tab went to {}, which is not on the allowed sites",
@@ -536,11 +537,11 @@ impl<W: Wire> CdpEngine<W> {
             }
             "Page.loadEventFired" if self.ours(event) => self.seen.loaded = true,
             // Chrome's own event gives no reason; a tab let go of without
-            // one was closed.
+            // one, with no extension between, was closed.
             "Target.detachedFromTarget" if str_of("sessionId") == &*self.session => {
                 let reason = Some(str_of("reason"))
                     .filter(|r| !r.is_empty())
-                    .unwrap_or("target_closed");
+                    .unwrap_or("closed");
                 let url = Some(str_of("url"))
                     .filter(|u| !u.is_empty())
                     .map(Into::into);
