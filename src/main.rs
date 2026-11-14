@@ -1069,8 +1069,13 @@ mod bridge {
             .ok_or_else(|| NOT_SET_UP.into())
     }
 
-    /// Whether the invocation drives Chrome through the extension.
+    /// Whether the invocation speaks to the host: drives Chrome through the
+    /// extension, or asks whether the bridge answers. Only the installed
+    /// copy passes the host's check, so these run as it.
     fn through_extension(invocation: &Invocation) -> bool {
+        if matches!(invocation, Invocation::Extension(ExtensionCommand::Status)) {
+            return true;
+        }
         let browser = match invocation {
             Invocation::Run { browser, .. }
             | Invocation::Observe { browser, .. }
