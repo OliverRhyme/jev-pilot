@@ -269,9 +269,11 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
         case "release":
           return releaseAll();
         case "reload": {
-          const { reloaded } = await chrome.storage.session.get("reloaded");
-          if (reloaded !== version) {
-            await chrome.storage.session.set({ reloaded: version });
+          // Kept in local storage, which a reload leaves alone: if Chrome
+          // comes back with this same version, it is not reloaded again.
+          const { reloadedFrom } = await chrome.storage.local.get("reloadedFrom");
+          if (reloadedFrom !== version) {
+            await chrome.storage.local.set({ reloadedFrom: version });
             chrome.runtime.reload();
           }
           return;

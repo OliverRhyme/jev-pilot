@@ -135,12 +135,12 @@ test("a new tab opens in a new window when no normal window is open, in the jev-
   assert.equal(posted.at(-1).type, "reply");
 });
 
-test("a reload is honoured once per version", async () => {
+test("a reload is honoured once per version, though a reload empties session storage", async () => {
   const { fake, bridge } = bridged();
   await bridge.receive({ type: "reload" });
   await bridge.receive({ type: "reload" });
   assert.equal(fake.calls.filter(([call]) => call === "runtime.reload").length, 1);
-  assert.deepEqual(fake.state.session, { reloaded: "0.1.3" });
+  assert.equal(fake.state.storage.reloadedFrom, "0.1.3");
 });
 
 test("a command to a tab the run does not hold is refused", async () => {

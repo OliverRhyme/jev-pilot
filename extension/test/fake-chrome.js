@@ -71,7 +71,11 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
     runtime: {
       getManifest: () => ({ version }),
       getURL: (path) => `chrome-extension://eckgjcpdiehapkphgcflmcikippoegcp/${path}`,
-      reload: () => calls.push(["runtime.reload"]),
+      // Chrome clears session storage when an extension reloads.
+      reload: () => {
+        calls.push(["runtime.reload"]);
+        state.session = {};
+      },
       connectNative: (name) => {
         calls.push(["runtime.connectNative", name]);
         return port();
@@ -172,6 +176,7 @@ export function fakeChrome({ version = "0.1.3", paused = false } = {}) {
       },
       session: {
         get: async (key) => ({ [key]: state.session[key] }),
+        // Replaced on reload, as Chrome empties it.
         set: async (values) => {
           calls.push(["storage.session.set", values]);
           Object.assign(state.session, values);
