@@ -1180,6 +1180,19 @@ mod browser_parent {
         assert_ne!(mine.version, mine.parent_at_start);
     }
 
+    /// The pid version read from the kernel's private process record is the
+    /// one the documented audit token carries, so that record is still laid
+    /// out as the host reads it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_private_pid_version_is_the_audit_tokens() {
+        let mine = jev_pilot_os::pid_versions(std::process::id()).expect("this process");
+        assert_eq!(
+            mine.version,
+            jev_pilot_os::own_pid_version().expect("this process's audit token")
+        );
+    }
+
     /// The test harness was started by cargo, not a browser: its parent is
     /// found, named, and refused.
     #[cfg(any(target_os = "macos", target_os = "linux"))]

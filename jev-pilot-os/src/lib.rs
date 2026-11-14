@@ -3,9 +3,9 @@
 //!
 //! jev-pilot itself forbids `unsafe`. Asking Windows which image another
 //! process runs (`QueryFullProcessImageNameW`), whose it is, and who signed
-//! that image (`WinVerifyTrust`) has no safe Rust API, nor does macOS's
-//! `setregid`, so those calls live here, each in a function that allows
-//! `unsafe` for itself alone.
+//! that image (`WinVerifyTrust`) has no safe Rust API, nor do macOS's
+//! `setregid` and its processes' pid versions, so those calls live here,
+//! each in a function that allows `unsafe` for itself alone.
 //!
 //! On every other target this crate is empty.
 
@@ -13,7 +13,7 @@
 mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::{PidVersions, pid_versions, set_real_and_effective_gid};
+pub use macos::{PidVersions, own_pid_version, pid_versions, set_real_and_effective_gid};
 
 #[cfg(windows)]
 mod windows;
