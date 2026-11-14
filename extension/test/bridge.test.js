@@ -319,3 +319,41 @@ test("on starting, the extension lets go of tabs an earlier worker left attached
     [7],
   );
 });
+
+test("an attach a managed Chrome's policy forbids says so, naming the site", async () => {
+  for (const chromeSaid of [
+    "Host access is restricted by policy.",
+    "This page cannot be scripted due to an ExtensionsSettings policy.",
+    "Screenshot capture is restricted by policy.",
+    "Screenshot capture is restricted on this target.",
+  ]) {
+    const { fake, bridge, posted } = bridged();
+    await bridge.receive(started);
+    fake.state.tabs.set(7, { id: 7, url: "https://bank.test/account", title: "", groupId: 31, windowId: 1 });
+    fake.when("debugger.attach", () => {
+      throw new Error(chromeSaid);
+    });
+    await bridge.receive({ type: "request", id: 4, op: "attach", tab: 7 });
+    await settle();
+    assert.deepEqual(
+      posted.at(-1).error,
+      { code: "attach_failed", message: "this Chrome's policy does not let extensions debug https://bank.test" },
+      chromeSaid,
+    );
+  }
+});
+
+test("any other failure to attach is passed on in Chrome's words", async () => {
+  const { fake, bridge, posted } = bridged();
+  await bridge.receive(started);
+  fake.state.tabs.set(7, { id: 7, url: "https://github.com/", title: "", groupId: 31, windowId: 1 });
+  fake.when("debugger.attach", () => {
+    throw new Error("Another debugger is already attached to the tab with id: 7.");
+  });
+  await bridge.receive({ type: "request", id: 4, op: "attach", tab: 7 });
+  await settle();
+  assert.deepEqual(posted.at(-1).error, {
+    code: "attach_failed",
+    message: "Another debugger is already attached to the tab with id: 7.",
+  });
+});

@@ -163,6 +163,10 @@ pub enum EngineError {
     NotOwned(TabKey),
     /// The tab is not in the browser.
     NoSuchTab(TabKey),
+    /// The browser would not attach to the tab, in its own words: through
+    /// the extension these name the cause and its fix, as a managed
+    /// Chrome's policy forbidding the site.
+    AttachRefused(Box<str>),
     /// Chrome let go of the driven tab, and nothing more can be done in it.
     Detached {
         /// Why: `canceled_by_user`, `target_closed`, `left_allowed_sites`,
@@ -183,6 +187,7 @@ impl core::fmt::Display for EngineError {
             Self::Read(e) => e.fmt(f),
             Self::NotOwned(tab) => write!(f, "tab {} is not one this run owns", tab.as_str()),
             Self::NoSuchTab(tab) => write!(f, "there is no tab {}", tab.as_str()),
+            Self::AttachRefused(said) => f.write_str(said),
             Self::Detached { reason, url } => match &**reason {
                 "canceled_by_user" => f.write_str(
                     "you pressed Cancel on Chrome's 'started debugging' bar; jev-pilot let go \
@@ -376,10 +381,17 @@ impl<W: Wire> CdpEngine<W> {
     }
 
     fn attach_session(&mut self, target: &str) -> Result<(), EngineError> {
-        let attached = self.browser_call(
-            "Target.attachToTarget",
-            json!({"targetId": target, "flatten": true}),
-        )?;
+        let attached = self
+            .browser_call(
+                "Target.attachToTarget",
+                json!({"targetId": target, "flatten": true}),
+            )
+            .map_err(|e| match e {
+                EngineError::Transport(TransportError::Refused { error, .. }) => {
+                    EngineError::AttachRefused(error.message)
+                }
+                other => other,
+            })?;
         let session = attached
             .get("sessionId")
             .and_then(Value::as_str)

@@ -14,6 +14,27 @@ const OPENER_WAIT_MS = 500;
 /** The debugger protocol version the extension asks Chrome for. */
 const DEBUGGER_VERSION = "1.3";
 
+/**
+ * What Chrome says when a managed browser's policy forbids debugging a
+ * page: `runtime_blocked_hosts` in ExtensionSettings, or a screenshot
+ * restriction, which since Chrome 155 can also stop an attach.
+ */
+const POLICY_FORBIDS = [
+  "Host access is restricted by policy.",
+  "This page cannot be scripted due to an ExtensionsSettings policy.",
+  "Screenshot capture is restricted by policy.",
+  "Screenshot capture is restricted on this target.",
+];
+
+/** The origin of `url`, or `url` itself when it has none. */
+const originOf = (url) => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url;
+  }
+};
+
 /** A failure in Chrome, as the run is told it. */
 const chromeFailure = (code, error) => refusal(code, String(error?.message ?? error));
 
@@ -147,6 +168,12 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
         try {
           await chrome.debugger.attach({ tabId: request.tab }, DEBUGGER_VERSION);
         } catch (error) {
+          if (POLICY_FORBIDS.includes(String(error?.message ?? error))) {
+            throw refusal(
+              "attach_failed",
+              `this Chrome's policy does not let extensions debug ${originOf(tab.url)}`,
+            );
+          }
           throw chromeFailure("attach_failed", error);
         }
         held.add(request.tab);

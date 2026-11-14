@@ -2840,3 +2840,22 @@ fn a_garbled_answer_to_the_echo_says_to_install_again() {
     assert!(said.contains("run the install again"), "{said}");
     assert!(!said.contains("nothing was sent"), "{said}");
 }
+
+/// A managed Chrome whose policy forbids debugging the page: the run ends
+/// in the extension's words, which name the site.
+#[test]
+fn a_policy_that_forbids_debugging_ends_the_attach_saying_so() {
+    let said = "this Chrome's policy does not let extensions debug https://bank.test";
+    let (wire, _) = through(move |request| {
+        if request["op"] == "attach" {
+            return vec![
+                json!({"type": "reply", "id": request["id"], "error": {"code": "attach_failed", "message": said}}),
+            ];
+        }
+        signup_extension(request)
+    });
+    let error = CdpEngine::attach(wire, &TabKey::new(signup::TARGET), false)
+        .err()
+        .expect("refused");
+    assert_eq!(error.to_string(), said);
+}
