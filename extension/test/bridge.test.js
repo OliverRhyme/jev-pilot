@@ -525,3 +525,28 @@ test("a password that matches a word the page uses elsewhere is still dropped, a
   assert.deepEqual(result.strings.slice(0, 6), ["#document", "INPUT", "type", "password", "text", "alice"]);
   assert.equal(result.strings.includes("hunter2"), false);
 });
+
+test("a password field's value attribute leaves Chrome blank too", async () => {
+  const { fake, bridge, posted } = bridged();
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  const strings = ["#document", "INPUT", "type", "password", "value", "hunter2", "name", "pw"];
+  fake.when("debugger.sendCommand", () => ({
+    strings,
+    documents: [
+      {
+        nodes: {
+          nodeName: [0, 1],
+          attributes: [[], [2, 3, 6, 7, 4, 5]],
+          inputValue: { index: [1], value: [5] },
+        },
+      },
+    ],
+  }));
+  await bridge.receive({ type: "request", id: 9, op: "send", tab: 7, method: "DOMSnapshot.captureSnapshot", params: {} });
+  await settle();
+  const result = posted.at(-1).result;
+  assert.equal(JSON.stringify(result).includes("hunter2"), false);
+  const attributes = result.documents[0].nodes.attributes[1].map((i) => result.strings[i]);
+  assert.deepEqual(attributes, ["type", "password", "name", "pw", "value", ""]);
+});
