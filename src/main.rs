@@ -1332,13 +1332,18 @@ mod bridge {
         }
         #[cfg(windows)]
         {
-            let _ = dev;
+            if !dev {
+                install::check_elevated_account()?;
+            }
             Ok((Installer::Sid(jev_pilot::peer::own_sid()?), home()?))
         }
     }
 
     fn install_bridge(dev: bool) -> Result<(), Error> {
         let os = Os::current();
+        if !dev {
+            println!("{}\n", install::MANAGED_WARNING);
+        }
         if !dev && !is_admin()? {
             return Err(format!(
                 "{NEEDS_ADMIN}, or `jev-pilot extension install --dev` for a development \

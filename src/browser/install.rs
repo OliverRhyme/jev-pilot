@@ -1014,13 +1014,18 @@ impl Planner {
                 path: layout.binary.clone(),
             });
         }
-        if self.protected && unix {
-            self.steps.push(Step::SetOwner {
-                path: layout.binary.clone(),
-                owner: Owner::RootGroup,
-                mode: 0o2755,
-            });
-        }
+        // The copy is made closed to everyone; it is opened to run once it
+        // is in place (and, protected, signed and given its group).
+        let (owner, mode) = match (self.protected, unix) {
+            (true, true) => (Owner::RootGroup, 0o2755),
+            (true, false) => (Owner::Root, 0o755),
+            (false, _) => (Owner::User, 0o755),
+        };
+        self.steps.push(Step::SetOwner {
+            path: layout.binary.clone(),
+            owner,
+            mode,
+        });
     }
 
     /// The extension's files, and its policy.
@@ -1161,6 +1166,35 @@ pub fn cdhash_in(report: &str) -> Option<crate::peer::MacosPin> {
         .lines()
         .find_map(|line| line.strip_prefix("CDHash="))
         .and_then(|hex| crate::peer::MacosPin::from_cdhash_hex(hex.trim()).ok())
+}
+
+/// Whether an elevated install runs as the account signed in, so that what
+/// it pins and the hosts it finds are that account's, not another
+/// administrator's who elevated it over the owner's shoulder.
+///
+/// # Errors
+/// What to say when it does not.
+pub fn elevated_as_signed_in(elevated: &str, signed_in: &str) -> Result<(), String> {
+    if elevated.eq_ignore_ascii_case(signed_in) {
+        Ok(())
+    } else {
+        Err(format!(
+            "this runs elevated as {elevated}, not as {signed_in} who is signed in: sign in as an \
+             administrator yourself and run the install from there, so the bridge is pinned to you"
+        ))
+    }
+}
+
+/// Whether this elevated install runs as the account signed in to the
+/// session (Windows).
+///
+/// # Errors
+/// What to say when it does not, or why it cannot be told.
+#[cfg(windows)]
+pub fn check_elevated_account() -> Result<(), String> {
+    let elevated = jev_pilot_os::current_account().map_err(|e| e.to_string())?;
+    let signed_in = jev_pilot_os::session_account().map_err(|e| e.to_string())?;
+    elevated_as_signed_in(&elevated, &signed_in)
 }
 
 /// The `jev-pilot` group's name.
@@ -1726,6 +1760,14 @@ pub fn uninstall_plan(
     }
     steps
 }
+
+/// What a protected install says before it asks for an administrator's
+/// rights: the policy it sets makes Chrome say it is managed.
+pub const MANAGED_WARNING: &str = "This turns off user-level native messaging hosts with a \
+                                   Chrome policy, so Chrome will say it is \"managed by your \
+                                   organization\" (on macOS, once you approve the profile). Your \
+                                   own hosts are copied to system level first, so they keep \
+                                   working.";
 
 /// What is said when nothing is installed.
 pub const NOT_SET_UP: &str = "jev-pilot's Chrome extension is not set up: run `sudo jev-pilot \

@@ -781,11 +781,13 @@ fn a_development_install_plan() {
         &Existing::default(),
     );
     assert!(!steps.contains(&Step::EnsureGroup));
-    assert!(
-        !steps
-            .iter()
-            .any(|s| matches!(s, Step::SetOwner { .. } | Step::Sign { .. }))
-    );
+    assert!(!steps.iter().any(|s| matches!(s, Step::Sign { .. })));
+    // The copy is made closed to everyone, then opened to run.
+    assert!(steps.contains(&Step::SetOwner {
+        path: layout.binary.clone(),
+        owner: Owner::User,
+        mode: 0o755,
+    }));
     for step in &steps {
         match step {
             Step::CreateDir { owner, .. } | Step::WriteFile { owner, .. } => {
@@ -1471,5 +1473,30 @@ fn the_policy_is_read_for_its_value_not_its_presence() {
             "/Library/Managed Preferences/com.microsoft.Edge.plist".into(),
             "/Library/Managed Preferences/com.brave.Browser.plist".into(),
         ]
+    );
+}
+
+/// On Windows, an install elevated as another administrator than the one
+/// signed in would pin that administrator, and find that administrator's
+/// hosts: it is refused.
+#[test]
+fn an_install_elevated_as_another_account_is_refused() {
+    use jev_pilot::browser::install::elevated_as_signed_in;
+    assert_eq!(elevated_as_signed_in(r"PC\owner", r"pc\OWNER"), Ok(()));
+    assert_eq!(
+        elevated_as_signed_in(r"PC\admin", r"PC\owner"),
+        Err(r"this runs elevated as PC\admin, not as PC\owner who is signed in: sign in as an administrator yourself and run the install from there, so the bridge is pinned to you".to_owned())
+    );
+}
+
+/// Before it asks for an administrator's rights, a protected install says
+/// what the policy will make Chrome say, and why.
+#[test]
+fn a_protected_install_says_chrome_will_be_managed_before_it_starts() {
+    assert_eq!(
+        jev_pilot::browser::install::MANAGED_WARNING,
+        "This turns off user-level native messaging hosts with a Chrome policy, so Chrome will \
+         say it is \"managed by your organization\" (on macOS, once you approve the profile). \
+         Your own hosts are copied to system level first, so they keep working."
     );
 }
