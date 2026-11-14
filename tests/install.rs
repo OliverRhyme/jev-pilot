@@ -1310,6 +1310,14 @@ fn a_protected_install_makes_the_audit_logs_files() {
         }),
         "the host's lock, which the owner cannot open"
     );
+    assert!(
+        steps.contains(&Step::CreateFile {
+            path: PathBuf::from("/var/log/jev-pilot/audit.skipped"),
+            mode: 0o660,
+            owner: Owner::RootGroup,
+        }),
+        "the count of refused starts not written"
+    );
 }
 
 // --- where a protected install writes ---

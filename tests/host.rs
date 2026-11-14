@@ -1334,6 +1334,24 @@ mod serving {
         assert_eq!(events[0]["check"], "nonce: not echoed in time");
     }
 
+    /// Refusals the host held back are counted in the log when it ends.
+    #[test]
+    fn refusals_held_back_are_written_as_the_host_ends() {
+        let place = place();
+        let mut host = host_at(&place, Arc::new(Unknown));
+        for _ in 0..3 {
+            let mut stream = raw(&place);
+            assert_eq!(first_frame(&mut stream)["type"], "refused");
+        }
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("ends cleanly");
+        let events = audit_events(&host.audit);
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[0]["event"], "refused");
+        assert_eq!(events[1]["event"], "refusals_not_written");
+        assert_eq!(events[1]["refusals"], 2);
+    }
+
     /// An echo that is not a frame of the bridge (one claiming more than
     /// the bridge reads, or cut off part way) is refused, and audited.
     #[test]
@@ -1499,7 +1517,7 @@ fn the_diagnostics_file_is_bounded() {
 }
 
 /// The audit log's files as an install makes them: all four, mode 0664,
-/// and the lock, mode 0660.
+/// and the lock and the count of skipped starts, mode 0660.
 fn audit_files(dir: &std::path::Path) {
     std::fs::create_dir_all(dir).unwrap();
     for (name, mode) in [
@@ -1508,6 +1526,7 @@ fn audit_files(dir: &std::path::Path) {
         ("audit.log.2", 0o664),
         ("audit.log.3", 0o664),
         ("audit.lock", 0o660),
+        ("audit.skipped", 0o660),
     ] {
         std::fs::write(dir.join(name), "").unwrap();
         #[cfg(unix)]
@@ -1649,6 +1668,93 @@ fn refusals_are_written_at_most_once_a_minute() {
         Audit::NotWritten { refusals: 99 }.line("2026-11-15T09:30:00Z"),
         "{\"event\":\"refusals_not_written\",\"refusals\":99,\"time\":\"2026-11-15T09:30:00Z\"}\n"
     );
+}
+
+/// Refusals held back are not lost when the host ends: their count is
+/// written then.
+#[test]
+fn refusals_held_back_are_counted_when_the_host_ends() {
+    use jev_pilot::browser::host::Throttle;
+    use std::time::Instant;
+    let start = Instant::now();
+    let refusal = Audit::Refused {
+        pid: Some(7),
+        check: "uid: not the expected value".into(),
+    };
+    let mut throttle = Throttle::default();
+    assert_eq!(throttle.finish(), None, "nothing held");
+    assert_eq!(throttle.admit(refusal.clone(), start), [refusal.clone()]);
+    assert!(throttle.admit(refusal.clone(), start).is_empty());
+    assert!(throttle.admit(refusal, start).is_empty());
+    assert_eq!(throttle.finish(), Some(Audit::NotWritten { refusals: 2 }));
+}
+
+/// A refused start skipped within a minute is counted in a file of the
+/// group's, and the count is written before the next start that is.
+#[test]
+fn refused_host_starts_skipped_are_counted_and_written_later() {
+    use jev_pilot::browser::host::audit_host_start;
+    use std::time::{Duration, SystemTime};
+    let dir = std::env::temp_dir().join(format!("jev-pilot-starts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    audit_files(&dir);
+    let now = SystemTime::now();
+    let started = |refused: Option<&str>| Audit::HostStarted {
+        parent_pid: Some(7),
+        parent_exe: Some("/usr/bin/python3".into()),
+        refused: refused.map(str::to_owned),
+    };
+    let lines = || {
+        std::fs::read_to_string(dir.join("audit.log"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let refused = started(Some("not Chrome"));
+    audit_host_start(&dir, &refused, now).expect("written");
+    for n in 1..=3 {
+        audit_host_start(&dir, &refused, now + Duration::from_secs(n)).expect("counted");
+    }
+    assert_eq!(lines().len(), 1, "one written");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("audit.skipped"))
+            .unwrap()
+            .trim(),
+        "3"
+    );
+    audit_host_start(&dir, &started(None), now + Duration::from_secs(5)).expect("written");
+    let events = lines();
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert_eq!(events[1]["event"], "host_starts_not_written");
+    assert_eq!(events[1]["starts"], 3);
+    assert_eq!(events[2]["browser"], "accepted");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("audit.skipped"))
+            .unwrap()
+            .trim(),
+        "0"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The host never makes the count of skipped starts: a missing one is
+/// refused.
+#[test]
+fn a_missing_count_of_skipped_starts_is_refused_not_made() {
+    use jev_pilot::browser::host::audit_host_start;
+    let dir = std::env::temp_dir().join(format!("jev-pilot-noskipped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    audit_files(&dir);
+    std::fs::remove_file(dir.join("audit.skipped")).unwrap();
+    let refused = Audit::HostStarted {
+        parent_pid: Some(7),
+        parent_exe: None,
+        refused: Some("not Chrome".into()),
+    };
+    assert!(audit_host_start(&dir, &refused, std::time::SystemTime::now()).is_err());
+    assert!(!dir.join("audit.skipped").exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Each refused host start is a process of its own: one within a minute of

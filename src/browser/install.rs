@@ -988,13 +988,16 @@ pub fn plan(
             owner,
         });
     }
-    // The hosts' lock around rotating the log: the group's alone, so the
-    // owner cannot hold it.
-    planner.steps.push(Step::CreateFile {
-        path: under(os, &layout.audit_log, "audit.lock"),
-        mode: if protected { 0o660 } else { 0o600 },
-        owner,
-    });
+    // The hosts' lock around the log, and the count of refused starts not
+    // written: the group's alone, so the owner can neither hold the one nor
+    // change the other.
+    for name in ["audit.lock", "audit.skipped"] {
+        planner.steps.push(Step::CreateFile {
+            path: under(os, &layout.audit_log, name),
+            mode: if protected { 0o660 } else { 0o600 },
+            owner,
+        });
+    }
     planner.steps.push(Step::Record {
         path: layout.install_json.clone(),
         kind,

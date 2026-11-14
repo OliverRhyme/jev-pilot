@@ -3,7 +3,7 @@
 //! happened, and the relay's answers carried out on the calling thread.
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek as _, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +14,7 @@ use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
 use interprocess::local_socket::{Listener, ListenerOptions, Stream};
 
 use super::channel::Place;
-use super::{Input, Output, Relay, RunId, Started, Throttle, utc};
+use super::{Audit, Input, Output, Relay, RunId, Started, Throttle, refused_start_lately, utc};
 use crate::browser::bridge::{self, ByteOrder, FrameError, Message, Nonce};
 use crate::peer::{Expected, PeerCheck, Verdict, decide, recheck};
 
@@ -185,6 +185,13 @@ pub fn serve(
         }
     }
 
+    if let Some(held) = throttle.finish() {
+        let _ = append_audit(
+            &config.audit_dir,
+            &held.line(&utc(SystemTime::now())),
+            AUDIT_LIMIT,
+        );
+    }
     stop.store(true, Ordering::SeqCst);
     for stream in runs.values() {
         hang_up(stream);
@@ -486,12 +493,22 @@ fn hang_up(stream: &Stream) {
 /// # Errors
 /// When a file is missing or cannot be written.
 pub fn append_audit(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
+    let _lock = lock_audit(dir)?;
+    append_locked(dir, line, limit)
+}
+
+/// The hosts' lock on `dir`'s audit log, let go when the file closes.
+fn lock_audit(dir: &Path) -> io::Result<File> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
         .open(dir.join("audit.lock"))?;
-    // Let go when the file closes.
     lock.lock()?;
+    Ok(lock)
+}
+
+/// Append `line`, rotating first when full, under the lock.
+fn append_locked(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
     let log = dir.join("audit.log");
     // Opened to write, not to append: Windows will not shorten a file
     // opened only to append. The lock keeps every writer at the end.
@@ -506,6 +523,68 @@ pub fn append_audit(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
     }
     file.seek(io::SeekFrom::End(0))?;
     file.write_all(line.as_bytes())
+}
+
+/// Audit the host's start, `started`, at `now`.
+///
+/// A refused start less than a minute after the last one written is not
+/// written: it is counted in `audit.skipped`, which the install makes
+/// beside the log as it makes the lock, and the count is written before the
+/// next start that is. So a loop of refused starts can neither rotate the
+/// log away nor go uncounted.
+///
+/// # Errors
+/// When a file is missing or cannot be written.
+pub fn audit_host_start(dir: &Path, started: &Audit, now: SystemTime) -> io::Result<()> {
+    let _lock = lock_audit(dir)?;
+    let mut skipped = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join("audit.skipped"))?;
+    let mut text = String::new();
+    skipped.read_to_string(&mut text)?;
+    let count: u32 = text.trim().parse().unwrap_or(0);
+    let refused = matches!(
+        started,
+        Audit::HostStarted {
+            refused: Some(_),
+            ..
+        }
+    );
+    if refused && refused_start_lately(&log_tail(&dir.join("audit.log")), now) {
+        return set_count(&mut skipped, count.saturating_add(1));
+    }
+    let time = utc(now);
+    if count > 0 {
+        append_locked(
+            dir,
+            &Audit::StartsNotWritten { starts: count }.line(&time),
+            AUDIT_LIMIT,
+        )?;
+    }
+    append_locked(dir, &started.line(&time), AUDIT_LIMIT)?;
+    if count > 0 {
+        set_count(&mut skipped, 0)?;
+    }
+    Ok(())
+}
+
+fn set_count(file: &mut File, count: u32) -> io::Result<()> {
+    file.set_len(0)?;
+    file.seek(io::SeekFrom::Start(0))?;
+    writeln!(file, "{count}")
+}
+
+/// The last lines of the log, enough to find the last start.
+fn log_tail(log: &Path) -> String {
+    let Ok(mut file) = File::open(log) else {
+        return String::new();
+    };
+    let length = file.metadata().map_or(0, |m| m.len());
+    let _ = file.seek(io::SeekFrom::Start(length.saturating_sub(8 << 10)));
+    let mut tail = Vec::new();
+    let _ = file.read_to_end(&mut tail);
+    String::from_utf8_lossy(&tail).into_owned()
 }
 
 /// Replace what an existing file holds.

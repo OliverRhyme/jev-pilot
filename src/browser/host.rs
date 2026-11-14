@@ -13,7 +13,9 @@
 pub mod channel;
 mod serve;
 
-pub use serve::{AUDIT_LIMIT, Diagnostics, ECHO_WAIT, Serve, append_audit, serve};
+pub use serve::{
+    AUDIT_LIMIT, Diagnostics, ECHO_WAIT, Serve, append_audit, audit_host_start, serve,
+};
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -156,6 +158,13 @@ pub enum Audit {
         /// How many.
         refusals: u32,
     },
+    /// Refused host starts left out of the log since the last one written,
+    /// counted in the audit folder's `audit.skipped` meanwhile: each host
+    /// is a process of its own.
+    StartsNotWritten {
+        /// How many.
+        starts: u32,
+    },
     /// A connection was turned away by an identity check.
     Refused {
         /// Its process id, when the OS gave one.
@@ -191,6 +200,9 @@ impl Audit {
             }
             Self::NotWritten { refusals } => {
                 json!({"event": "refusals_not_written", "refusals": refusals})
+            }
+            Self::StartsNotWritten { starts } => {
+                json!({"event": "host_starts_not_written", "starts": starts})
             }
             Self::HostStarted {
                 parent_pid,
@@ -244,6 +256,12 @@ impl Throttle {
         self.last = Some(now);
         out.push(audit);
         out
+    }
+
+    /// The count of refusals still held back, to write as the host ends.
+    pub fn finish(&mut self) -> Option<Audit> {
+        let held = std::mem::take(&mut self.held);
+        (held > 0).then_some(Audit::NotWritten { refusals: held })
     }
 }
 
