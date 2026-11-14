@@ -175,10 +175,17 @@ pub enum Message {
         /// 32 random bytes, as 64 hex digits.
         nonce: String,
     },
-    /// Run to host, its first frame: the nonce it was given.
+    /// Run to host, its first frame: the nonce it was given, and what the
+    /// run is for, which the host passes on to the extension to show.
     Echo {
         /// The nonce, as received.
         nonce: String,
+        /// The run's goal.
+        #[serde(default)]
+        goal: String,
+        /// The sites the run may go to.
+        #[serde(default)]
+        sites: Vec<String>,
     },
     /// Extension to host, on connecting.
     Hello(Hello),
@@ -410,12 +417,15 @@ impl Nonce {
         }
     }
 
-    /// A run's answer to the host's first frame, when it is a nonce.
+    /// A run's answer to the host's first frame, when it is a nonce: the
+    /// nonce, with the run's goal and the sites it may go to.
     #[must_use]
-    pub fn echoing(first: &Message) -> Option<Message> {
+    pub fn echoing(first: &Message, goal: &str, sites: &[String]) -> Option<Message> {
         match first {
             Message::Nonce { nonce } => Some(Message::Echo {
                 nonce: nonce.clone(),
+                goal: goal.to_owned(),
+                sites: sites.to_vec(),
             }),
             _ => None,
         }
@@ -427,6 +437,6 @@ impl Nonce {
         let Message::Nonce { nonce: ours } = self.message() else {
             return false;
         };
-        matches!(answer, Message::Echo { nonce } if *nonce == ours)
+        matches!(answer, Message::Echo { nonce, .. } if *nonce == ours)
     }
 }

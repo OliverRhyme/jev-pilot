@@ -446,11 +446,20 @@ fn the_host_sends_a_fresh_nonce_and_the_run_echoes_it() {
     assert!(sent.bytes().all(|b| b.is_ascii_hexdigit()));
     assert_ne!(Nonce::fresh().message(), nonce.message());
 
-    let echo = Nonce::echoing(&nonce.message()).expect("a nonce is echoed");
+    // The echo also says what the run is for, so the host can tell the
+    // extension, which shows it to the owner.
+    let echo = Nonce::echoing(
+        &nonce.message(),
+        "Star the repository",
+        &["https://github.com".to_owned()],
+    )
+    .expect("a nonce is echoed");
     assert_eq!(
         echo,
         Message::Echo {
-            nonce: sent.clone()
+            nonce: sent.clone(),
+            goal: "Star the repository".into(),
+            sites: vec!["https://github.com".into()],
         }
     );
     assert!(nonce.is_echoed_by(&echo));
@@ -461,14 +470,14 @@ fn the_host_sends_a_fresh_nonce_and_the_run_echoes_it() {
 fn a_wrong_or_missing_echo_fails_the_handshake() {
     let nonce = Nonce::fresh();
     let other = Nonce::fresh();
-    assert!(!nonce.is_echoed_by(&Nonce::echoing(&other.message()).expect("echoes")));
+    assert!(!nonce.is_echoed_by(&Nonce::echoing(&other.message(), "", &[]).expect("echoes")));
     let Message::Nonce { nonce: sent } = nonce.message() else {
         panic!("a nonce message");
     };
     assert!(!nonce.is_echoed_by(&Message::Nonce { nonce: sent }));
     assert!(!nonce.is_echoed_by(&Message::Absent));
     assert_eq!(
-        Nonce::echoing(&Message::Absent),
+        Nonce::echoing(&Message::Absent, "", &[]),
         None,
         "only a nonce is echoed"
     );
@@ -560,11 +569,18 @@ fn a_run_echoes_the_nonce_and_is_connected_when_ready() {
     let channel = Channel::new(&[nonce_frame(), ready_frame()]);
     let sent = channel.handle();
 
-    let wire = ExtensionWire::connect(channel).expect("connects");
+    let wire = ExtensionWire::connect(
+        channel,
+        "Star the repository",
+        &["https://github.com".to_owned()],
+    )
+    .expect("connects");
 
     assert_eq!(
         written_by(&sent),
-        [json!({"type": "echo", "nonce": "ab".repeat(32)})]
+        [
+            json!({"type": "echo", "nonce": "ab".repeat(32), "goal": "Star the repository", "sites": ["https://github.com"]})
+        ]
     );
     assert_eq!(wire.hello().product, "Chrome/158.0.7400.12");
 }
@@ -574,7 +590,7 @@ fn a_run_echoes_the_nonce_and_is_connected_when_ready() {
 #[test]
 fn a_run_turned_away_says_why() {
     let refusal = |answer: serde_json::Value| {
-        ExtensionWire::connect(Channel::new(&[nonce_frame(), answer]))
+        ExtensionWire::connect(Channel::new(&[nonce_frame(), answer]), "", &[])
             .err()
             .expect("turned away")
             .to_string()
@@ -617,7 +633,9 @@ fn a_run_turned_away_says_why() {
 fn a_channel_that_does_not_open_with_a_nonce_is_not_the_host() {
     let channel = Channel::new(&[ready_frame()]);
     let sent = channel.handle();
-    let error = ExtensionWire::connect(channel).err().expect("refused");
+    let error = ExtensionWire::connect(channel, "", &[])
+        .err()
+        .expect("refused");
     assert_eq!(
         error.to_string(),
         "something other than the installed jev-pilot answered on the bridge (it did not open \
@@ -645,7 +663,7 @@ fn wire_with(
     all.extend_from_slice(frames);
     let channel = Channel::new(&all);
     let sent = channel.handle();
-    let wire = ExtensionWire::connect(channel).expect("connects");
+    let wire = ExtensionWire::connect(channel, "", &[]).expect("connects");
     sent.borrow_mut().clear();
     (wire, sent)
 }

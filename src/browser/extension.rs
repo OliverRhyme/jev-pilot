@@ -31,15 +31,15 @@ pub struct ExtensionWire<S: Read + Write> {
 }
 
 impl<S: Read + Write> ExtensionWire<S> {
-    /// Answer the host's nonce on `stream`, and take the bridge if the host
-    /// offers it.
+    /// Answer the host's nonce on `stream` with the run's goal and the sites
+    /// it may go to, and take the bridge if the host offers it.
     ///
     /// # Errors
     /// Returns [`ConnectError`] when the other end is not the host, the host
     /// turns the run away, or the extension cannot serve it.
-    pub fn connect(mut stream: S) -> Result<Self, ConnectError> {
+    pub fn connect(mut stream: S, goal: &str, sites: &[String]) -> Result<Self, ConnectError> {
         let first = read_message(&mut stream)?;
-        let Some(echo) = Nonce::echoing(&first) else {
+        let Some(echo) = Nonce::echoing(&first, goal, sites) else {
             return Err(ConnectError::NotTheHost {
                 why: "it did not open with a nonce".into(),
             });
