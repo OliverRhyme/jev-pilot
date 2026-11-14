@@ -641,7 +641,7 @@ impl<W: Wire> CdpEngine<W> {
         };
         let mut read = read::translate(&raw, &self.target, &self.owned, &mut self.loaders)
             .map_err(EngineError::Read)?;
-        if let Some((quiet, mutations)) = self.watch(&input::quiet_now(), false) {
+        if let Some((quiet, mutations)) = self.watch(input::QUIET_NOW, &[], false) {
             self.quiet_for_ms = Some(quiet);
             self.mutations = Some(mutations);
         }
@@ -667,10 +667,11 @@ impl<W: Wire> CdpEngine<W> {
         })
     }
 
-    /// Evaluate one of the watch's expressions in the isolated world, making
-    /// the world first if this document has none. `None` when the page would
+    /// Call one of the watch's fixed scripts, with `numbers` as its
+    /// arguments, in the isolated world, making the world first if this
+    /// document has none. `None` when the page would
     /// not answer; the watch is a help, never a requirement.
-    fn watch(&mut self, expression: &str, wait: bool) -> Option<(u64, u64)> {
+    fn watch(&mut self, script: &str, numbers: &[u64], wait: bool) -> Option<(u64, u64)> {
         for _ in 0..2 {
             let context = if let Some(context) = self.world {
                 context
@@ -685,15 +686,20 @@ impl<W: Wire> CdpEngine<W> {
                 self.world = Some(context);
                 context
             };
-            let mut params =
-                json!({"expression": expression, "contextId": context, "returnByValue": true});
+            let arguments: Vec<Value> = numbers.iter().map(|n| json!({"value": n})).collect();
+            let mut params = json!({
+                "functionDeclaration": script,
+                "executionContextId": context,
+                "arguments": arguments,
+                "returnByValue": true,
+            });
             let timeout = if wait {
                 params["awaitPromise"] = true.into();
                 self.timeouts.quiet_cap + self.timeouts.call
             } else {
                 self.timeouts.call
             };
-            match self.call_within("Runtime.evaluate", params, timeout) {
+            match self.call_within("Runtime.callFunctionOn", params, timeout) {
                 Ok(answer) => {
                     let value = answer.pointer("/result/value")?;
                     return Some((
@@ -738,7 +744,7 @@ impl<W: Wire> CdpEngine<W> {
         let window = u64::try_from(self.timeouts.quiet_window.as_millis()).unwrap_or(u64::MAX);
         let cap = u64::try_from(self.timeouts.quiet_cap.as_millis()).unwrap_or(u64::MAX);
         let before = self.mutations;
-        if let Some((quiet, mutations)) = self.watch(&input::quiet_within(window, cap), true) {
+        if let Some((quiet, mutations)) = self.watch(input::QUIET_WITHIN, &[window, cap], true) {
             self.quiet_for_ms = Some(quiet);
             self.mutations = Some(mutations);
             if before == Some(mutations) && self.seen.navigated.is_none() {

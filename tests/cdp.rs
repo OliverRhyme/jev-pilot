@@ -621,7 +621,7 @@ fn script_read(script: &Script) {
             json!({"executionContextId": 41}),
         )
         .on(
-            "Runtime.evaluate",
+            "Runtime.callFunctionOn",
             json!({"result": {"type": "object", "value": {"quiet": 250, "mutations": 3}}}),
         );
 }
@@ -630,7 +630,7 @@ fn script_read(script: &Script) {
 /// the page is quiet with the same number of changes as at the read.
 fn script_settle(script: &Script, mutations: u64) {
     script.on(
-        "Runtime.evaluate",
+        "Runtime.callFunctionOn",
         json!({"result": {"type": "object", "value": {"quiet": 120, "mutations": mutations}}}),
     );
 }
@@ -652,7 +652,15 @@ fn command_traffic(script: &Script) -> Vec<Value> {
     script
         .sent()
         .into_iter()
-        .filter(|m| m["method"] != "Runtime.evaluate" && m["method"] != "Page.createIsolatedWorld")
+        .filter(|m| {
+            m["method"] != "Page.createIsolatedWorld"
+                && !(m["method"] == "Runtime.callFunctionOn"
+                    && [input::QUIET_NOW, input::QUIET_WITHIN].contains(
+                        &m["params"]["functionDeclaration"]
+                            .as_str()
+                            .unwrap_or_default(),
+                    ))
+        })
         .collect()
 }
 
@@ -1497,7 +1505,7 @@ fn a_tab_the_page_opens_is_reported_and_can_be_switched_to() {
     script.on("Page.enable", json!({}));
     script.on("Page.createIsolatedWorld", json!({"executionContextId": 7}));
     script.on(
-        "Runtime.evaluate",
+        "Runtime.callFunctionOn",
         json!({"result": {"type": "object", "value": {"quiet": 500, "mutations": 0}}}),
     );
 
@@ -1542,11 +1550,11 @@ fn settling_waits_for_quiet_in_an_isolated_world_and_reports_no_change() {
 
     engine.perform(&BrowserCommand::Settle).expect("settles");
 
-    let evaluate = &script.params_of("Runtime.evaluate")[0];
-    assert_eq!(evaluate["contextId"], 41);
-    assert_eq!(evaluate["awaitPromise"], true);
+    let watch = &script.params_of("Runtime.callFunctionOn")[0];
+    assert_eq!(watch["executionContextId"], 41);
+    assert_eq!(watch["awaitPromise"], true);
     assert!(
-        evaluate["expression"]
+        watch["functionDeclaration"]
             .as_str()
             .is_some_and(|e| e.contains("MutationObserver"))
     );
@@ -1772,9 +1780,12 @@ fn a_select_on_a_page_that_changed_is_not_set() {
         })
         .expect("a refusal is not an error");
 
-    assert_eq!(
-        script.params_of("Runtime.callFunctionOn"),
-        Vec::<Value>::new()
+    assert!(
+        script
+            .params_of("Runtime.callFunctionOn")
+            .iter()
+            .all(|call| call["functionDeclaration"] != input::SELECT_OPTION),
+        "no option was chosen"
     );
     assert_eq!(
         script.params_of("DOM.getNodeForLocation"),
@@ -1963,4 +1974,65 @@ fn another_session_let_go_of_leaves_the_tab_alone() {
     script.event(&json!({"method": "Target.detachedFromTarget", "params": {"sessionId": "OTHER", "targetId": "T2", "reason": "target_closed"}}));
     script_read(&script);
     engine.read().expect("still reads");
+}
+
+// --- page scripts ---
+
+use jev_pilot::browser::input;
+
+/// The extension lets a page script through only when it is, byte for byte,
+/// one of the engine's own, so no script is built with numbers in it: the
+/// quiet watch after a command is a fixed declaration given its window and
+/// cap as arguments, run in the isolated world.
+#[test]
+fn the_quiet_watch_is_a_fixed_script_given_its_numbers() {
+    let (script, mut engine) = engine_after_read();
+    script_settle(&script, 3);
+
+    engine.perform(&BrowserCommand::Submit).expect("performs");
+
+    let calls = script.params_of("Runtime.callFunctionOn");
+    let watch = calls
+        .iter()
+        .find(|c| c["functionDeclaration"] == input::QUIET_WITHIN)
+        .expect("the watch is called");
+    assert_eq!(watch["arguments"], json!([{"value": 100}, {"value": 3000}]));
+    assert_eq!(watch["executionContextId"], 41);
+    assert_eq!(watch["awaitPromise"], true);
+    assert!(script.params_of("Runtime.evaluate").is_empty());
+}
+
+/// A read samples how long the page has been quiet with a fixed script too.
+#[test]
+fn a_read_samples_the_quiet_with_a_fixed_script() {
+    let (script, mut engine) = engine_after_read();
+    script_read(&script);
+    engine.read().expect("reads");
+    let calls = script.params_of("Runtime.callFunctionOn");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c["functionDeclaration"] == input::QUIET_NOW && c["arguments"] == json!([])),
+        "{calls:?}"
+    );
+    assert!(script.params_of("Runtime.evaluate").is_empty());
+}
+
+/// One list holds every script the engine can send a page, for the
+/// extension's allow list to be checked against.
+#[test]
+fn the_page_scripts_are_listed_in_one_place() {
+    assert_eq!(
+        input::PAGE_SCRIPTS,
+        [
+            input::CONTAINS,
+            input::SELECT_OPTION,
+            input::READ_VALUE,
+            input::QUIET_NOW,
+            input::QUIET_WITHIN,
+        ]
+    );
+    for script in input::PAGE_SCRIPTS {
+        assert!(script.trim_start().starts_with("function"), "{script}");
+    }
 }
