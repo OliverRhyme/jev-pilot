@@ -1092,6 +1092,117 @@ mod serving {
         first.done.join().unwrap().expect("ends cleanly");
     }
 
+    /// A raw connection to the host at `place`, once it is listening.
+    fn raw(place: &Place) -> Stream {
+        let started = Instant::now();
+        loop {
+            if let Ok(stream) = Stream::connect(place.name().unwrap()) {
+                return stream;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the host listens"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn first_frame(stream: &mut Stream) -> serde_json::Value {
+        let frame = bridge::decode(stream, ByteOrder::Little)
+            .expect("reads")
+            .expect("a frame");
+        serde_json::from_slice(&frame).expect("JSON")
+    }
+
+    fn audit_events(audit: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(audit.join("audit.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("JSON"))
+            .collect()
+    }
+
+    /// The host checks a connection before it reads anything from it: one
+    /// that fails is told so where a nonce would have been.
+    #[test]
+    fn the_host_checks_a_run_before_reading_from_it() {
+        let first = place();
+        let mut refusing = host_at(&first, Arc::new(Unknown));
+        let mut stream = raw(&first);
+        assert_eq!(first_frame(&mut stream)["type"], "refused");
+        drop(stream);
+        drop(refusing.stdin.take());
+        refusing.done.join().unwrap().expect("ends cleanly");
+
+        let other = place();
+        let mut passing = host_at(&other, Arc::new(Vouched));
+        let mut stream = raw(&other);
+        assert_eq!(first_frame(&mut stream)["type"], "nonce");
+        drop(stream);
+        drop(passing.stdin.take());
+        passing.done.join().unwrap().expect("ends cleanly");
+    }
+
+    /// An echo of another nonce is refused, and audited.
+    #[test]
+    fn a_wrong_echo_is_refused_and_audited() {
+        let place = place();
+        let mut host = host_at(&place, Arc::new(Vouched));
+        let mut stream = raw(&place);
+        assert_eq!(first_frame(&mut stream)["type"], "nonce");
+        let echo = json!({"type": "echo", "nonce": "00".repeat(32), "goal": "x", "sites": []});
+        stream
+            .write_all(&bridge::encode(
+                echo.to_string().as_bytes(),
+                ByteOrder::Little,
+            ))
+            .expect("writes");
+        assert_eq!(
+            first_frame(&mut stream),
+            json!({"type": "refused", "check": "nonce: not echoed"})
+        );
+        drop(stream);
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("ends cleanly");
+        let events = audit_events(&host.audit);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["event"], "refused");
+        assert_eq!(events[0]["check"], "nonce: not echoed");
+    }
+
+    /// The host checks the run again after its echo: a run whose facts have
+    /// changed by then (on macOS, another process used the socket) is
+    /// refused, and audited.
+    #[test]
+    fn a_run_whose_facts_change_after_its_echo_is_refused() {
+        use super::run_side::Changing;
+        let place = place();
+        let mut host = host_at(
+            &place,
+            Arc::new(Changing(std::sync::atomic::AtomicU32::new(0))),
+        );
+        wait_for("the host", || {
+            Stream::connect(place.name().unwrap()).is_ok()
+        });
+        let error = run_at(&place, "x").err().expect("refused");
+        assert!(
+            error
+                .to_string()
+                .contains("audit token: not the expected value"),
+            "{error}"
+        );
+        drop(host.stdin.take());
+        host.done.join().unwrap().expect("ends cleanly");
+        let events = audit_events(&host.audit);
+        assert!(
+            events
+                .iter()
+                .any(|e| e["event"] == "refused"
+                    && e["check"] == "audit token: not the expected value"),
+            "{events:?}"
+        );
+    }
+
     /// `status` asks whether a verified host answers, without taking the
     /// bridge or telling the extension anything.
     #[test]
