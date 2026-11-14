@@ -21,6 +21,6 @@ mod windows;
 #[cfg(windows)]
 pub use windows::{
     KnownFolder, Process, Signer, authenticode_signer, current_account, current_session,
-    current_user_sid, final_path, is_elevated, known_folder, parent_process_id, process_image,
-    session_account,
+    current_user_sid, final_path, is_elevated, known_folder, owner_sid, parent_process_id,
+    process_image, session_account,
 };

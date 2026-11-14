@@ -64,6 +64,14 @@ impl SystemFolders {
     /// never from the environment, which a program running as the owner
     /// can change for Chrome and so for the host it starts.
     ///
+    /// Program Files is a literal path in the registry. ProgramData is
+    /// `%SystemDrive%\ProgramData` there, and Windows expands it from the
+    /// caller's environment: only the audit log is under it, which on
+    /// Windows the owner can write anyway, while everything the bridge's
+    /// checks rest on (install.json, the binary, the extension) is under
+    /// Program Files. A protected install refuses any of its folders that
+    /// is there already and is not owned by the system.
+    ///
     /// # Errors
     /// When Windows cannot say.
     #[cfg(windows)]
@@ -1246,6 +1254,12 @@ pub fn apply(steps: &[Step], installer: &Installer, kind: InstallKind) -> io::Re
         {
             check_ancestors(target, &dir_meta, &member_of).map_err(io::Error::other)?;
         }
+        #[cfg(windows)]
+        if kind == InstallKind::Protected
+            && let Step::CreateDir { path, .. } = step
+        {
+            check_windows_folder(path)?;
+        }
         apply_one(step, installer, &mut said)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", describe(step))))?;
     }
@@ -1270,6 +1284,38 @@ fn groups_of(installer: &Installer) -> io::Result<Vec<u32>> {
         .split_whitespace()
         .filter_map(|g| g.parse().ok())
         .collect())
+}
+
+/// Whether a Windows folder's owner, by SID, is one only an administrator
+/// acts as: Administrators, SYSTEM or TrustedInstaller.
+#[must_use]
+pub fn trusted_owner(sid: &str) -> bool {
+    matches!(
+        sid,
+        "S-1-5-32-544"
+            | "S-1-5-18"
+            | "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+    )
+}
+
+/// On Windows, whether a folder of a protected install that is there
+/// already is owned by the system: one the owner made beforehand, in
+/// ProgramData for instance, would be the owner's to change.
+#[cfg(windows)]
+fn check_windows_folder(path: &Path) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let owner = jev_pilot_os::owner_sid(path)?;
+    if trusted_owner(&owner) {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "{} is owned by {owner}, not an administrator, so a program running as you could \
+             change what jev-pilot installs in it: remove it and run the install again",
+            path.display()
+        )))
+    }
 }
 
 /// What a step writes, whose folders must be safe.

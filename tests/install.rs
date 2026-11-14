@@ -1634,3 +1634,25 @@ fn a_file_the_install_makes_is_never_reached_through_a_link() {
     assert!(make_file(&dir.join("audit.log.2"), 0o640, Owner::User).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// On Windows a folder of the install's that is there already must be
+/// owned by Administrators, SYSTEM or TrustedInstaller: one the owner made
+/// beforehand is the owner's to change.
+#[test]
+fn a_windows_install_folder_must_be_owned_by_the_system() {
+    use jev_pilot::browser::install::trusted_owner;
+    for sid in [
+        "S-1-5-32-544",
+        "S-1-5-18",
+        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+    ] {
+        assert!(trusted_owner(sid), "{sid}");
+    }
+    for sid in [
+        "S-1-5-21-1004336348-1177238915-682003330-1001",
+        "S-1-1-0",
+        "",
+    ] {
+        assert!(!trusted_owner(sid), "{sid}");
+    }
+}

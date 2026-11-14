@@ -11,7 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
     ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
-use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+};
 use windows_sys::Win32::Security::Cryptography::{
     CERT_NAME_RDN_TYPE, CERT_NAME_STR_REVERSE_FLAG, CERT_X500_NAME_STR, CertGetNameStringW,
 };
@@ -22,8 +24,8 @@ use windows_sys::Win32::Security::WinTrust::{
     WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, LookupAccountSidW, PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
-    TokenElevation, TokenUser,
+    GetTokenInformation, LookupAccountSidW, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
@@ -344,6 +346,48 @@ pub fn parent_process_id(pid: u32) -> io::Result<u32> {
         io::ErrorKind::NotFound,
         format!("no process {pid}"),
     ))
+}
+
+/// The string form of the SID that owns the file or folder at `path`.
+///
+/// # Errors
+///
+/// When its security cannot be read.
+#[allow(unsafe_code)]
+pub fn owner_sid(path: &Path) -> io::Result<String> {
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect();
+    let mut owner: PSID = ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: `wide` is a NUL-terminated path that outlives the call;
+    // `owner` and `descriptor` are valid places for what it returns, and
+    // the other out-pointers are null, which the call allows.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &raw mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &raw mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(
+            i32::try_from(status).unwrap_or(-1),
+        ));
+    }
+    // `owner` points into `descriptor`, freed below once it is read.
+    let sid = sid_string(owner);
+    // SAFETY: `descriptor` was allocated by GetNamedSecurityInfoW, which
+    // says to free it with LocalFree; nothing points into it after this.
+    unsafe { LocalFree(descriptor.cast()) };
+    sid
 }
 
 /// The account signed in to this process's session, as `DOMAIN\name`.
