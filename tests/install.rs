@@ -284,21 +284,13 @@ use jev_pilot::browser::install::{
 const CHROME_MAC: &str = "/Library/Google/Chrome/NativeMessagingHosts";
 const CHROME_LINUX: &str = "/etc/opt/chrome/native-messaging-hosts";
 
-/// The host is registered only for the browsers it serves: on Linux each
-/// known install, whose channels share a folder (and Brave reads Chrome's);
-/// on macOS and Windows Chrome alone, which is all the host's check of its
-/// parent accepts there.
+/// The host is registered only for the browser it serves, Google Chrome,
+/// whose channels share one folder: all the host's check of its parent
+/// accepts.
 #[test]
 fn the_host_is_registered_for_the_browsers_it_serves() {
     assert_eq!(system_host_dirs(Os::MacOs), [PathBuf::from(CHROME_MAC)]);
-    assert_eq!(
-        system_host_dirs(Os::Linux),
-        [
-            PathBuf::from(CHROME_LINUX),
-            "/etc/chromium/native-messaging-hosts".into(),
-            "/etc/opt/edge/native-messaging-hosts".into(),
-        ]
-    );
+    assert_eq!(system_host_dirs(Os::Linux), [PathBuf::from(CHROME_LINUX)]);
     assert_eq!(system_host_dirs(Os::Windows), Vec::<PathBuf>::new());
 }
 
@@ -324,14 +316,12 @@ fn each_user_level_folder_maps_to_the_system_folder_its_browser_reads() {
         );
     }
     let linux = user_host_dirs(Os::Linux, Path::new("/home/owner"));
+    assert_eq!(linux.len(), 4, "Chrome's channels alone: {linux:?}");
     for (user, system) in [
         ("google-chrome", CHROME_LINUX),
         ("google-chrome-beta", CHROME_LINUX),
         ("google-chrome-unstable", CHROME_LINUX),
         ("google-chrome-canary", CHROME_LINUX),
-        ("chromium", "/etc/chromium/native-messaging-hosts"),
-        ("microsoft-edge", "/etc/opt/edge/native-messaging-hosts"),
-        ("BraveSoftware/Brave-Browser", CHROME_LINUX),
     ] {
         let user = PathBuf::from(format!("/home/owner/.config/{user}/NativeMessagingHosts"));
         assert!(
@@ -470,15 +460,12 @@ HKEY_CURRENT_USER\\SOFTWARE\\Google\\Chrome\\NativeMessagingHosts\\com.example.e
 }
 
 #[test]
-fn linux_turns_off_user_level_hosts_with_a_policy_file_per_family() {
+fn linux_turns_off_user_level_hosts_with_a_policy_file_for_chrome() {
     assert_eq!(
         linux_policy_files(),
-        [
-            PathBuf::from("/etc/opt/chrome/policies/managed/jev-pilot.json"),
-            "/etc/chromium/policies/managed/jev-pilot.json".into(),
-            "/etc/opt/edge/policies/managed/jev-pilot.json".into(),
-            "/etc/brave/policies/managed/jev-pilot.json".into(),
-        ]
+        [PathBuf::from(
+            "/etc/opt/chrome/policies/managed/jev-pilot.json"
+        )]
     );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&linux_policy()).expect("JSON"),
@@ -577,10 +564,7 @@ fn a_protected_linux_install_plan() {
     for file in [
         "/usr/local/share/jev-pilot/extension/manifest.json",
         "/etc/opt/chrome/native-messaging-hosts/dev.jevpilot.bridge.json",
-        "/etc/chromium/native-messaging-hosts/dev.jevpilot.bridge.json",
-        "/etc/opt/edge/native-messaging-hosts/dev.jevpilot.bridge.json",
         "/etc/opt/chrome/policies/managed/jev-pilot.json",
-        "/etc/brave/policies/managed/jev-pilot.json",
     ] {
         assert!(written.contains(&PathBuf::from(file)), "{file} is written");
     }
@@ -993,8 +977,8 @@ fn a_development_install_with_no_browser_says_so() {
     );
     assert!(
         steps.contains(&Step::Tell(
-            "no Chrome, Chromium, Edge or Brave profile was found in your home, so the host is \
-         registered with none: run the install again once one has started"
+            "no Google Chrome profile was found in your home, so the host is registered with \
+             none: run the install again once Chrome has started"
                 .into()
         ))
     );

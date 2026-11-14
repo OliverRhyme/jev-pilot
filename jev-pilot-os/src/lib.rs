@@ -13,7 +13,7 @@
 mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::set_real_and_effective_gid;
+pub use macos::{PidVersions, pid_versions, set_real_and_effective_gid};
 
 #[cfg(windows)]
 mod windows;

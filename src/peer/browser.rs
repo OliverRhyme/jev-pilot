@@ -16,9 +16,11 @@
 
 use std::path::{Path, PathBuf};
 
-/// The code requirement a macOS browser's running code must satisfy: Chrome's
-/// own designated requirement, with Chrome for Testing's identifier added.
-const MACOS_BROWSER: &str = r#"(identifier "com.google.Chrome" or identifier "com.google.Chrome.beta" or identifier "com.google.Chrome.dev" or identifier "com.google.Chrome.canary" or identifier "com.google.chrome.for.testing") and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "EQHXZ8M8AV""#;
+/// The code requirement a macOS browser's running code must satisfy: Google
+/// Chrome's own designated requirement. Chrome for Testing is left out: it
+/// loads any unpacked extension it is told to, so a fake with jev-pilot's ID
+/// is easy there.
+const MACOS_BROWSER: &str = r#"(identifier "com.google.Chrome" or identifier "com.google.Chrome.beta" or identifier "com.google.Chrome.dev" or identifier "com.google.Chrome.canary") and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "EQHXZ8M8AV""#;
 
 /// The code requirement a macOS browser must satisfy.
 #[must_use]
@@ -26,17 +28,14 @@ pub fn macos_browser_requirement() -> &'static str {
     MACOS_BROWSER
 }
 
-/// The browser installs jev-pilot knows on Linux, as their packages install
-/// them.
+/// Google Chrome's installs on Linux, as its packages install them.
+/// Chromium, Edge and Brave are left out: they load any unpacked extension
+/// they are told to, so a fake with jev-pilot's ID is easy there.
 const LINUX_BROWSERS: &[&str] = &[
     "/opt/google/chrome/chrome",
     "/opt/google/chrome-beta/chrome",
     "/opt/google/chrome-unstable/chrome",
     "/opt/google/chrome-canary/chrome",
-    "/usr/lib/chromium/chromium",
-    "/usr/lib/chromium-browser/chromium-browser",
-    "/opt/microsoft/msedge/msedge",
-    "/opt/brave.com/brave/brave",
 ];
 
 /// What the OS says of a file or folder.
@@ -48,22 +47,34 @@ pub struct FileFacts {
     pub mode: u32,
     /// Whether it is a symbolic link.
     pub is_link: bool,
+    /// The device it is on.
+    pub dev: u64,
+    /// Its inode there.
+    pub ino: u64,
 }
 
-/// Whether `exe` is a browser on Linux: one of the known installs, and it
-/// and every folder above it root's, not writable by group or others, and
-/// not a link. `facts` reports a path, or `None` when it is missing.
+/// Which Google Chrome install the file the parent runs is, by its device
+/// and inode (`exe`, from `stat` of `/proc/<pid>/exe`), when that install
+/// and every folder above it are root's, not writable by group or others,
+/// and not links. `facts` reports a path, without following a link, or
+/// `None` when it is missing.
+///
+/// Comparing the file itself, not the link's text, needs no trust in a
+/// name. A Chrome still running a file an upgrade replaced matches none,
+/// and is refused until it restarts.
 ///
 /// # Errors
-/// Why it is not.
-pub fn linux_browser(exe: &Path, facts: &dyn Fn(&Path) -> Option<FileFacts>) -> Result<(), String> {
-    if !LINUX_BROWSERS.iter().any(|known| Path::new(known) == exe) {
-        return Err(format!(
-            "{} is not a browser jev-pilot knows",
-            exe.display()
-        ));
-    }
-    for path in exe.ancestors() {
+/// Why it is not one.
+pub fn linux_browser(
+    exe: (u64, u64),
+    facts: &dyn Fn(&Path) -> Option<FileFacts>,
+) -> Result<PathBuf, String> {
+    let known = LINUX_BROWSERS
+        .iter()
+        .map(Path::new)
+        .find(|path| facts(path).is_some_and(|f| (f.dev, f.ino) == exe))
+        .ok_or("it runs no Google Chrome install jev-pilot knows")?;
+    for path in known.ancestors() {
         let found = facts(path).ok_or_else(|| format!("{} is missing", path.display()))?;
         if found.is_link {
             return Err(format!("{} is a link", path.display()));
@@ -75,7 +86,7 @@ pub fn linux_browser(exe: &Path, facts: &dyn Fn(&Path) -> Option<FileFacts>) -> 
             return Err(format!("{} can be written by others", path.display()));
         }
     }
-    Ok(())
+    Ok(known.to_owned())
 }
 
 /// A Windows path as text, with a `\\?\` prefix set aside.
@@ -112,6 +123,9 @@ pub fn windows_browser(
             "{} is not under Program Files",
             grandparent.display()
         ));
+    }
+    if !browser.ends_with("\\chrome.exe") {
+        return Err(format!("{} is not Chrome", grandparent.display()));
     }
     match signer {
         Some(subject) if subject.split(", ").any(|part| part == "O=Google LLC") => Ok(()),
@@ -190,6 +204,23 @@ fn macos() -> BrowserParent {
     let verdict = code
         .check_validity(Flags::NONE, &requirement)
         .map_err(|_| "it is not Chrome signed by Google".to_owned());
+    // The code checked is what the parent runs now. A parent that ran
+    // another program in place since it started the host has a newer pid
+    // version than the one the host recorded of it at its start.
+    let unchanged = match (
+        jev_pilot_os::pid_versions(std::process::id()),
+        jev_pilot_os::pid_versions(pid),
+    ) {
+        (Ok(mine), Ok(parent)) => parent.version == mine.parent_at_start,
+        _ => false,
+    };
+    if !unchanged {
+        return refused(
+            Some(pid),
+            exe,
+            "the program that started the host has since run another program",
+        );
+    }
     // Still the same parent: had it gone, the host would have a new one.
     if std::os::unix::process::parent_id() != pid {
         return refused(Some(pid), exe, "the program that started the host has gone");
@@ -212,19 +243,21 @@ fn linux() -> BrowserParent {
             "the program that started the host has gone",
         );
     }
-    // The kernel lets one process read another's executable only when its
-    // filesystem ids match the other's, and the setgid host's gid is the
-    // install's group: it reads as the owner's own gid, then goes back.
+    // The kernel lets one process look at another's executable only when
+    // its filesystem ids match the other's, and the setgid host's gid is
+    // the install's group: it looks as the owner's own gid, then goes back.
     let held = nix::unistd::setfsgid(nix::unistd::getgid());
-    let exe = std::fs::read_link(format!("/proc/{pid}/exe"));
+    let link = format!("/proc/{pid}/exe");
+    let file = std::fs::metadata(&link).map(|meta| (meta.dev(), meta.ino()));
+    let named = std::fs::read_link(&link).ok();
     nix::unistd::setfsgid(held);
-    let Ok(exe) = exe else {
-        return refused(Some(pid), None, "the parent's executable cannot be read");
+    let Ok(file) = file else {
+        return refused(Some(pid), named, "the parent's executable cannot be read");
     };
     if std::os::unix::process::parent_id() != pid {
         return refused(
             Some(pid),
-            Some(exe),
+            named,
             "the program that started the host has gone",
         );
     }
@@ -233,13 +266,17 @@ fn linux() -> BrowserParent {
             uid: meta.uid(),
             mode: meta.mode(),
             is_link: meta.file_type().is_symlink(),
+            dev: meta.dev(),
+            ino: meta.ino(),
         })
     };
-    let verdict = linux_browser(&exe, &facts);
-    BrowserParent {
-        pid: Some(pid),
-        exe: Some(exe),
-        verdict,
+    match linux_browser(file, &facts) {
+        Ok(chrome) => BrowserParent {
+            pid: Some(pid),
+            exe: Some(chrome),
+            verdict: Ok(()),
+        },
+        Err(why) => refused(Some(pid), named, why),
     }
 }
 

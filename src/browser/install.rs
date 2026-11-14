@@ -321,18 +321,15 @@ struct Family {
     /// The preference domain a macOS configuration profile sets its policy
     /// in.
     macos_domain: &'static str,
-    /// Whether the host serves it on macOS and Windows, where its check of
-    /// the browser that started it accepts Chrome alone. On Linux it serves
-    /// every family here.
-    served_beyond_linux: bool,
+    /// Whether the host serves it: its check of the browser that started it
+    /// accepts Google Chrome alone, on every system.
+    served: bool,
 }
 
-/// The families the host serves on `os`, and so those the install registers
-/// for, sets the policy for, and moves the owner's hosts of.
-fn served(os: Os) -> impl Iterator<Item = &'static Family> {
-    FAMILIES
-        .iter()
-        .filter(move |family| os == Os::Linux || family.served_beyond_linux)
+/// The families the host serves, and so those the install registers for,
+/// sets the policy for, and moves the owner's hosts of.
+fn served() -> impl Iterator<Item = &'static Family> {
+    FAMILIES.iter().filter(|family| family.served)
 }
 
 const CHROME_MAC_HOSTS: &str = "/Library/Google/Chrome/NativeMessagingHosts";
@@ -358,7 +355,7 @@ static FAMILIES: &[Family] = &[
         linux_policy: "/etc/opt/chrome/policies/managed",
         windows_policy: r"SOFTWARE\Policies\Google\Chrome",
         macos_domain: "com.google.Chrome",
-        served_beyond_linux: true,
+        served: true,
     },
     Family {
         macos_hosts: "/Library/Application Support/Chromium/NativeMessagingHosts",
@@ -369,7 +366,7 @@ static FAMILIES: &[Family] = &[
         linux_policy: "/etc/chromium/policies/managed",
         windows_policy: r"SOFTWARE\Policies\Chromium",
         macos_domain: "org.chromium.Chromium",
-        served_beyond_linux: false,
+        served: false,
     },
     Family {
         macos_hosts: "/Library/Microsoft/Edge/NativeMessagingHosts",
@@ -385,7 +382,7 @@ static FAMILIES: &[Family] = &[
         linux_policy: "/etc/opt/edge/policies/managed",
         windows_policy: r"SOFTWARE\Policies\Microsoft\Edge",
         macos_domain: "com.microsoft.Edge",
-        served_beyond_linux: false,
+        served: false,
     },
     Family {
         macos_hosts: CHROME_MAC_HOSTS,
@@ -398,7 +395,7 @@ static FAMILIES: &[Family] = &[
         linux_policy: "/etc/brave/policies/managed",
         windows_policy: r"SOFTWARE\Policies\BraveSoftware\Brave",
         macos_domain: "com.brave.Browser",
-        served_beyond_linux: false,
+        served: false,
     },
 ];
 
@@ -407,7 +404,7 @@ static FAMILIES: &[Family] = &[
 #[must_use]
 pub fn system_host_dirs(os: Os) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    for family in served(os) {
+    for family in served() {
         let dir = PathBuf::from(match os {
             Os::MacOs => family.macos_hosts,
             Os::Linux => family.linux_hosts,
@@ -428,7 +425,7 @@ pub fn system_host_dirs(os: Os) -> Vec<PathBuf> {
 pub fn user_host_dirs(os: Os, home: &Path) -> Vec<(PathBuf, PathBuf)> {
     let home = home.to_string_lossy();
     let mut dirs = Vec::new();
-    for family in served(os) {
+    for family in served() {
         let (base, users, system) = match os {
             Os::MacOs => (
                 join(os, &home, &["Library", "Application Support"]),
@@ -557,15 +554,13 @@ pub fn read_owners_host(path: &Path, uid: u32) -> io::Result<String> {
 /// Chrome's; Edge reads its own, then Chromium's, then Chrome's.
 #[must_use]
 pub fn windows_host_keys() -> Vec<&'static str> {
-    served(Os::Windows)
-        .filter_map(|f| f.windows_hosts)
-        .collect()
+    served().filter_map(|f| f.windows_hosts).collect()
 }
 
 /// The machine policy keys on Windows, one per family.
 #[must_use]
 pub fn windows_policy_keys() -> Vec<&'static str> {
-    served(Os::Windows).map(|f| f.windows_policy).collect()
+    served().map(|f| f.windows_policy).collect()
 }
 
 /// `reg.exe` arguments registering the host under `hive` (`HKLM`, or
@@ -661,8 +656,7 @@ pub fn reg_hosts_in(output: &str) -> Vec<(String, PathBuf)> {
 /// family.
 #[must_use]
 pub fn linux_policy_files() -> Vec<PathBuf> {
-    FAMILIES
-        .iter()
+    served()
         .map(|f| join(Os::Linux, f.linux_policy, &["jev-pilot.json"]))
         .collect()
 }
@@ -699,7 +693,7 @@ pub fn linux_policy_holds(text: &str) -> bool {
 /// approved the profile.
 #[must_use]
 pub fn managed_preferences() -> Vec<PathBuf> {
-    served(Os::MacOs)
+    served()
         .map(|f| {
             PathBuf::from(format!(
                 "/Library/Managed Preferences/{}.plist",
@@ -722,7 +716,7 @@ pub fn mobileconfig() -> String {
         "BBC10C2D-1632-481E-97F4-1614464FDF9A",
     ];
     let mut payloads = String::new();
-    for (family, uuid) in served(Os::MacOs).zip(UUIDS) {
+    for (family, uuid) in served().zip(UUIDS) {
         let domain = family.macos_domain;
         let _ = write!(
             payloads,
@@ -1084,9 +1078,8 @@ impl Planner {
             (_, UserHosts::Register(dirs)) if !self.protected => {
                 if dirs.is_empty() {
                     self.steps.push(Step::Tell(
-                        "no Chrome, Chromium, Edge or Brave profile was found in your home, so \
-                         the host is registered with none: run the install again once one has \
-                         started"
+                        "no Google Chrome profile was found in your home, so the host is \
+                         registered with none: run the install again once Chrome has started"
                             .into(),
                     ));
                 }
