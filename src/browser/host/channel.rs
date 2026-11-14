@@ -28,8 +28,9 @@ pub const SOCKET_NAME: &str = "bridge.sock";
 pub fn socket_dir(os: Os, home: &Path, env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
     match os {
         Os::MacOs => home.join("Library/Application Support/jev-pilot/run"),
-        Os::Linux | Os::Windows => match env("XDG_RUNTIME_DIR").map(PathBuf::from) {
-            Some(runtime) if runtime.is_absolute() => runtime.join("jev-pilot"),
+        // Absolute as Linux sees it, whatever system this runs on.
+        Os::Linux | Os::Windows => match env("XDG_RUNTIME_DIR") {
+            Some(runtime) if runtime.starts_with('/') => PathBuf::from(runtime).join("jev-pilot"),
             _ => home.join(".local/state/jev-pilot/run"),
         },
     }
