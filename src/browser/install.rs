@@ -655,6 +655,43 @@ pub fn linux_policy() -> String {
     serde_json::to_string_pretty(&json!({ USER_LEVEL_HOSTS: false })).unwrap_or_default()
 }
 
+/// The value `name` has in the output of `reg query <key> /v <name>`, as a
+/// DWORD.
+#[must_use]
+pub fn reg_dword_in(output: &str, name: &str) -> Option<u32> {
+    output.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        if fields.next()? != name || fields.next()? != "REG_DWORD" {
+            return None;
+        }
+        u32::from_str_radix(fields.next()?.trim_start_matches("0x"), 16).ok()
+    })
+}
+
+/// Whether a Linux policy file turns user-level hosts off.
+#[must_use]
+pub fn linux_policy_holds(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|policy| policy.get(USER_LEVEL_HOSTS).and_then(Value::as_bool))
+        == Some(false)
+}
+
+/// Where macOS puts each browser's managed preferences once the owner has
+/// approved the profile.
+#[must_use]
+pub fn managed_preferences() -> Vec<PathBuf> {
+    FAMILIES
+        .iter()
+        .map(|f| {
+            PathBuf::from(format!(
+                "/Library/Managed Preferences/{}.plist",
+                f.macos_domain
+            ))
+        })
+        .collect()
+}
+
 /// The macOS configuration profile that turns user-level hosts off: one
 /// payload per family's preference domain. macOS honours the policy only as
 /// a mandatory one, which on an unmanaged Mac a profile the owner approves
@@ -1307,7 +1344,7 @@ fn apply_one(step: &Step, installer: &Installer, said: &mut Vec<String>) -> io::
         }
         Step::Sign { path } => {
             run(
-                "codesign",
+                Tool::Codesign,
                 &["--force", "-s", "-", "-o", "runtime"],
                 Some(path),
             )?;
@@ -1348,10 +1385,10 @@ fn apply_one(step: &Step, installer: &Installer, said: &mut Vec<String>) -> io::
         }
         Step::Reg(args) => {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            run("reg", &args, None)?;
+            run(Tool::Reg, &args, None)?;
         }
         Step::OpenProfile { path } => {
-            let _ = run("open", &[], Some(path));
+            let _ = run(Tool::Open, &[], Some(path));
             said.push(format!(
                 "opened {}: approve it in System Settings › General › Device Management",
                 path.display()
@@ -1447,9 +1484,57 @@ fn write_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     std::fs::rename(&fresh, path)
 }
 
-/// Run `program` with `args` (and `path` last), failing unless it succeeds.
-fn run(program: &str, args: &[&str], path: Option<&Path>) -> io::Result<()> {
-    let mut command = std::process::Command::new(program);
+/// A program an install runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Tool {
+    /// macOS's code signing tool.
+    Codesign,
+    /// macOS's `open`.
+    Open,
+    /// macOS's directory service group editor.
+    Dseditgroup,
+    /// Linux's `groupadd`.
+    Groupadd,
+    /// macOS's property list tool.
+    Plutil,
+    /// Windows's registry tool.
+    Reg,
+}
+
+/// Where `tool` is: a full path, never found through `PATH`, which the
+/// owner sets, nor (on Windows) beside the running binary, where Windows
+/// looks first. `system32` is Windows's System32 folder, as the system says.
+#[must_use]
+pub fn tool_path(tool: Tool, system32: &str) -> PathBuf {
+    match tool {
+        Tool::Codesign => "/usr/bin/codesign".into(),
+        Tool::Open => "/usr/bin/open".into(),
+        Tool::Dseditgroup => "/usr/sbin/dseditgroup".into(),
+        Tool::Groupadd => "/usr/sbin/groupadd".into(),
+        Tool::Plutil => "/usr/bin/plutil".into(),
+        Tool::Reg => join(Os::Windows, system32, &["reg.exe"]),
+    }
+}
+
+/// Where `tool` is on this system.
+///
+/// # Errors
+/// When Windows cannot say where System32 is.
+pub fn tool_here(tool: Tool) -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    let system32 = jev_pilot_os::known_folder(jev_pilot_os::KnownFolder::System)?
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(not(windows))]
+    let system32 = String::new();
+    Ok(tool_path(tool, &system32))
+}
+
+/// Run `tool` with `args` (and `path` last), failing unless it succeeds.
+fn run(tool: Tool, args: &[&str], path: Option<&Path>) -> io::Result<()> {
+    let program = tool_here(tool)?;
+    let mut command = std::process::Command::new(&program);
     command.args(args);
     if let Some(path) = path {
         command.arg(path);
@@ -1459,7 +1544,8 @@ fn run(program: &str, args: &[&str], path: Option<&Path>) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::other(format!(
-            "{program} failed: {}",
+            "{} failed: {}",
+            program.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         )))
     }
@@ -1499,9 +1585,13 @@ fn ensure_group(said: &mut Vec<String>) -> io::Result<()> {
         return Ok(());
     }
     if cfg!(target_os = "macos") {
-        run("dseditgroup", &["-o", "create", "-r", GROUP, GROUP], None)?;
+        run(
+            Tool::Dseditgroup,
+            &["-o", "create", "-r", GROUP, GROUP],
+            None,
+        )?;
     } else {
-        run("groupadd", &["--system", GROUP], None)?;
+        run(Tool::Groupadd, &["--system", GROUP], None)?;
     }
     said.push(format!("created the {GROUP} group"));
     Ok(())
@@ -1523,7 +1613,7 @@ fn pin(kind: InstallKind, binary: &Path, installer: &Installer) -> io::Result<Ex
     };
     match (Os::current(), installer) {
         (Os::MacOs, Installer::Uid(uid)) => {
-            let report = std::process::Command::new("codesign")
+            let report = std::process::Command::new(tool_here(Tool::Codesign)?)
                 .args(["-d", "-vvv"])
                 .arg(&path)
                 .output()?;

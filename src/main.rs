@@ -1417,9 +1417,10 @@ mod bridge {
             return Ok(UserHosts::Register(dirs));
         }
         if os == Os::Windows {
+            let reg = install::tool_here(install::Tool::Reg)?;
             let mut found = Vec::new();
             for key in install::windows_host_keys() {
-                let output = std::process::Command::new("reg")
+                let output = std::process::Command::new(&reg)
                     .args(["query", &format!(r"HKCU\{key}"), "/s"])
                     .output()?;
                 for (name, manifest) in
@@ -1434,7 +1435,7 @@ mod bridge {
             }
             // One the machine already has under that name is a vendor's.
             let at_machine_level = |host: &install::RegistryHost| {
-                std::process::Command::new("reg")
+                std::process::Command::new(&reg)
                     .args(["query", &format!(r"HKLM\{}\{}", host.key, host.name)])
                     .output()
                     .is_ok_and(|o| o.status.success())
@@ -1490,22 +1491,46 @@ mod bridge {
         Ok(())
     }
 
-    /// Whether Chrome's policy turning user-level hosts off is in place.
+    /// Whether Chrome's policy turning user-level hosts off is in place,
+    /// for every browser: read for its value, not its presence.
     fn policy_in_place(os: Os) -> bool {
         match os {
-            // A profile the owner approved puts it in the managed
-            // preferences.
-            Os::MacOs => Path::new("/Library/Managed Preferences/com.google.Chrome.plist").exists(),
-            Os::Linux => install::linux_policy_files().iter().all(|p| p.exists()),
-            Os::Windows => std::process::Command::new("reg")
-                .args([
-                    "query",
-                    &format!(r"HKLM\{}", install::windows_policy_keys()[0]),
-                    "/v",
-                    "NativeMessagingUserLevelHosts",
-                ])
-                .output()
-                .is_ok_and(|o| o.status.success()),
+            Os::MacOs => install::managed_preferences().iter().all(|plist| {
+                install::tool_here(install::Tool::Plutil).is_ok_and(|plutil| {
+                    std::process::Command::new(plutil)
+                        .args([
+                            "-extract",
+                            "NativeMessagingUserLevelHosts",
+                            "raw",
+                            "-o",
+                            "-",
+                        ])
+                        .arg(plist)
+                        .output()
+                        .is_ok_and(|o| o.status.success() && o.stdout.trim_ascii() == b"false")
+                })
+            }),
+            Os::Linux => install::linux_policy_files()
+                .iter()
+                .all(|file| read(file).is_some_and(|text| install::linux_policy_holds(&text))),
+            Os::Windows => install::tool_here(install::Tool::Reg).is_ok_and(|reg| {
+                install::windows_policy_keys().iter().all(|key| {
+                    std::process::Command::new(&reg)
+                        .args([
+                            "query",
+                            &format!(r"HKLM\{key}"),
+                            "/v",
+                            "NativeMessagingUserLevelHosts",
+                        ])
+                        .output()
+                        .is_ok_and(|o| {
+                            install::reg_dword_in(
+                                &String::from_utf8_lossy(&o.stdout),
+                                "NativeMessagingUserLevelHosts",
+                            ) == Some(0)
+                        })
+                })
+            }),
         }
     }
 

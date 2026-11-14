@@ -1425,3 +1425,51 @@ fn the_binary_is_copied_into_a_new_file_closed_to_others() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The programs an elevated install runs are named by their full paths,
+/// never found through PATH (or, on Windows, beside the binary).
+#[test]
+fn the_programs_an_install_runs_are_named_by_their_full_paths() {
+    use jev_pilot::browser::install::{Tool, tool_path};
+    let system32 = r"C:\Windows\System32";
+    for (tool, path) in [
+        (Tool::Codesign, "/usr/bin/codesign"),
+        (Tool::Open, "/usr/bin/open"),
+        (Tool::Dseditgroup, "/usr/sbin/dseditgroup"),
+        (Tool::Groupadd, "/usr/sbin/groupadd"),
+        (Tool::Plutil, "/usr/bin/plutil"),
+        (Tool::Reg, r"C:\Windows\System32\reg.exe"),
+    ] {
+        assert_eq!(tool_path(tool, system32), PathBuf::from(path), "{tool:?}");
+    }
+}
+
+/// The policy is in place only when it says user-level hosts are off: on
+/// Windows, a DWORD of 0 under each browser's key; on Linux, false in each
+/// browser's file; on macOS, false in each browser's managed preferences.
+#[test]
+fn the_policy_is_read_for_its_value_not_its_presence() {
+    use jev_pilot::browser::install::{linux_policy_holds, managed_preferences, reg_dword_in};
+    let on = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Google\\Chrome\r\n    \
+              NativeMessagingUserLevelHosts    REG_DWORD    0x0\r\n\r\n";
+    let off = on.replace("0x0", "0x1");
+    assert_eq!(reg_dword_in(on, "NativeMessagingUserLevelHosts"), Some(0));
+    assert_eq!(reg_dword_in(&off, "NativeMessagingUserLevelHosts"), Some(1));
+    assert_eq!(reg_dword_in(on, "Other"), None);
+    assert!(linux_policy_holds(
+        r#"{"NativeMessagingUserLevelHosts": false}"#
+    ));
+    assert!(!linux_policy_holds(
+        r#"{"NativeMessagingUserLevelHosts": true}"#
+    ));
+    assert!(!linux_policy_holds("{}"));
+    assert_eq!(
+        managed_preferences(),
+        [
+            PathBuf::from("/Library/Managed Preferences/com.google.Chrome.plist"),
+            "/Library/Managed Preferences/org.chromium.Chromium.plist".into(),
+            "/Library/Managed Preferences/com.microsoft.Edge.plist".into(),
+            "/Library/Managed Preferences/com.brave.Browser.plist".into(),
+        ]
+    );
+}
