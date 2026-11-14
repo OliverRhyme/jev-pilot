@@ -103,3 +103,52 @@ export function read(message) {
       return null;
   }
 }
+
+/**
+ * A DOMSnapshot without the value of any password field: each `<input
+ * type=password>` loses its `inputValue` entry, and the words it held are
+ * blanked in the snapshot's string table. The run never reads a password's
+ * value; this keeps it from leaving Chrome at all. A string the page also
+ * uses elsewhere is blanked there too, which costs at most a word of the
+ * page and never a secret.
+ */
+export function withoutPasswords(snapshot) {
+  const strings = snapshot?.strings;
+  if (!Array.isArray(strings) || !Array.isArray(snapshot.documents)) {
+    return snapshot;
+  }
+  const text = (index) => (typeof strings[index] === "string" ? strings[index] : "");
+  for (const document of snapshot.documents) {
+    const nodes = document?.nodes;
+    const values = nodes?.inputValue;
+    if (!values || !Array.isArray(values.index) || !Array.isArray(values.value)) {
+      continue;
+    }
+    const isPassword = (node) => {
+      if (text(nodes.nodeName?.[node]).toUpperCase() !== "INPUT") {
+        return false;
+      }
+      const attributes = nodes.attributes?.[node] ?? [];
+      for (let i = 0; i + 1 < attributes.length; i += 2) {
+        if (text(attributes[i]).toLowerCase() === "type") {
+          return text(attributes[i + 1]).toLowerCase() === "password";
+        }
+      }
+      return false;
+    };
+    const index = [];
+    const value = [];
+    values.index.forEach((node, k) => {
+      if (isPassword(node)) {
+        if (Number.isInteger(values.value[k]) && values.value[k] >= 0) {
+          strings[values.value[k]] = "";
+        }
+      } else {
+        index.push(node);
+        value.push(values.value[k]);
+      }
+    });
+    nodes.inputValue = { index, value };
+  }
+  return snapshot;
+}

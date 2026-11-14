@@ -191,7 +191,8 @@ export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, set
         const debuggee =
           request.session === undefined ? { tabId: request.tab } : { tabId: request.tab, sessionId: request.session };
         try {
-          return await chrome.debugger.sendCommand(debuggee, request.method, request.params ?? {});
+          const result = await chrome.debugger.sendCommand(debuggee, request.method, request.params ?? {});
+          return request.method === "DOMSnapshot.captureSnapshot" ? protocol.withoutPasswords(result) : result;
         } catch (error) {
           throw chromeFailure("chrome", error);
         }

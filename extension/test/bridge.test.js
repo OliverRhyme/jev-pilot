@@ -357,3 +357,37 @@ test("any other failure to attach is passed on in Chrome's words", async () => {
     message: "Another debugger is already attached to the tab with id: 7.",
   });
 });
+
+test("a page snapshot leaves Chrome without the value of any password field", async () => {
+  const { fake, bridge, posted } = bridged();
+  await bridge.receive(started);
+  await attachedTo(fake, bridge, 7);
+  const strings = ["#document", "INPUT", "type", "password", "hunter2", "text", "alice", "PassWord"];
+  fake.when("debugger.sendCommand", () => ({
+    strings,
+    documents: [
+      {
+        nodes: {
+          nodeName: [0, 1, 1, 1],
+          attributes: [[], [2, 3], [2, 5], [2, 7]],
+          inputValue: { index: [1, 2, 3], value: [4, 6, 4] },
+        },
+      },
+    ],
+  }));
+  await bridge.receive({
+    type: "request",
+    id: 9,
+    op: "send",
+    tab: 7,
+    method: "DOMSnapshot.captureSnapshot",
+    params: { computedStyles: [] },
+  });
+  await settle();
+  const reply = posted.at(-1);
+  assert.equal(reply.id, 9);
+  assert.deepEqual(reply.result.documents[0].nodes.inputValue, { index: [2], value: [6] });
+  const values = reply.result.documents[0].nodes.inputValue.value.map((i) => reply.result.strings[i]);
+  assert.deepEqual(values, ["alice"]);
+  assert.equal(JSON.stringify(reply).includes("hunter2"), false, "the words themselves stay behind");
+});
