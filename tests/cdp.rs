@@ -1508,6 +1508,46 @@ fn a_tab_open_before_attaching_is_never_adopted() {
     );
 }
 
+/// Discovery's report of a tab already open can come after its reply, with
+/// nothing to tell it from a tab just created. That the tab was listed before
+/// discovery started is what keeps it the owner's.
+#[test]
+fn a_tab_listed_before_discovery_stays_the_owners_when_reported_late() {
+    const OWNERS: &str = "E8DD778F620BA08560C3270923315360";
+    let script = Script::new();
+    script.on("Target.getTargets", signup::load("targets"));
+    script.answer(
+        "Target.setDiscoverTargets",
+        Answer::ThenEvents(
+            Box::new(Answer::Result(json!({}))),
+            vec![json!({
+                "method": "Target.targetCreated",
+                "params": {"targetInfo": {"targetId": OWNERS, "type": "page", "title": "Bank", "url": "https://bank.example.test/", "attached": false, "openerId": signup::TARGET, "canAccessOpener": false}},
+            })],
+        ),
+    );
+    script.on("Target.attachToTarget", json!({"sessionId": SESSION}));
+    script.on("Page.enable", json!({}));
+    script_read(&script);
+    let mut engine =
+        CdpEngine::attach(script.clone(), &TabKey::new(signup::TARGET), false).expect("attaches");
+    let read = engine.read().expect("reads");
+
+    assert!(
+        script
+            .order()
+            .contains(&"received Target.targetCreated".to_owned()),
+        "the late report was taken: {:?}",
+        script.order()
+    );
+    assert!(
+        read.tabs.iter().all(|tab| tab.key.as_str() != OWNERS),
+        "the owner's tab is not the run's: {:?}",
+        read.tabs
+    );
+    assert_ne!(engine.outcome(), Some("opened a new tab: Bank"));
+}
+
 /// A tab the run's own tab opens after attaching is the run's.
 #[test]
 fn a_tab_created_after_attaching_by_the_start_tab_is_adopted() {

@@ -589,8 +589,8 @@ mod web {
     use super::{Plan, drive, print_screen};
     use jev_pilot::browser::device::BrowserDevice;
     use jev_pilot::browser::discover::{
-        AttachError, Channel, Os, TabChoice, choose_tab, is_chrome, read_active_port, tab_line,
-        user_data_dir,
+        ActivePort, AttachError, Channel, Os, TabChoice, choose_tab, is_chrome, read_active_port,
+        tab_line, user_data_dir,
     };
     use jev_pilot::browser::engine::{BrowserCommand, BrowserEngine as _, CdpEngine};
     use jev_pilot::browser::launch::{Fresh, Interrupted, LaunchError, find_chrome};
@@ -649,12 +649,33 @@ mod web {
         *on_interrupt() = Some(what);
     }
 
-    /// Close a fresh browser and remove its profile, with Ctrl-C held off
-    /// until that is done.
-    fn let_go(fresh: Option<Fresh>) {
-        let mut held = on_interrupt();
-        *held = None;
-        drop(fresh);
+    /// The browser this run started, if it started one.
+    ///
+    /// Dropping it clears what Ctrl-C would undo, then closes the browser and
+    /// removes its profile, with Ctrl-C held off until that is done. That
+    /// covers every way out of a run, an error before the run began included,
+    /// so the handler is never left pointing at a browser already gone.
+    struct Started(Option<Fresh>);
+
+    impl Started {
+        /// A browser just started, reached at `port`: Ctrl-C undoes it from
+        /// now on.
+        fn new(fresh: Fresh, port: &ActivePort) -> Self {
+            undo_on_interrupt(fresh.interrupted(port));
+            Self(Some(fresh))
+        }
+
+        fn is_some(&self) -> bool {
+            self.0.is_some()
+        }
+    }
+
+    impl Drop for Started {
+        fn drop(&mut self) {
+            let mut held = on_interrupt();
+            *held = None;
+            drop(self.0.take());
+        }
     }
 
     /// How long a fresh browser is given to open its debugging port.
@@ -670,14 +691,14 @@ mod web {
     /// browser it is in is reaped and its profile removed.
     pub struct Session {
         device: BrowserDevice<CdpEngine<Socket>>,
-        fresh: Option<Fresh>,
+        fresh: Started,
     }
 
     impl Drop for Session {
         fn drop(&mut self) {
             let mut held = on_interrupt();
             *held = None;
-            if let Some(fresh) = self.fresh.take() {
+            if let Some(fresh) = self.fresh.0.take() {
                 let _ = self.device.engine_mut().close_browser();
                 drop(fresh);
             }
@@ -715,7 +736,7 @@ mod web {
     struct Connected {
         socket: Socket,
         tabs: Vec<PageTab>,
-        fresh: Option<Fresh>,
+        fresh: Started,
     }
 
     /// Connect to the browser the target names, once.
@@ -745,7 +766,7 @@ mod web {
                 eprintln!("Click Allow in Chrome (Enter chooses Cancel)");
                 let socket = Socket::connect(&endpoint, Duration::from_secs(*allow_wait))
                     .map_err(AttachError::from)?;
-                (socket, None, None)
+                (socket, Started(None), None)
             }
             BrowserMode::Fresh { chrome, headless } => {
                 let binary = find_chrome(
@@ -756,9 +777,9 @@ mod web {
                 )
                 .ok_or(LaunchError::NoBrowser)?;
                 let (fresh, port) = Fresh::start(&binary, *headless, FRESH_START)?;
-                undo_on_interrupt(fresh.interrupted(&port));
+                let fresh = Started::new(fresh, &port);
                 let socket = Socket::connect(&port.endpoint(), CALL).map_err(AttachError::from)?;
-                (socket, Some(fresh), Some(binary))
+                (socket, fresh, Some(binary))
             }
         };
         let mut connection = Connection::new(socket);
@@ -886,7 +907,7 @@ mod web {
         if fresh.is_some() {
             let _ = Connection::new(socket).send("Browser.close", json!({}), None);
         }
-        let_go(fresh);
+        drop(fresh);
         Ok(())
     }
 

@@ -624,10 +624,12 @@ fn a_phone_only_command_is_an_error_and_reaches_no_engine() {
     assert_eq!(device.engine().performed, []);
 }
 
-/// A profile appears under its swept name already locked, so a sweep running
-/// at the same moment can never take it for a dead run's and remove it.
+/// A profile's lock is a file beside its folder, made and locked before the
+/// folder exists, so a sweep running at the same moment can never take the
+/// folder for a dead run's. Nothing is renamed: Windows will not rename a
+/// folder holding an open file.
 #[test]
-fn a_fresh_profile_appears_already_locked() {
+fn a_fresh_profile_is_locked_before_it_appears() {
     use jev_pilot::browser::launch::{PROFILE_PREFIX, make_profile};
 
     let temp = std::env::temp_dir().join(format!("jev-pilot-profile-test-{}", std::process::id()));
@@ -645,17 +647,21 @@ fn a_fresh_profile_appears_already_locked() {
         name.starts_with(&format!("{PROFILE_PREFIX}{}-", std::process::id())),
         "{name}"
     );
-    let entries: Vec<String> = std::fs::read_dir(&temp)
+    assert!(dir.is_dir(), "the profile folder is there");
+    let mut entries: Vec<String> = std::fs::read_dir(&temp)
         .expect("readable")
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(entries, [name], "nothing is left under another name");
-    let other = std::fs::File::open(dir.join("jev-pilot.lock")).expect("the lock file is there");
-    assert!(
-        other.try_lock().is_err(),
-        "the profile is locked as it appears"
+    entries.sort();
+    assert_eq!(
+        entries,
+        [name.clone(), format!("{name}.lock")],
+        "the folder and its lock, and nothing under another name"
     );
+    let other =
+        std::fs::File::open(temp.join(format!("{name}.lock"))).expect("the lock file is there");
+    assert!(other.try_lock().is_err(), "the profile is locked");
 
     drop((other, lock));
     let _ = std::fs::remove_dir_all(&temp);
@@ -714,6 +720,12 @@ fn an_interrupted_fresh_run_closes_its_browser_and_removes_its_profile() {
         "it was ended, not left to finish: {status}"
     );
     assert!(!dir.exists(), "the profile is gone");
+    let mut lock = dir.into_os_string();
+    lock.push(".lock");
+    assert!(
+        !std::path::Path::new(&lock).exists(),
+        "and its lock with it"
+    );
     let _ = std::fs::remove_dir_all(&temp);
 }
 
