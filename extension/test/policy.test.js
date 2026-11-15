@@ -105,7 +105,7 @@ test("a site is an origin: scheme, host and port all count", () => {
       policy.siteRefusal(url, github),
       {
         code: "refused_site",
-        message: `${origin} is not on jev-pilot's allowed sites (\`sudo jev-pilot extension policy sites add ${origin}\`)`,
+        message: `${origin} is not on jev-pilot's allowed sites (\`jev-pilot extension policy sites add ${origin}\`)`,
       },
       url,
     );
@@ -268,12 +268,14 @@ test("a policy file not in the install's shape refuses everything that drives a 
       const refused = policy.requestRefusal(request, context);
       assert.equal(refused?.code, "refused_site", `${JSON.stringify(broken)} ${request.op}`);
       assert.match(refused.message, /run the install again/);
+      assert.doesNotMatch(refused.message, /sudo/);
     }
     for (const request of [{ op: "tabs" }, { op: "detach", tab: 7 }]) {
       assert.equal(codeOf(request, context), null, "listing tabs and letting go of one still work");
     }
     assert.equal(policy.leftAllowedSites("https://example.test/", broken), true, JSON.stringify(broken));
   }
+  // A field an earlier install wrote is passed over.
   assert.equal(policy.policyProblem({ sites: [], owner_tabs: "never", install: "protected" }), null);
 });
 

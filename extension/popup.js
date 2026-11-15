@@ -8,7 +8,6 @@ const lines = describe(state);
 for (const [id, key] of [
   ["status", "status"],
   ["browser", "browser"],
-  ["install", "install"],
   ["run", "run"],
   ["sites", "sites"],
   ["owner-tabs", "ownerTabs"],

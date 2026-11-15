@@ -1,5 +1,5 @@
 // What a run may ask of Chrome. Every rule here is pure: it decides from the
-// request, the run's tabs and the admin-owned policy file, and the service
+// request, the run's tabs and the policy file the install wrote, and the service
 // worker carries out only what passes.
 
 /** The DevTools methods the engine uses, and so the only ones passed on. */
@@ -146,7 +146,7 @@ function brokenPolicyRefusal(policy) {
     ? null
     : refusal(
         "refused_site",
-        `jev-pilot's policy.json cannot be used (${why}): set it with \`sudo jev-pilot extension policy\`, or run the install again`,
+        `jev-pilot's policy.json cannot be used (${why}): set it with \`jev-pilot extension policy\`, or run the install again`,
       );
 }
 
@@ -163,7 +163,7 @@ export function siteRefusal(url, policy) {
   }
   return refusal(
     "refused_site",
-    `${origin} is not on jev-pilot's allowed sites (\`sudo jev-pilot extension policy sites add ${origin}\`)`,
+    `${origin} is not on jev-pilot's allowed sites (\`jev-pilot extension policy sites add ${origin}\`)`,
   );
 }
 

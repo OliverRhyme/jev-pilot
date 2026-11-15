@@ -154,7 +154,7 @@
     "frame": {
       "error": {
         "code": "refused_site",
-        "message": "https://elsewhere.test is not on jev-pilot's allowed sites (`sudo jev-pilot extension policy sites add https://elsewhere.test`)"
+        "message": "https://elsewhere.test is not on jev-pilot's allowed sites (`jev-pilot extension policy sites add https://elsewhere.test`)"
       },
       "id": 5,
       "type": "reply"

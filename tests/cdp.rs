@@ -2513,7 +2513,7 @@ fn each_refusal_through_the_extension() {
         (
             5,
             "refused_site",
-            "https://elsewhere.test is not on jev-pilot's allowed sites (`sudo jev-pilot extension policy sites add https://elsewhere.test`)".to_owned(),
+            "https://elsewhere.test is not on jev-pilot's allowed sites (`jev-pilot extension policy sites add https://elsewhere.test`)".to_owned(),
         ),
         (
             6,
