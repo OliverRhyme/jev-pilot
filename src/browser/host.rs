@@ -13,9 +13,7 @@
 pub mod channel;
 mod serve;
 
-pub use serve::{
-    AUDIT_LIMIT, Diagnostics, ECHO_WAIT, Serve, append_audit, audit_host_start, serve,
-};
+pub use serve::{AUDIT_LIMIT, Diagnostics, ECHO_WAIT, Serve, append_audit, serve};
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -158,13 +156,6 @@ pub enum Audit {
         /// How many.
         refusals: u32,
     },
-    /// Refused host starts left out of the log since the last one written,
-    /// counted in the audit folder's `audit.skipped` meanwhile: each host
-    /// is a process of its own.
-    StartsNotWritten {
-        /// How many.
-        starts: u32,
-    },
     /// A connection was turned away by an identity check.
     Refused {
         /// Its process id, when the OS gave one.
@@ -200,9 +191,6 @@ impl Audit {
             }
             Self::NotWritten { refusals } => {
                 json!({"event": "refusals_not_written", "refusals": refusals})
-            }
-            Self::StartsNotWritten { starts } => {
-                json!({"event": "host_starts_not_written", "starts": starts})
             }
             Self::HostStarted {
                 parent_pid,
@@ -263,43 +251,6 @@ impl Throttle {
         let held = std::mem::take(&mut self.held);
         (held > 0).then_some(Audit::NotWritten { refusals: held })
     }
-}
-
-/// Whether the audit log, from its last lines `tail`, has a refused host
-/// start less than a minute before `now`. Each host is a process of its
-/// own, so a loop of refused starts is kept from rotating the log away by
-/// the log itself.
-#[must_use]
-pub fn refused_start_lately(tail: &str, now: SystemTime) -> bool {
-    tail.lines()
-        .rev()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|event| event["event"] == "host_started" && event["browser"] == "refused")
-        .and_then(|event| event["time"].as_str().and_then(parse_utc))
-        .is_some_and(|at| now.duration_since(at).is_ok_and(|ago| ago < REFUSALS_EVERY))
-}
-
-/// A time written by [`utc`].
-fn parse_utc(text: &str) -> Option<SystemTime> {
-    let text = text.strip_suffix('Z')?;
-    let (date, time) = text.split_once('T')?;
-    let mut date = date.split('-').map(str::parse::<u64>);
-    let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);
-    let mut time = time.split(':').map(str::parse::<u64>);
-    let (hour, minute, second) = (time.next()?.ok()?, time.next()?.ok()?, time.next()?.ok()?);
-    // Howard Hinnant's days_from_civil.
-    let year = if month <= 2 {
-        year.checked_sub(1)?
-    } else {
-        year
-    };
-    let era = year / 400;
-    let yoe = year - era * 400;
-    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = (era * 146_097 + doe).checked_sub(719_468)?;
-    let seconds = days * 86_400 + hour * 3600 + minute * 60 + second;
-    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
 }
 
 /// `at` as a UTC time to the second, `2026-11-15T09:30:00Z`.

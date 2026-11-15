@@ -6,7 +6,7 @@ import { createConnection } from "./connection.js";
 import { product } from "./protocol.js";
 import scripts from "./scripts.json" with { type: "json" };
 
-/** The admin-owned policy file, read afresh for every request it decides. */
+/** The policy file the install wrote, read afresh for every request it decides. */
 const loadPolicy = async () => (await fetch(chrome.runtime.getURL("policy.json"), { cache: "no-store" })).json();
 
 let connection;
@@ -36,7 +36,6 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     respond({
       status: connection.status(),
       browser: product(navigator.userAgent),
-      install: policy?.install ?? "unknown",
       run: bridge.state(),
       policy,
       paused: paused === true,

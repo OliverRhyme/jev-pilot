@@ -57,8 +57,8 @@ node --test 'extension/test/*.test.js'
 - Running against a browser: `cargo run --features browser -- observe --browser fresh --headless
   --open <url>` needs no key and no sign-in (Chrome for Testing, Chromium or Chrome; `--chrome`
   names one). `--browser extension` and `--browser attach` drive the owner's own Chrome; leave
-  both to them. Extension mode needs `jev-pilot extension install` (as an administrator, or
-  `--dev` for a user-owned install that is not protected), and attach mode asks them to click
+  both to them. Extension mode needs `jev-pilot extension install` (no administrator: it writes
+  only in the owner's folders), and attach mode asks them to click
   Allow on every connection.
 - MCP server: `cargo run --features mcp -- mcp` (the `mcp` subcommand of the one binary).
 
@@ -144,23 +144,25 @@ screen, and the loop does not know which it is driving.
     (a Unix socket, or a named pipe on Windows, through `interprocess`), and the audit log.
     `browser::install` plans the install as steps (tested as values, like `adb.rs`), carries them
     out, and reads `install.json`; a `--browser extension` run execs the installed copy, because
-    only that copy passes the host's check.
+    only that copy passes the host's check. The install is the owner's own, like any user-level
+    native messaging host: it is kept from other users and machines, and a program running as
+    the owner could pose as jev-pilot (the README says so).
   - `peer` gathers facts about the program at the other end of the channel from the OS (macOS
-    audit token and code signature, Linux `SO_PEERCRED` and the setgid group, Windows pipe pid,
-    image path and hash or Authenticode signer), and a pure `decide` compares them with what the
-    install pinned.
-  - `jev-pilot-os` (a workspace member) is the only crate that may use `unsafe`, for the few OS
-    calls no safe crate offers (Windows `QueryFullProcessImageNameW`, `WinVerifyTrust` and
-    friends; macOS `setregid`). Each such call sits in a function that allows `unsafe` for itself
+    audit token and code signature, Linux `SO_PEERCRED` and the executable's hash, Windows pipe
+    pid, image path and hash or Authenticode signer), and a pure `decide` compares them with what
+    the install pinned. `peer::browser` checks, with documented calls only, that the host was
+    started by Google Chrome.
+  - `jev-pilot-os` (a workspace member) is the only crate that may use `unsafe`, for the few
+    Windows calls no safe crate offers (`QueryFullProcessImageNameW`, `WinVerifyTrust`,
+    `CancelIoEx` and friends). Each such call sits in a function that allows `unsafe` for itself
     alone, every `unsafe` block carries a `// SAFETY:` comment (`undocumented_unsafe_blocks` is
     denied), and it exposes only safe functions. The main crate keeps `unsafe_code = "forbid"`.
-    Its code is Windows- and macOS-only, which is why CI also runs clippy on Windows.
+    Its code is Windows-only, which is why CI also runs clippy on Windows.
 - **`mcp`** (feature `mcp`, subcommand `jev-pilot mcp`, built on `rmcp`): every tool runs the
   `jev-pilot` binary instead of driving the loop in-process, so the MCP server and the CLI cannot
   drift apart. A run is keyed by its device serial, or `browser:extension`,
   `browser:attach:<channel>` or `browser:fresh`, which allows one run per target. Extension mode
-  maps to `--browser extension --sites-only`, and a development install is refused unless the
-  server's environment has `JEV_PILOT_ALLOW_DEV_BRIDGE=1`. Stopping a run kills its process, so the
+  maps to `--browser extension --sites-only`. Stopping a run kills its process, so the
   server then removes the fresh profile and browser it left (`launch::reap_run`). `start_run` and
   `answer_run` block for up to about 45s and return the run's question, its ending, or "still
   working". The server does not use sampling (see the README for why).
@@ -168,7 +170,7 @@ screen, and the loop does not know which it is driving.
   it can be tested. The browser flags parse into an optional `BrowserTarget` on `Run`, `Observe`
   and `Devices`; `main.rs` connects once (attach mode raises Chrome's prompt on every handshake,
   so it never probes or retries), checks the endpoint is Chrome, and runs the same loop. The
-  `extension` subcommand (`install [--dev]`, `status`, `uninstall`, `log`, `policy sites
+  `extension` subcommand (`install`, `status`, `uninstall`, `log`, `policy sites
   add|remove <origin>`, `policy owner-tabs group|never`) and host mode parse into their own
   `Invocation`s.
 
@@ -179,7 +181,7 @@ An MV3 extension in plain ES modules, with no build step and no npm packages: `m
 (the `chrome.*` glue), the pure `policy.js`, `protocol.js`, `bridge.js` and `connection.js`, the
 popup, the icons, and the default `policy.json`. `scripts.json` is the page-script allow list and
 must equal `input::PAGE_SCRIPTS`. The binary embeds every file but `test/` through
-`browser::packaged`, and the install writes them to an admin-owned folder.
+`browser::packaged`, and the install writes them to a folder of the owner's.
 
 `extension/test/` runs under `node --test` against a fake `chrome` object; it covers every policy
 rule, the protocol module, and every recorded conversation in `tests/fixtures/extension/`.

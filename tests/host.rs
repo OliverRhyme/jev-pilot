@@ -1280,86 +1280,6 @@ mod serving {
             .collect()
     }
 
-    /// A host whose audit log is missing does not serve.
-    #[test]
-    fn a_host_without_its_audit_log_does_not_serve() {
-        super::bounded("a_host_without_its_audit_log_does_not_serve", || {
-            let place = place();
-            let (stdin, _writer) = std::io::pipe().unwrap();
-            let audit = std::env::temp_dir().join(format!("jev-pilot-gone-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&audit);
-            let config = Serve {
-                place: place.clone(),
-                expected: expected(),
-                check: Arc::new(Vouched),
-                audit_dir: audit.clone(),
-                version: "0.4.0".into(),
-                extension_on_disk: None,
-                installed_version: Box::new(|| None),
-                diagnostics: None,
-                echo_wait: Duration::from_millis(300),
-            };
-            let error = serve(config, stdin, Out::default()).expect_err("refused");
-            assert_eq!(
-                error.to_string(),
-                format!(
-                    "the audit log {} is missing: run the install again",
-                    audit.join("audit.log").display()
-                )
-            );
-            assert!(
-                Stream::connect(place.name().unwrap()).is_err(),
-                "nothing listens"
-            );
-        });
-    }
-
-    /// Nor one without the lock or the count of skipped starts the install
-    /// makes beside the log: each is named, as the log is.
-    #[test]
-    fn a_host_without_its_audit_lock_or_count_does_not_serve() {
-        super::bounded(
-            "a_host_without_its_audit_lock_or_count_does_not_serve",
-            || {
-                for missing in ["audit.lock", "audit.skipped"] {
-                    let place = place();
-                    let (stdin, _writer) = std::io::pipe().unwrap();
-                    let audit = std::env::temp_dir().join(format!(
-                        "jev-pilot-without-{missing}-{}",
-                        std::process::id()
-                    ));
-                    let _ = std::fs::remove_dir_all(&audit);
-                    super::audit_files(&audit);
-                    std::fs::remove_file(audit.join(missing)).unwrap();
-                    let config = Serve {
-                        place: place.clone(),
-                        expected: expected(),
-                        check: Arc::new(Vouched),
-                        audit_dir: audit.clone(),
-                        version: "0.4.0".into(),
-                        extension_on_disk: None,
-                        installed_version: Box::new(|| None),
-                        diagnostics: None,
-                        echo_wait: Duration::from_millis(300),
-                    };
-                    let error = serve(config, stdin, Out::default()).expect_err("refused");
-                    assert_eq!(
-                        error.to_string(),
-                        format!(
-                            "the audit log {} is missing: run the install again",
-                            audit.join(missing).display()
-                        )
-                    );
-                    assert!(
-                        Stream::connect(place.name().unwrap()).is_err(),
-                        "nothing listens"
-                    );
-                    let _ = std::fs::remove_dir_all(&audit);
-                }
-            },
-        );
-    }
-
     /// A run that stops reading does not hold the host up: after a while
     /// it is taken as gone, and the host still leaves with Chrome.
     #[test]
@@ -1613,7 +1533,6 @@ fn the_audit_log_is_rotated_by_size() {
     use jev_pilot::browser::host::append_audit;
     let dir = std::env::temp_dir().join(format!("jev-pilot-rotate-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    audit_files(&dir);
     // Each line is 7 bytes, so the log reaches the limit every two lines.
     for n in 0..10 {
         append_audit(&dir, &format!("line {n}\n"), 10).expect("appends");
@@ -1624,8 +1543,7 @@ fn the_audit_log_is_rotated_by_size() {
     assert_eq!(read("audit.log.2").as_deref(), Some("line 4\nline 5\n"));
     assert_eq!(read("audit.log.3").as_deref(), Some("line 2\nline 3\n"));
     assert_eq!(read("audit.log.4"), None, "the oldest is dropped");
-    // Rotated by copying within the files the install made, so they keep
-    // their owner and mode.
+    // Each the owner's alone.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1634,7 +1552,7 @@ fn the_audit_log_is_rotated_by_size() {
                 .unwrap()
                 .permissions()
                 .mode();
-            assert_eq!(mode & 0o777, 0o664, "{name}");
+            assert_eq!(mode & 0o777, 0o600, "{name}");
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -1663,134 +1581,9 @@ fn the_diagnostics_file_is_bounded() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The audit log's files as an install makes them: all four, mode 0664,
-/// and the lock and the count of skipped starts, mode 0660.
+/// The audit log's folder, as the install makes it.
 fn audit_files(dir: &std::path::Path) {
     std::fs::create_dir_all(dir).unwrap();
-    for (name, mode) in [
-        ("audit.log", 0o664),
-        ("audit.log.1", 0o664),
-        ("audit.log.2", 0o664),
-        ("audit.log.3", 0o664),
-        ("audit.lock", 0o660),
-        ("audit.skipped", 0o660),
-    ] {
-        std::fs::write(dir.join(name), "").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(mode))
-                .unwrap();
-        }
-        #[cfg(not(unix))]
-        let _ = mode;
-    }
-}
-
-/// The owner may read the audit log, and so may lock it: the host locks a
-/// file of its own instead, which the owner cannot open, so an owner who
-/// holds the log locked does not stall the host.
-///
-/// Not on Windows, which has no setgid: there the audit log is the owner's
-/// to write anyway, and a lock on a file there is binding on writes.
-#[cfg(unix)]
-#[test]
-fn a_lock_held_on_the_audit_log_does_not_stall_the_host() {
-    use jev_pilot::browser::host::append_audit;
-    let dir = std::env::temp_dir().join(format!("jev-pilot-auditlock-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    audit_files(&dir);
-    let held = std::fs::File::open(dir.join("audit.log")).unwrap();
-    held.lock().unwrap();
-    let (done, finished) = std::sync::mpsc::channel();
-    let at = dir.clone();
-    std::thread::spawn(move || {
-        let _ = done.send(append_audit(&at, "line\n", 1000).is_ok());
-    });
-    assert_eq!(
-        finished.recv_timeout(std::time::Duration::from_secs(5)),
-        Ok(true),
-        "written while the log is locked"
-    );
-    drop(held);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A host that holds the lock and never lets go (one stopped by a signal,
-/// say) does not stall the others: after about two seconds they write
-/// anyway, without rotating, and say the lock was not taken.
-#[test]
-fn a_lock_never_let_go_does_not_stall_the_host() {
-    use jev_pilot::browser::host::{append_audit, audit_host_start};
-    let dir = std::env::temp_dir().join(format!("jev-pilot-stuck-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    audit_files(&dir);
-    let held = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(dir.join("audit.lock"))
-        .unwrap();
-    held.lock().unwrap();
-    let (done, finished) = std::sync::mpsc::channel();
-    let at = dir.clone();
-    std::thread::spawn(move || {
-        let appended = append_audit(&at, "{\"event\":\"x\"}\n", 1000).is_ok();
-        let started = Audit::HostStarted {
-            parent_pid: Some(7),
-            parent_exe: None,
-            refused: None,
-        };
-        let audited = audit_host_start(&at, &started, std::time::SystemTime::now()).is_ok();
-        let _ = done.send(appended && audited);
-    });
-    assert_eq!(
-        finished.recv_timeout(std::time::Duration::from_secs(10)),
-        Ok(true),
-        "written while the lock is held"
-    );
-    drop(held);
-    let lines: Vec<serde_json::Value> = std::fs::read_to_string(dir.join("audit.log"))
-        .unwrap()
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    assert_eq!(lines.len(), 2, "{lines:?}");
-    assert_eq!(lines[0]["event"], "x");
-    assert_eq!(lines[1]["event"], "host_started");
-    for line in &lines {
-        assert_eq!(line["lock"], "not taken", "{line}");
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The host never makes the audit log's lock either: a missing one is
-/// refused, and an install made before it had one is set up again.
-#[test]
-fn a_missing_audit_lock_is_refused_not_made() {
-    use jev_pilot::browser::host::append_audit;
-    let dir = std::env::temp_dir().join(format!("jev-pilot-nolock-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    audit_files(&dir);
-    std::fs::remove_file(dir.join("audit.lock")).unwrap();
-    assert!(append_audit(&dir, "line\n", 1000).is_err());
-    assert!(!dir.join("audit.lock").exists(), "the lock is not made");
-    assert_eq!(std::fs::read_to_string(dir.join("audit.log")).unwrap(), "");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The host never makes the audit log: one it would make would be the
-/// owner's, and the owner could then rewrite it. A missing log is refused.
-#[test]
-fn a_missing_audit_log_is_refused_not_made() {
-    use jev_pilot::browser::host::append_audit;
-    let dir = std::env::temp_dir().join(format!("jev-pilot-noaudit-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(append_audit(&dir, "line\n", 10).is_err());
-    assert!(!dir.exists(), "the directory is not made");
-    std::fs::create_dir_all(&dir).unwrap();
-    assert!(append_audit(&dir, "line\n", 10).is_err());
-    assert!(!dir.join("audit.log").exists(), "the log is not made");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Runs one test's `body`, failing the test by `name` if it has not
@@ -1813,6 +1606,30 @@ fn bounded(name: &str, body: impl FnOnce() + Send + 'static) {
             panic!("{name} did not finish in 30 seconds: a socket or pipe never answered")
         }
     }
+}
+
+/// The audit log is the owner's own: the host makes its folder and the log
+/// when they are missing, closed to everyone else.
+#[test]
+fn a_missing_audit_log_is_made_the_owners_own() {
+    use jev_pilot::browser::host::append_audit;
+    let dir = std::env::temp_dir()
+        .join(format!("jev-pilot-newaudit-{}", std::process::id()))
+        .join("log");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    append_audit(&dir, "line\n", 1000).expect("made and written");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("audit.log")).unwrap(),
+        "line\n"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("audit.log")), 0o600);
+    }
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
 /// Ends these tests, failing, if they run past two minutes: a socket or
@@ -1910,101 +1727,4 @@ fn refusals_held_back_are_counted_when_the_host_ends() {
     assert_eq!(throttle.admit(refusal.clone(), start), []);
     assert_eq!(throttle.admit(refusal, start), []);
     assert_eq!(throttle.finish(), Some(Audit::NotWritten { refusals: 2 }));
-}
-
-/// A refused start skipped within a minute is counted in a file of the
-/// group's, and the count is written before the next start that is.
-#[test]
-fn refused_host_starts_skipped_are_counted_and_written_later() {
-    use jev_pilot::browser::host::audit_host_start;
-    use std::time::{Duration, SystemTime};
-    let dir = std::env::temp_dir().join(format!("jev-pilot-starts-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    audit_files(&dir);
-    let now = SystemTime::now();
-    let started = |refused: Option<&str>| Audit::HostStarted {
-        parent_pid: Some(7),
-        parent_exe: Some("/usr/bin/python3".into()),
-        refused: refused.map(str::to_owned),
-    };
-    let lines = || {
-        std::fs::read_to_string(dir.join("audit.log"))
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
-            .collect::<Vec<_>>()
-    };
-    let refused = started(Some("not Chrome"));
-    audit_host_start(&dir, &refused, now).expect("written");
-    for n in 1..=3 {
-        audit_host_start(&dir, &refused, now + Duration::from_secs(n)).expect("counted");
-    }
-    assert_eq!(lines().len(), 1, "one written");
-    assert_eq!(
-        std::fs::read_to_string(dir.join("audit.skipped"))
-            .unwrap()
-            .trim(),
-        "3"
-    );
-    audit_host_start(&dir, &started(None), now + Duration::from_secs(5)).expect("written");
-    let events = lines();
-    assert_eq!(events.len(), 3, "{events:?}");
-    assert_eq!(events[1]["event"], "host_starts_not_written");
-    assert_eq!(events[1]["starts"], 3);
-    assert_eq!(events[2]["browser"], "accepted");
-    assert_eq!(
-        std::fs::read_to_string(dir.join("audit.skipped"))
-            .unwrap()
-            .trim(),
-        "0"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The host never makes the count of skipped starts: a missing one is
-/// refused.
-#[test]
-fn a_missing_count_of_skipped_starts_is_refused_not_made() {
-    use jev_pilot::browser::host::audit_host_start;
-    let dir = std::env::temp_dir().join(format!("jev-pilot-noskipped-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    audit_files(&dir);
-    std::fs::remove_file(dir.join("audit.skipped")).unwrap();
-    let refused = Audit::HostStarted {
-        parent_pid: Some(7),
-        parent_exe: None,
-        refused: Some("not Chrome".into()),
-    };
-    assert!(audit_host_start(&dir, &refused, std::time::SystemTime::now()).is_err());
-    assert!(!dir.join("audit.skipped").exists());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Each refused host start is a process of its own: one within a minute of
-/// the last refused start in the log is not written again.
-#[test]
-fn a_refused_host_start_is_not_written_twice_in_a_minute() {
-    use jev_pilot::browser::host::{refused_start_lately, utc};
-    use std::time::{Duration, SystemTime};
-    let now = SystemTime::UNIX_EPOCH + Duration::from_mins(29_912_300);
-    let at = |ago: u64| utc(now - Duration::from_secs(ago));
-    let refused = |ago: u64| {
-        format!(
-            "{{\"browser\":\"refused\",\"event\":\"host_started\",\"parent_pid\":7,\"time\":\"{}\",\"why\":\"x\"}}\n",
-            at(ago)
-        )
-    };
-    let accepted = format!(
-        "{{\"browser\":\"accepted\",\"event\":\"host_started\",\"parent_pid\":7,\"time\":\"{}\"}}\n",
-        at(5)
-    );
-    assert!(refused_start_lately(&refused(30), now));
-    assert!(!refused_start_lately(&refused(90), now));
-    assert!(!refused_start_lately(&accepted, now));
-    assert!(refused_start_lately(
-        &format!("{}{}", refused(30), accepted),
-        now
-    ));
-    assert!(!refused_start_lately("", now));
-    assert!(!refused_start_lately("not json\n", now));
 }

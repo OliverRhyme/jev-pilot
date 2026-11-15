@@ -44,7 +44,7 @@ const chromeFailure = (code, error) => refusal(code, String(error?.message ?? er
 
 /**
  * The bridge for one connection. `post` sends a message to the host,
- * `loadPolicy` reads the admin-owned policy file, and `scripts` are the
+ * `loadPolicy` reads the policy file the install wrote, and `scripts` are the
  * engine's page scripts.
  */
 export function createBridge({ chrome, post, loadPolicy, scripts, userAgent, setTimer = setTimeout }) {

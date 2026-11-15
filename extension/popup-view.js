@@ -8,18 +8,12 @@ const STATUS = {
   elsewhere: "another browser is already serving jev-pilot",
 };
 
-const INSTALL = {
-  protected: "protected (installed by an administrator)",
-  development: "development install: not protected against other programs running as you",
-};
-
 /** Each line of the popup: its text, and whether it is a warning. */
 export function describe(state) {
   const held = state.run.tabs.length;
   return {
     status: { text: STATUS[state.status] ?? state.status, warn: state.status !== "connected" },
     browser: { text: state.browser, warn: false },
-    install: { text: INSTALL[state.install] ?? "unknown", warn: state.install !== "protected" },
     run: {
       text: state.run.running ? `${state.run.goal} (${held} tab${held === 1 ? "" : "s"} held)` : "none",
       warn: false,

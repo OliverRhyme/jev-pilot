@@ -9,12 +9,9 @@ use std::ptr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, INVALID_HANDLE_VALUE,
-    LocalFree,
+    ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
-use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
-};
+use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Cryptography::{
     CERT_NAME_RDN_TYPE, CERT_NAME_STR_REVERSE_FLAG, CERT_X500_NAME_STR, CertGetNameStringW,
 };
@@ -24,11 +21,7 @@ use windows_sys::Win32::Security::WinTrust::{
     WTD_STATEACTION_VERIFY, WTD_UI_NONE, WTHelperGetProvCertFromChain,
     WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
 };
-use windows_sys::Win32::Security::{
-    GetTokenInformation, LookupAccountNameW, LookupAccountSidW, OWNER_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation,
-    TokenUser,
-};
+use windows_sys::Win32::Security::{GetTokenInformation, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -36,20 +29,13 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows_sys::Win32::System::IO::CancelIoEx;
 use windows_sys::Win32::System::Pipes::DisconnectNamedPipe;
-use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY, RegCloseKey,
-    RegOpenKeyExW,
-};
-use windows_sys::Win32::System::RemoteDesktop::{
-    ProcessIdToSessionId, WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_INFO_CLASS,
-    WTSDomainName, WTSFreeMemory, WTSQuerySessionInformationW, WTSUserName,
-};
+use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::Shell::{
-    FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_System,
+    FOLDERID_LocalAppData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_System,
     SHGetKnownFolderPath,
 };
 
@@ -203,15 +189,15 @@ pub fn final_path(file: &File) -> io::Result<PathBuf> {
     }
 }
 
-/// A folder Windows keeps for the whole machine.
+/// A folder Windows keeps, for the machine or for the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnownFolder {
     /// Program Files.
     ProgramFiles,
     /// Program Files (x86).
     ProgramFilesX86,
-    /// ProgramData.
-    ProgramData,
+    /// The user's local app data.
+    LocalAppData,
     /// System32.
     System,
 }
@@ -228,7 +214,7 @@ pub fn known_folder(folder: KnownFolder) -> io::Result<PathBuf> {
     let id = match folder {
         KnownFolder::ProgramFiles => FOLDERID_ProgramFiles,
         KnownFolder::ProgramFilesX86 => FOLDERID_ProgramFilesX86,
-        KnownFolder::ProgramData => FOLDERID_ProgramData,
+        KnownFolder::LocalAppData => FOLDERID_LocalAppData,
         KnownFolder::System => FOLDERID_System,
     };
     let mut path: *mut u16 = ptr::null_mut();
@@ -282,43 +268,6 @@ pub fn current_session() -> io::Result<u32> {
     Ok(session)
 }
 
-/// Whether this process runs elevated, with an administrator's rights.
-///
-/// # Errors
-///
-/// When this process's token cannot be read.
-#[allow(unsafe_code)]
-pub fn is_elevated() -> io::Result<bool> {
-    let mut token: HANDLE = ptr::null_mut();
-    // SAFETY: GetCurrentProcess takes nothing and returns a pseudo-handle.
-    let me = unsafe { GetCurrentProcess() };
-    // SAFETY: `me` is this process; `token` is a valid place for the new
-    // handle.
-    if unsafe { OpenProcessToken(me, TOKEN_QUERY, &raw mut token) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `token` is a valid token handle that nothing else owns.
-    let token = unsafe { OwnedHandle::from_raw_handle(token) };
-    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
-    let mut length = 0u32;
-    let size = u32::try_from(size_of::<TOKEN_ELEVATION>()).map_err(io::Error::other)?;
-    // SAFETY: `elevation` is a TOKEN_ELEVATION of `size` bytes, and
-    // `length` a valid u32.
-    let ok = unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenElevation,
-            (&raw mut elevation).cast(),
-            size,
-            &raw mut length,
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(elevation.TokenIsElevated != 0)
-}
-
 /// The process id of the process that started process `pid`, as Windows
 /// recorded it. The id may since have been given to a newer process: a
 /// caller compares creation times ([`Process::created`]) to tell.
@@ -354,206 +303,6 @@ pub fn parent_process_id(pid: u32) -> io::Result<u32> {
         io::ErrorKind::NotFound,
         format!("no process {pid}"),
     ))
-}
-
-/// The string form of the SID that owns the file or folder at `path`.
-///
-/// # Errors
-///
-/// When its security cannot be read.
-#[allow(unsafe_code)]
-pub fn owner_sid(path: &Path) -> io::Result<String> {
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(iter::once(0))
-        .collect();
-    let mut owner: PSID = ptr::null_mut();
-    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-    // SAFETY: `wide` is a NUL-terminated path that outlives the call;
-    // `owner` and `descriptor` are valid places for what it returns, and
-    // the other out-pointers are null, which the call allows.
-    let status = unsafe {
-        GetNamedSecurityInfoW(
-            wide.as_ptr(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION,
-            &raw mut owner,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &raw mut descriptor,
-        )
-    };
-    if status != 0 {
-        return Err(io::Error::from_raw_os_error(
-            i32::try_from(status).unwrap_or(-1),
-        ));
-    }
-    // `owner` points into `descriptor`, freed below once it is read.
-    let sid = sid_string(owner);
-    // SAFETY: `descriptor` was allocated by GetNamedSecurityInfoW, which
-    // says to free it with LocalFree; nothing points into it after this.
-    unsafe { LocalFree(descriptor.cast()) };
-    sid
-}
-
-/// Whether the key `HKLM\<key>` exists in either registry view, 64-bit or
-/// 32-bit: Chrome looks in both. Only a key Windows says is not found is
-/// absent; any other failure is an error.
-///
-/// # Errors
-///
-/// When the key cannot be told to exist or not.
-pub fn machine_key_exists(key: &str) -> io::Result<bool> {
-    for view in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
-        if machine_key_exists_in(key, view)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-#[allow(unsafe_code)]
-fn machine_key_exists_in(key: &str, view: u32) -> io::Result<bool> {
-    let wide: Vec<u16> = key.encode_utf16().chain(iter::once(0)).collect();
-    let mut handle: HKEY = ptr::null_mut();
-    // SAFETY: `wide` is a NUL-terminated key name that outlives the call;
-    // `handle` is a valid place for the opened key.
-    let status = unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            wide.as_ptr(),
-            0,
-            KEY_READ | view,
-            &raw mut handle,
-        )
-    };
-    match status {
-        0 => {
-            // SAFETY: the key was opened above and is not used after this.
-            unsafe { RegCloseKey(handle) };
-            Ok(true)
-        }
-        ERROR_FILE_NOT_FOUND => Ok(false),
-        other => Err(io::Error::from_raw_os_error(
-            i32::try_from(other).unwrap_or(-1),
-        )),
-    }
-}
-
-/// The SID of the account signed in to this process's session.
-///
-/// # Errors
-///
-/// When the session's account cannot be named or found.
-#[allow(unsafe_code)]
-pub fn session_user_sid() -> io::Result<String> {
-    let account = session_account()?;
-    let wide: Vec<u16> = account.encode_utf16().chain(iter::once(0)).collect();
-    let mut sid = vec![0u64; 16];
-    let mut sid_len = u32::try_from(sid.len() * 8).map_err(io::Error::other)?;
-    let mut domain = vec![0u16; 256];
-    let mut domain_len = 256u32;
-    let mut kind = 0;
-    // SAFETY: `wide` is a NUL-terminated account name; `sid` and `domain`
-    // hold the lengths given (a SID is at most 68 bytes), and the lengths
-    // and `kind` are valid places for what the call writes.
-    let ok = unsafe {
-        LookupAccountNameW(
-            ptr::null(),
-            wide.as_ptr(),
-            sid.as_mut_ptr().cast(),
-            &raw mut sid_len,
-            domain.as_mut_ptr(),
-            &raw mut domain_len,
-            &raw mut kind,
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    sid_string(sid.as_mut_ptr().cast())
-}
-
-/// The account signed in to this process's session, as `DOMAIN\name`.
-///
-/// # Errors
-///
-/// When Windows cannot say.
-pub fn session_account() -> io::Result<String> {
-    let name = session_text(WTSUserName)?;
-    let domain = session_text(WTSDomainName)?;
-    Ok(format!(r"{domain}\{name}"))
-}
-
-#[allow(unsafe_code)]
-fn session_text(what: WTS_INFO_CLASS) -> io::Result<String> {
-    let mut text: *mut u16 = ptr::null_mut();
-    let mut bytes = 0u32;
-    // SAFETY: the current server and session are named by constants;
-    // `text` and `bytes` are valid places for what the call returns.
-    let ok = unsafe {
-        WTSQuerySessionInformationW(
-            WTS_CURRENT_SERVER_HANDLE,
-            WTS_CURRENT_SESSION,
-            what,
-            &raw mut text,
-            &raw mut bytes,
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the call succeeded, so `text` is a NUL-terminated wide string
-    // valid until it is freed below.
-    let wide = unsafe { nul_terminated(text) };
-    let result = String::from_utf16(wide).map_err(io::Error::other);
-    // SAFETY: `text` was allocated by WTSQuerySessionInformationW, which
-    // says to free it with WTSFreeMemory; it is not used after this.
-    unsafe { WTSFreeMemory(text.cast()) };
-    result
-}
-
-/// The account this process's token runs as, as `DOMAIN\name`.
-///
-/// # Errors
-///
-/// When the token or the account cannot be read.
-#[allow(unsafe_code)]
-pub fn current_account() -> io::Result<String> {
-    // SAFETY: GetCurrentProcess takes nothing and returns a pseudo-handle.
-    let me = unsafe { GetCurrentProcess() };
-    with_token_user(me, |sid| {
-        let mut name = vec![0u16; 256];
-        let mut domain = vec![0u16; 256];
-        let (mut name_len, mut domain_len) = (256u32, 256u32);
-        let mut kind = 0;
-        // SAFETY: `sid` is a valid SID for the length of this call;
-        // `name` and `domain` hold the lengths given, and the lengths and
-        // `kind` are valid places for what the call writes.
-        let ok = unsafe {
-            LookupAccountSidW(
-                ptr::null(),
-                sid,
-                name.as_mut_ptr(),
-                &raw mut name_len,
-                domain.as_mut_ptr(),
-                &raw mut domain_len,
-                &raw mut kind,
-            )
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        name.truncate(name_len as usize);
-        domain.truncate(domain_len as usize);
-        Ok(format!(
-            r"{}\{}",
-            String::from_utf16_lossy(&domain),
-            String::from_utf16_lossy(&name)
-        ))
-    })
 }
 
 fn token_user_sid(process: HANDLE) -> io::Result<String> {

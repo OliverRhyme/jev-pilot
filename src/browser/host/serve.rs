@@ -3,7 +3,7 @@
 //! happened, and the relay's answers carried out on the calling thread.
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Read, Seek as _, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +14,7 @@ use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
 use interprocess::local_socket::{Listener, ListenerOptions, Stream};
 
 use super::channel::Place;
-use super::{Audit, Input, Output, Relay, RunId, Started, Throttle, refused_start_lately, utc};
+use super::{Input, Output, Relay, RunId, Started, Throttle, utc};
 use crate::browser::bridge::{self, ByteOrder, FrameError, Message, Nonce};
 use crate::peer::{Expected, PeerCheck, Verdict, decide, recheck};
 
@@ -95,7 +95,6 @@ pub fn serve(
     stdin: impl Read + Send + 'static,
     mut stdout: impl Write,
 ) -> io::Result<()> {
-    audit_files_there(&config.audit_dir)?;
     if another_serves(&config) {
         send_to_chrome(&mut stdout, &Message::Elsewhere)?;
         return Ok(());
@@ -190,24 +189,6 @@ pub fn serve(
     }
     if let Place::Socket(path) = &config.place {
         let _ = std::fs::remove_file(path);
-    }
-    Ok(())
-}
-
-/// Whether the audit log's files are in `dir`: the install makes them, and
-/// the host never does.
-fn audit_files_there(dir: &Path) -> io::Result<()> {
-    for name in ["audit.log", "audit.lock", "audit.skipped"] {
-        let file = dir.join(name);
-        if !file.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "the audit log {} is missing: run the install again",
-                    file.display()
-                ),
-            ));
-        }
     }
     Ok(())
 }
@@ -616,162 +597,34 @@ impl EchoTimer {
 
 /// Append `line` to `dir`'s `audit.log`, first rotating it into
 /// `audit.log.1` (and so on, keeping three) when it has reached `limit`
-/// bytes.
-///
-/// The install makes all four files, root's with the `jev-pilot` group and
-/// mode 0664, so only a member of the group (the setgid host) may write
-/// them, and the owner, not root, cannot remove or replace them. They are
-/// never made here, since a file the host made would be the owner's: a
-/// missing one is an error. Rotation copies within them and truncates, so
-/// they keep their owner and mode.
-///
-/// Two hosts must not rotate under each other, so each holds a lock through
-/// the rotation and the write. The lock is `audit.lock`, which the install
-/// makes root's with the group and mode 0660, not the log: the owner may
-/// read the log, and so could hold it locked and stall the host, but cannot
-/// open the lock.
+/// bytes. The folder and the log are the owner's own, made here when they
+/// are missing.
 ///
 /// # Errors
-/// When a file is missing or cannot be written.
+/// When the log cannot be written.
 pub fn append_audit(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
-    match lock_audit(dir)? {
-        Some(_lock) => append_locked(dir, line, limit),
-        None => append_unlocked(dir, line),
-    }
-}
-
-/// How long a host tries for the lock before it writes without it.
-const LOCK_WAIT: Duration = Duration::from_secs(2);
-
-/// The hosts' lock on `dir`'s audit log, let go when the file closes, or
-/// `None` when another host has held it for [`LOCK_WAIT`]: one stopped by a
-/// signal may hold it for ever, and must not stall the others.
-fn lock_audit(dir: &Path) -> io::Result<Option<File>> {
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(dir.join("audit.lock"))?;
-    let started = std::time::Instant::now();
-    loop {
-        match lock.try_lock() {
-            Ok(()) => return Ok(Some(lock)),
-            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < LOCK_WAIT => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
-            Err(std::fs::TryLockError::Error(e)) => return Err(e),
-        }
-    }
-}
-
-/// Append `line` without the lock: never rotating, since another host may
-/// be, and saying in the line that the lock was not taken.
-fn append_unlocked(dir: &Path, line: &str) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).open(dir.join("audit.log"))?;
-    file.seek(io::SeekFrom::End(0))?;
-    file.write_all(unlocked(line).as_bytes())
-}
-
-/// `line`, an event in JSON, marked as written without the lock.
-fn unlocked(line: &str) -> String {
-    match serde_json::from_str::<serde_json::Value>(line) {
-        Ok(serde_json::Value::Object(mut event)) => {
-            event.insert("lock".into(), "not taken".into());
-            let mut line = serde_json::Value::Object(event).to_string();
-            line.push('\n');
-            line
-        }
-        _ => line.to_owned(),
-    }
-}
-
-/// Append `line`, rotating first when full, under the lock.
-fn append_locked(dir: &Path, line: &str, limit: u64) -> io::Result<()> {
     let log = dir.join("audit.log");
-    // Opened to write, not to append: Windows will not shorten a file
-    // opened only to append. The lock keeps every writer at the end.
-    let mut file = OpenOptions::new().read(true).write(true).open(&log)?;
-    if file.metadata()?.len() >= limit {
+    if std::fs::metadata(&log).is_ok_and(|meta| meta.len() >= limit) {
         for n in (1..AUDIT_KEPT).rev() {
-            let from = std::fs::read(dir.join(format!("audit.log.{n}")))?;
-            overwrite(&dir.join(format!("audit.log.{}", n + 1)), &from)?;
+            let from = dir.join(format!("audit.log.{n}"));
+            if from.exists() {
+                std::fs::rename(&from, dir.join(format!("audit.log.{}", n + 1)))?;
+            }
         }
-        overwrite(&dir.join("audit.log.1"), &std::fs::read(&log)?)?;
-        file.set_len(0)?;
+        std::fs::rename(&log, dir.join("audit.log.1"))?;
     }
-    file.seek(io::SeekFrom::End(0))?;
-    file.write_all(line.as_bytes())
-}
-
-/// Audit the host's start, `started`, at `now`.
-///
-/// A refused start less than a minute after the last one written is not
-/// written: it is counted in `audit.skipped`, which the install makes
-/// beside the log as it makes the lock, and the count is written before the
-/// next start that is. So a loop of refused starts can neither rotate the
-/// log away nor go uncounted.
-///
-/// # Errors
-/// When a file is missing or cannot be written.
-pub fn audit_host_start(dir: &Path, started: &Audit, now: SystemTime) -> io::Result<()> {
-    // Without the lock, the count cannot be kept: the start is written.
-    let Some(_lock) = lock_audit(dir)? else {
-        return append_unlocked(dir, &started.line(&utc(now)));
-    };
-    let mut skipped = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(dir.join("audit.skipped"))?;
-    let mut text = String::new();
-    skipped.read_to_string(&mut text)?;
-    let count: u32 = text.trim().parse().unwrap_or(0);
-    let refused = matches!(
-        started,
-        Audit::HostStarted {
-            refused: Some(_),
-            ..
-        }
-    );
-    if refused && refused_start_lately(&log_tail(&dir.join("audit.log")), now) {
-        return set_count(&mut skipped, count.saturating_add(1));
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+        builder.mode(0o700);
+        options.mode(0o600);
     }
-    let time = utc(now);
-    if count > 0 {
-        append_locked(
-            dir,
-            &Audit::StartsNotWritten { starts: count }.line(&time),
-            AUDIT_LIMIT,
-        )?;
-    }
-    append_locked(dir, &started.line(&time), AUDIT_LIMIT)?;
-    if count > 0 {
-        set_count(&mut skipped, 0)?;
-    }
-    Ok(())
-}
-
-fn set_count(file: &mut File, count: u32) -> io::Result<()> {
-    file.set_len(0)?;
-    file.seek(io::SeekFrom::Start(0))?;
-    writeln!(file, "{count}")
-}
-
-/// The last lines of the log, enough to find the last start.
-fn log_tail(log: &Path) -> String {
-    let Ok(mut file) = File::open(log) else {
-        return String::new();
-    };
-    let length = file.metadata().map_or(0, |m| m.len());
-    let _ = file.seek(io::SeekFrom::Start(length.saturating_sub(8 << 10)));
-    let mut tail = Vec::new();
-    let _ = file.read_to_end(&mut tail);
-    String::from_utf8_lossy(&tail).into_owned()
-}
-
-/// Replace what an existing file holds.
-fn overwrite(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
-    file.write_all(contents)
+    builder.create(dir)?;
+    options.open(&log)?.write_all(line.as_bytes())
 }
 
 /// The host's diagnostics: a file beside the socket, apart from the audit

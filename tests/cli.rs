@@ -719,13 +719,11 @@ fn extension(words: &[&str]) -> ExtensionCommand {
 
 #[test]
 fn the_extension_subcommand_installs_reports_and_removes() {
-    assert_eq!(
-        extension(&["install"]),
-        ExtensionCommand::Install { dev: false }
-    );
-    assert_eq!(
-        extension(&["install", "--dev"]),
-        ExtensionCommand::Install { dev: true }
+    assert_eq!(extension(&["install"]), ExtensionCommand::Install);
+    // There is one install, the owner's own.
+    assert!(
+        parse(["extension", "install", "--dev"].map(str::to_owned)).is_err(),
+        "no --dev"
     );
     assert_eq!(extension(&["status"]), ExtensionCommand::Status);
     assert_eq!(extension(&["uninstall"]), ExtensionCommand::Uninstall);

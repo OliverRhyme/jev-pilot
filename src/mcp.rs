@@ -238,9 +238,6 @@ impl Pilot {
     )]
     pub async fn observe(&self, Parameters(args): Parameters<ObserveArgs>) -> CallToolResult {
         let arguments = to_value(&args);
-        if let Some(said) = development_install(&arguments) {
-            return refused(&said);
-        }
         match invocation("observe", &arguments) {
             Ok(line) => ran(&line),
             Err(said) => refused(&said),
@@ -255,9 +252,6 @@ impl Pilot {
     )]
     pub async fn devices(&self, Parameters(args): Parameters<DevicesArgs>) -> CallToolResult {
         let arguments = to_value(&args);
-        if let Some(said) = development_install(&arguments) {
-            return refused(&said);
-        }
         match invocation("devices", &arguments) {
             Ok(line) => ran(&line),
             Err(said) => refused(&said),
@@ -299,9 +293,6 @@ impl Pilot {
         Parameters(args): Parameters<StartArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let arguments = to_value(&args);
-        if let Some(said) = development_install(&arguments) {
-            return Ok(refused(&said));
-        }
         let line = match invocation("start_run", &arguments) {
             Ok(line) => line,
             Err(said) => return Ok(refused(&said)),
@@ -600,27 +591,25 @@ A BROWSER. Pass `browser` instead of `device` to `observe`, `devices` and \
 `start_run`; naming both is refused. Prefer the first of three modes.
 
 `mode` 'extension' drives the owner's own Chrome through the jev-pilot \
-extension. Setting it up is a one-time install by the owner, as an \
+extension. Setting it up is a one-time install by the owner, needing no \
 administrator; after that there is no click per call, and nothing waits for \
 anyone. Its policy, which only the \
 owner can change, decides which sites a run may visit and which of the owner's \
 tabs it may take. When it stops a call, the message names the fix: pass it to \
 the owner, and do not work round it.
-- Not set up: the owner runs `sudo jev-pilot extension install` once (an \
-elevated prompt on Windows) and loads the extension in chrome://extensions.
+- Not set up: the owner runs `jev-pilot extension install` once and loads \
+the extension in chrome://extensions.
 - Chrome is not running with the extension: ask the owner to open Chrome, or \
 to turn the extension on.
 - Paused: 'jev-pilot is paused in Chrome: resume it from the extension's \
 toolbar button'. Only the owner can resume it.
-- A site is refused: the owner may allow it with `sudo jev-pilot extension \
+- A site is refused: the owner may allow it with `jev-pilot extension \
 policy sites add <origin>`. Do not try another address to get past it.
 - `tab` names a tab the run did not open: the owner must 'put that tab in the \
 'jev-pilot' tab group first, so the run may use it', or pass `open` instead.
 - 'something other than the installed jev-pilot answered on the bridge', or \
 'the bridge only serves the installed jev-pilot': an identity check failed, \
 which is what it is there for. Tell the owner, and never retry it.
-- A development install is refused unless this server was started with \
-JEV_PILOT_ALLOW_DEV_BRIDGE=1. Tell the owner; it is theirs to decide.
 The owner sees every run: a notification as it starts, Chrome's 'started \
 debugging' bar, and the run's tabs in a 'jev-pilot' tab group.
 
@@ -964,60 +953,6 @@ pub fn run_key(arguments: &serde_json::Value) -> String {
         };
     }
     text(arguments, "device").unwrap_or_else(|| UNNAMED_DEVICE.to_owned())
-}
-
-/// The refusal for a call through the extension when this system's install
-/// is a development one the server was not told to accept.
-fn development_install(arguments: &serde_json::Value) -> Option<String> {
-    #[cfg(feature = "extension")]
-    {
-        use crate::browser::install;
-        let env = |name: &str| std::env::var(name).ok();
-        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
-        let kind = install::installed_on_this_system(home.as_ref())
-            .ok()
-            .flatten()
-            .map(|found| found.record.kind);
-        development_refusal(arguments, kind, env(install::ALLOW_DEV_BRIDGE).as_deref())
-    }
-    #[cfg(not(feature = "extension"))]
-    {
-        let _ = arguments;
-        None
-    }
-}
-
-/// Why a call through the extension is refused, when the install it would
-/// go through is a development one and the server was not started with
-/// `JEV_PILOT_ALLOW_DEV_BRIDGE=1`.
-///
-/// A development install is the owner's own files, which any program running
-/// as the owner can rewrite, so the bridge it serves proves nothing about who
-/// is at the other end. A person at a terminal sees that in the run's header
-/// and decides for themselves; another agent would read past it, so here the
-/// header becomes a refusal unless whoever started the server chose
-/// otherwise. `kind` is the install found, if any, and `allowed` the
-/// variable's value.
-#[cfg(feature = "extension")]
-#[must_use]
-pub fn development_refusal(
-    arguments: &serde_json::Value,
-    kind: Option<crate::browser::install::InstallKind>,
-    allowed: Option<&str>,
-) -> Option<String> {
-    use crate::browser::install::{ALLOW_DEV_BRIDGE, InstallKind, UNPROTECTED};
-    let through = arguments
-        .get("browser")
-        .and_then(|b| b.get("mode"))
-        .and_then(serde_json::Value::as_str)
-        == Some("extension");
-    (through && kind == Some(InstallKind::Development) && allowed != Some("1")).then(|| {
-        format!(
-            "refused: this is a {UNPROTECTED}. Tell the owner; they can install it properly \
-             with `sudo jev-pilot extension install`, or start this server with \
-             {ALLOW_DEV_BRIDGE}=1 to accept it"
-        )
-    })
 }
 
 /// What a phone run that named no device is called.
