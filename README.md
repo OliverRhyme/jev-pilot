@@ -42,7 +42,7 @@ One program, `jev-pilot`, prebuilt for macOS (Apple silicon and Intel), Linux
 | --- | --- |
 | `jev-pilot "<goal>"` | Observes the screen, asks Jev, and drives the device. |
 | `jev-pilot --browser extension\|fresh\|attach "<goal>"` | The same, in a Chrome tab. See [A web browser](#a-web-browser). |
-| `sudo jev-pilot extension install` | Sets up the bridge to Chrome's jev-pilot extension, once per machine. See [The jev-pilot extension](#the-jev-pilot-extension). |
+| `jev-pilot extension install` | Sets up the bridge to Chrome's jev-pilot extension, once, in your own folders. See [The jev-pilot extension](#the-jev-pilot-extension). |
 | `jev-pilot mcp` | Serves the Model Context Protocol over stdio, so an agent can start runs and answer their questions. Each tool call runs this same program, so the server and the command line cannot drift apart. |
 
 ### 1. Install jev-pilot
@@ -368,10 +368,7 @@ run.
 `mode: "extension"` is the one to use for the owner's own Chrome. It becomes
 `--browser extension --sites-only`, and nothing waits for a click: the owner
 set the extension up once, and its policy decides which sites and tabs a run
-may have. The server refuses a [development install](#a-development-install)
-unless it was started with `JEV_PILOT_ALLOW_DEV_BRIDGE=1`, and says so in the
-refusal, because another agent would read straight past the warning a run
-prints for one. Its instructions tell the client what to pass on to the owner
+may have. Its instructions tell the client what to pass on to the owner
 when the extension is not set up, is paused, refuses a site, or is asked for
 a tab outside the "jev-pilot" group, and never to retry a refused identity
 check.
@@ -494,7 +491,7 @@ knows which.
 
 | Mode | What it drives | What it asks of you |
 | --- | --- | --- |
-| `--browser extension` | Your own Chrome, signed in as you, through the jev-pilot extension | Nothing per run, after a one-time install as an administrator |
+| `--browser extension` | Your own Chrome, signed in as you, through the jev-pilot extension | Nothing per run, after a one-time install |
 | `--browser fresh` | A browser started for the run, on a throwaway profile | Nothing |
 | `--browser attach` | Your own Chrome, over remote debugging | A click on Allow for every connection |
 
@@ -507,8 +504,7 @@ Chrome without it.
 small extension that ships inside jev-pilot. A run speaks to it over a local
 socket (a named pipe on Windows) to a native messaging host that Chrome
 starts, which is the installed jev-pilot itself. Nobody clicks anything during
-a run: what a run may do is set once, by an administrator, in the extension's
-policy.
+a run: what a run may do is set once, in the extension's policy.
 
 You see every run:
 
@@ -517,9 +513,8 @@ You see every run:
   of every tab at once, and the run ends saying so;
 - the run's tabs, in a tab group named "jev-pilot";
 - the extension's toolbar button. Its badge shows "!" when the bridge is
-  missing, and its popup shows the bridge's state, the browser, whether the
-  install is protected or a development one, the current run, the policy, and
-  a pause switch.
+  missing, and its popup shows the bridge's state, the browser, the current
+  run, the policy, and a pause switch.
 
 The pause switch refuses every new tab, attach and command until you turn it
 off, and a run that meets it stops with "jev-pilot is paused in Chrome: resume
@@ -529,76 +524,57 @@ ends, the extension lets go of every tab it held.
 
 #### Installing it
 
-Once per machine, as an administrator, after installing jev-pilot itself:
+Once, after installing jev-pilot itself, as yourself (no `sudo`, no
+administrator):
 
 ```console
-$ sudo jev-pilot extension install           # macOS and Linux
+$ jev-pilot extension install
 ```
 
-```powershell
-jev-pilot extension install                  # Windows, from a prompt run as administrator
-```
-
-The install copies the running jev-pilot where only an administrator can
-write, pins its identity, writes the extension's files and its `policy.json`
-(keeping an existing one), registers the host with Google Chrome, turns off
-Chrome's user-level native messaging hosts, creates the audit log's
-folder, and prints what it changed. Native messaging hosts you already had at
-user level (Claude in Chrome's, for example) are copied to system level first,
-so they keep working, and `uninstall` puts them back.
+The install is like any other Chrome native messaging host's, Claude in
+Chrome's included: it writes only in your own folders. It copies the running
+jev-pilot there, pins its identity in `install.json`, writes the extension's
+files and its `policy.json` (keeping an existing one), registers the host with
+Google Chrome for you alone, makes the audit log's folder, and prints what it
+did. It sets no Chrome policy, so Chrome does not say it is managed, and your
+other native messaging hosts are left alone.
 
 **Google Chrome only.** The host serves branded Google Chrome, stable, Beta,
 Dev or Canary, and nothing else: not Chrome for Testing, Chromium, Edge or
 Brave, which load any unpacked extension they are told to on the command line.
 On Linux that means Chrome installed under `/opt/google/`; a Snap or Flatpak
-browser is not served.
+browser is not served. On Windows, Chrome may be installed for the machine
+(under Program Files) or for you alone (in your local app data).
 
 | | macOS | Linux | Windows |
 | --- | --- | --- | --- |
-| jev-pilot (also the host) | `/usr/local/libexec/jev-pilot/jev-pilot`, setgid `jev-pilot`, re-signed with the hardened runtime | `/usr/local/libexec/jev-pilot/jev-pilot`, setgid `jev-pilot` | `%ProgramFiles%\jev-pilot\jev-pilot.exe` |
-| What each end expects of the other (`install.json`) | `/Library/Application Support/jev-pilot/` | `/etc/jev-pilot/` | `%ProgramFiles%\jev-pilot\` |
-| The extension and its `policy.json` | `/Library/Application Support/jev-pilot/extension/` | `/usr/local/share/jev-pilot/extension/` | `%ProgramFiles%\jev-pilot\extension\` |
-| User-level hosts turned off by | a configuration profile you approve once | `/etc/opt/chrome/policies/managed/jev-pilot.json` and each other browser's | `HKLM\SOFTWARE\Policies\Google\Chrome` and each other browser's |
-| Audit log | `/Library/Logs/jev-pilot/` | `/var/log/jev-pilot/` | `%ProgramData%\jev-pilot\audit\` |
-
-**On macOS**, Chrome honours the setting that turns user-level hosts off only
-as a mandatory policy, which on a Mac nobody manages means a configuration
-profile. The install writes one and opens it: approve it in System Settings ›
-General › Device Management. Until you do, `jev-pilot extension status` says
-"Chrome still accepts user-level native hosts", and a program running as you
-could register a host of its own under jev-pilot's name. With the profile in
-place, Chrome says it is
-"managed by your organization"; that is the profile, and it sets nothing else.
+| jev-pilot (also the host), `install.json`, the extension and its `policy.json`, the audit log | `~/Library/Application Support/jev-pilot/` (the binary re-signed with the hardened runtime) | `~/.local/share/jev-pilot/` | `%LOCALAPPDATA%\jev-pilot\` |
+| The host's registration | `NativeMessagingHosts/` in each Chrome channel's folder under `~/Library/Application Support/Google/` | `NativeMessagingHosts/` in each Chrome channel's folder under `~/.config/` | `HKCU\SOFTWARE\Google\Chrome\NativeMessagingHosts` |
 
 **Then, in Chrome**, once:
 
 1. Open `chrome://extensions` and turn on Developer mode.
 2. Choose "Load unpacked" and pick the extension folder the install printed
    (the table above).
-3. Run `jev-pilot extension status`. It says what is installed, how well it is
-   protected, whether Chrome's policy is in place, the allowed sites, and
-   whether the bridge answers.
+3. Run `jev-pilot extension status`. It says what is installed, the allowed
+   sites, and whether the bridge answers.
 
 **Developer mode must stay on.** Since Chrome 134 an unpacked extension runs
 only with Developer mode on; switch it off and the extension is disabled at
 the next start, and runs say "Chrome is not running with the jev-pilot
-extension". Chrome reminds you that Developer mode is on when it starts. An
-unpacked extension's files are not checked by Chrome against anything, which
-is why the folder they are loaded from is one only an administrator can
-write.
+extension". Chrome reminds you that Developer mode is on when it starts.
 
-`sudo jev-pilot extension uninstall` (or elevated on Windows) removes what the
-install made and restores the hosts it moved; on macOS it tells you to remove
-the profile in System Settings.
+`jev-pilot extension uninstall` removes the registration and what the install
+made, and keeps the audit log.
 
 #### Upgrading
 
 `jev-pilot update` replaces the copy on your `PATH`, but the bridge serves only
-the installed copy, so an upgrade needs the admin command again:
+the installed copy, so install again after an upgrade:
 
 ```console
 $ jev-pilot update
-$ sudo jev-pilot extension install
+$ jev-pilot extension install
 ```
 
 Installing again updates everything in place and re-pins the new binary's
@@ -609,23 +585,17 @@ jev-pilot is <v>, the installed one is <w>: run the install again" and goes on
 with the installed copy, which is the one any `--browser extension` run hands
 itself to.
 
-An install made before the audit log gained its `audit.lock` and
-`audit.skipped` files has neither, and the install is the only thing that makes
-them, since the owner must not be able to write them. Until
-`sudo jev-pilot extension install` (or its elevated equivalent on Windows) is
-run again, the host does not serve, and its error names the missing file.
-
 #### What a run may do: the policy
 
-`policy.json` lives in the admin-owned extension folder, and the extension
-reads it for every request it checks. Nothing a run sends, and nothing in
-Chrome's storage, can change it. The popup shows it, read-only.
+`policy.json` lives in the extension's folder, and the extension reads it for
+every request it checks. Nothing a run sends, and nothing in Chrome's storage,
+can change it. The popup shows it, read-only.
 
 ```console
-$ sudo jev-pilot extension policy sites add https://github.com
-$ sudo jev-pilot extension policy sites add "https://*.example.com"
-$ sudo jev-pilot extension policy sites remove https://github.com
-$ sudo jev-pilot extension policy owner-tabs group    # or never
+$ jev-pilot extension policy sites add https://github.com
+$ jev-pilot extension policy sites add "https://*.example.com"
+$ jev-pilot extension policy sites remove https://github.com
+$ jev-pilot extension policy owner-tabs group    # or never
 ```
 
 - **Sites.** A run may open, attach to and navigate to only the listed
@@ -644,52 +614,49 @@ $ sudo jev-pilot extension policy owner-tabs group    # or never
   `about:blank`: never `chrome:`, `chrome-extension:`, `file:`, `devtools:`,
   `view-source:` or the Web Store.
 
-#### How the bridge is protected
+#### What the bridge protects, and what it does not
 
-A run hands a page's text to Jev and acts on your signed-in sessions, so the
-bridge is built so that only the installed jev-pilot can use it. Five layers:
+In short:
+
+- **The bridge is protected from other users and from other machines.** Only
+  you can reach it.
+- **A program running as you could pose as jev-pilot.** That is the same
+  limit Claude in Chrome's bridge has, and any native messaging host
+  installed in your own folders: whatever runs as you can change what is in
+  them.
+- **The extension's own limits still apply** to every run, whoever starts it:
+  the allowed sites, the tab rules, the DevTools methods it allows, and the
+  pause switch.
+
+In more detail:
 
 1. **The local channel.** A Unix socket of mode 0600, in a folder of mode 0700
    that is yours (`~/Library/Application Support/jev-pilot/run/` on macOS;
    `$XDG_RUNTIME_DIR/jev-pilot/`, else `~/.local/state/jev-pilot/run/`, on
    Linux), or on Windows a named pipe whose access list admits only you and
-   the system, and refuses remote clients. Each run is served on a new
-   instance of the pipe, so you may create instances; a program running as
-   you could therefore add one of its own and wait for a run, which is why
-   the run checks who serves it before it sends anything (the next layer).
-   Other users, other machines and web pages cannot connect. Any program
-   running as you still could, which is what the next layers are for.
+   the system, and refuses remote clients. Other users, other machines and web
+   pages cannot connect.
 2. **Which program is at the other end.** Each end asks the OS about the
-   other. On macOS, the peer's audit token and its code signature, checked
-   against the requirement pinned at install. On Linux, the peer's kernel
-   credentials: only a process started from the root-owned setgid binary has
-   the `jev-pilot` group, and that also makes it impossible for a program
-   running as you to trace it or preload code into it. On Windows, the pipe's
-   client or server process, its image path under Program Files, and that
-   image's SHA-256 (or Authenticode signer, for a signed build). Every run also
-   echoes a nonce the host hands it, and on macOS, where the kernel names the
-   peer when asked rather than when it connected, the host checks again once
-   the first frame is read. A refusal names the check that failed, and the
-   host logs it.
-3. **An admin-owned install.** The binary, the extension's files, its policy
-   and the host registration are where only an administrator can write, so a
-   program running as you cannot rewrite what the checks compare against. The
-   policy turning off user-level hosts stops it registering its own host under
-   jev-pilot's name, which Chrome would otherwise prefer.
+   other and compares the answer with what the install pinned: on macOS, the
+   peer's audit token and its code signature; on Linux, its credentials and
+   the SHA-256 of the program it runs; on Windows, the pipe's process, the
+   path of its image and that image's SHA-256. Every run also echoes a nonce
+   the host hands it, and the run checks the host again once it has read it.
+   This catches a stray program on the channel or a copy of jev-pilot that is
+   not the installed one; it cannot stop a program running as you that
+   rewrites the installed copy or its pins, since those are yours.
+3. **The program that started the host.** The host serves nothing unless it
+   was started by Google Chrome: on macOS, by Chrome's code signature; on
+   Linux, by a root-owned program at one of Chrome's own paths under
+   `/opt/google/` (or that path marked " (deleted)", for a Chrome still running
+   after an upgrade replaced its file); on Windows, System32's cmd.exe started
+   by a Google-signed chrome.exe. Each start is written to the audit log with
+   its parent. A program running as you can still get past this by driving
+   Chrome itself, for instance starting it with a modified copy of the
+   extension.
 4. **Per-run limits.** The policy above, enforced by the extension.
 5. **The audit log, and what you see.** Every run is written down, and every
    run raises a notification, Chrome's debugging bar and the tab group.
-
-The host also checks the program that started it, and serves nothing unless
-that is Google Chrome. On macOS the check is Chrome's code signature; on Linux,
-the path of the program, which must be a root-owned regular file at one of
-Chrome's own paths under `/opt/google/` (or that path marked " (deleted)", for a
-Chrome still running after an upgrade replaced its file); on Windows, System32's
-cmd.exe started by a Google-signed chrome.exe under Program Files. Each start is
-written to the audit log, a refused one at most about once a minute, with a
-count of those refused since. This narrows what a program running as you can
-pose as; it cannot stop one that drives Chrome itself (see
-[What it cannot protect against](#what-it-cannot-protect-against)).
 
 The two refusals mean different things. "something other than the installed
 jev-pilot answered on the bridge (…); nothing was sent" is the run refusing the
@@ -697,90 +664,24 @@ host: something is squatting on the channel. "the bridge only serves the
 installed jev-pilot at … (…)" is the host refusing the run. Neither is worth
 retrying.
 
-#### What it cannot protect against
-
-**The front door, on every OS.** A program running as you can start the
-genuine, installed jev-pilot with a goal and sites of its own choosing, and
-every check passes, because it *is* jev-pilot. Telling your agent from malware
-would need you present, which running with no click rules out. What bounds it:
-such a run gets only what any run gets (Jev choosing among offered rows,
-`navigate` only to the addresses it names, the allowed sites, the tab rules,
-and no cookies, storage, network or script of its own), it raises a
-notification, and on macOS and Linux it is written to a log it cannot erase.
-
-**Posing as the extension, on every OS.** The host's check of the program that
-started it is made of facts a program running as you can still arrange, by
-driving Chrome itself:
-
-- On Linux, a program can start the host, keep its pipes in a process of its
-  own, and then replace itself with Chrome by exec, so the host's parent is
-  Chrome's own file when it is checked. On macOS the host also checks that its
-  parent has not exec'd since it started.
-- A program running as you can start Chrome with a modified copy of the
-  extension that keeps its key, and so its id: Google Chrome 137 to 141 still
-  loads one from `--load-extension` when also given
-  `--disable-features=DisableLoadExtensionCommandLineSwitch`, and Google Chrome
-  started with `--remote-debugging-pipe --enable-unsafe-extension-debugging`
-  accepts DevTools' `Extensions.loadUnpacked`. It can also write to Chrome's
-  profile, which Chrome protects only weakly, to the same end.
-- On Linux, Chrome started with `LD_PRELOAD` runs the program's code inside
-  Chrome.
-- On Windows, a process may name any process it can open as the parent of one
-  it creates (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`), so the host's parent
-  can be made to be Chrome's.
-
-Each of these is more work than speaking the protocol directly, and each start
-of the host is in the audit log with its parent; refused starts are logged at
-most about once a minute, with a count.
-
-**macOS** gives the most. Without a prompt, a program running as you cannot
-drive the screen, read it, script Chrome or read Chrome's cookie key, and the
-layers above keep the bridge from being a way round those. It can still write
-to Chrome's profile folder, which Chrome protects only weakly; that threat
-exists with or without jev-pilot.
-
-**Linux.** Under X11 any client can already send input to Chrome and read the
-screen, so the bridge adds little to what such a program has; Wayland needs a
-portal prompt. Without the setgid install, a distribution whose Yama
-`ptrace_scope` defaults to 0 (Debian, and Fedora 44 and earlier) lets a
-program running as you trace jev-pilot. No Linux secret store hides a secret
-from code running as you, which is why the bridge holds none.
-
-**Windows.** A process running as you at the same integrity level can open
-another of your processes, inject code into it, and send input to its windows;
-Google says as much of Chrome itself. So on Windows the checks stop a program
-that speaks the protocol directly, or a copied or patched jev-pilot, but not
-one that injects into the genuine jev-pilot or into Chrome. Windows has no
-setgid, so the audit log is one you, and anything running as you, can edit.
+A program running as you can also start the installed jev-pilot with a goal
+and sites of its own, and every check passes, because it *is* jev-pilot.
+Telling your agent from malware would need you present, which running with no
+click rules out. Such a run gets only what any run gets (Jev choosing among
+offered rows, `navigate` only to the addresses it names, the allowed sites, the
+tab rules, and no cookies, storage, network or script of its own), and it
+raises a notification.
 
 #### The audit log
 
-The host appends one JSON line for each run started (the time, the run's pid,
-its parent's pid and program, the goal, the addresses, and the identity
-check's result), each tab attached and site visited, each run ended and how,
-and each connection refused and which check failed it. It rotates the log at
-4 MiB and keeps three old ones. `jev-pilot extension log` shows it.
-
-On macOS and Linux the log's folder belongs to root and the `jev-pilot` group,
-so only the setgid jev-pilot can add to it: you can read it, and nothing
-running as you can alter it.
-
-#### A development install
-
-```console
-$ jev-pilot extension install --dev
-```
-
-For working on jev-pilot itself: no administrator, everything in a folder of
-yours (`~/Library/Application Support/jev-pilot/dev/` on macOS,
-`~/.local/share/jev-pilot/dev/` on Linux, `%LOCALAPPDATA%\jev-pilot\dev\` on
-Windows), the binary's hash pinned in a file you can write, no setgid group,
-and the host registered at user level. Load the extension from that folder in
-the same way. It is not protected against other programs running as you, and
-it says so everywhere it shows: "development install: not protected against
-other programs running as you", in `status`, in every run's header, and in the
-popup. The MCP server refuses one unless it was started with
-`JEV_PILOT_ALLOW_DEV_BRIDGE=1`.
+The host appends one JSON line for each start of the host (with the program
+that started it), each run started (the time, the run's pid, its parent's pid
+and program, the goal, the addresses, and the identity check's result), each
+tab attached and site visited, each run ended and how, and each connection
+refused and which check failed it; refusals are written at most once a minute,
+with a count of those left out. It rotates the log at 4 MiB and keeps three old
+ones. `jev-pilot extension log` shows it. The log is in your own folder, so it
+is a record for you, not proof against a program running as you.
 
 ### A fresh browser
 
