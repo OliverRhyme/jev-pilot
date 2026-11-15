@@ -85,12 +85,8 @@ pub enum Invocation {
 /// Not `#[non_exhaustive]`, for the reason [`Invocation`] is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtensionCommand {
-    /// Install the host, the extension and Chrome's policy.
-    Install {
-        /// A user-owned development install, not protected against other
-        /// programs running as the owner.
-        dev: bool,
-    },
+    /// Install the host and the extension in the owner's own folders.
+    Install,
     /// Say what is installed and whether the bridge answers.
     Status,
     /// Remove what the install made.
@@ -431,10 +427,9 @@ fn host(origin: &str, rest: impl Iterator<Item = String>) -> Result<Invocation, 
 fn extension(mut args: impl Iterator<Item = String>) -> Result<Invocation, CliError> {
     let word = |got: Option<String>| got.ok_or(CliError::MissingValue("extension"));
     let command = match word(args.next())?.as_str() {
-        "install" => match args.next().as_deref() {
-            None => ExtensionCommand::Install { dev: false },
-            Some("--dev") => ExtensionCommand::Install { dev: true },
-            Some(other) => return Err(CliError::UnknownFlag(other.to_owned())),
+        "install" => match args.next() {
+            None => ExtensionCommand::Install,
+            Some(other) => return Err(CliError::UnknownFlag(other)),
         },
         "status" => ExtensionCommand::Status,
         "uninstall" => ExtensionCommand::Uninstall,
@@ -819,19 +814,17 @@ USAGE
                                       --browser, a browser's tabs)
   jev-pilot observe                   print what the next step would be offered
   jev-pilot helper [install]          report on, or install, the on-device helper
-  jev-pilot extension install [--dev] set up the bridge to Chrome's jev-pilot
-                                      extension (as an administrator; --dev is a
-                                      user-owned install, not protected against
-                                      other programs running as you)
+  jev-pilot extension install         set up the bridge to Chrome's jev-pilot
+                                      extension, in your own folders
   jev-pilot extension status          say what is set up, and whether Chrome answers
-  jev-pilot extension uninstall       remove the bridge (as an administrator)
+  jev-pilot extension uninstall       remove the bridge
   jev-pilot extension log             show the bridge's audit log
   jev-pilot extension policy sites add|remove <origin>
                                       allow a site, or stop allowing it; an empty
-                                      list allows every site (as an administrator)
+                                      list allows every site
   jev-pilot extension policy owner-tabs group|never
                                       whether --tab may take your own tabs in the
-                                      'jev-pilot' tab group (as an administrator)
+                                      'jev-pilot' tab group
   jev-pilot mcp                       serve MCP over stdio, for an agent to drive runs
   jev-pilot update                    update to the latest release
   jev-pilot --version                 say which version this is

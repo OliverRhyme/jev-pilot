@@ -694,50 +694,6 @@ fn an_extension_run_is_named_browser_extension() {
     );
 }
 
-/// A development install is not protected against other programs running as
-/// the owner, so another agent may drive Chrome through one only when whoever
-/// started the server said so.
-#[cfg(feature = "extension")]
-#[test]
-fn a_development_install_is_refused_unless_the_server_allows_it() {
-    use jev_pilot::browser::install::{ALLOW_DEV_BRIDGE, InstallKind};
-    use jev_pilot::mcp::development_refusal;
-
-    let through = json!({"browser": {"mode": "extension"}});
-    let said = development_refusal(&through, Some(InstallKind::Development), None)
-        .expect("refused without the variable");
-    assert!(said.contains("development install"), "{said}");
-    assert!(said.contains(&format!("{ALLOW_DEV_BRIDGE}=1")), "{said}");
-    assert!(
-        development_refusal(&through, Some(InstallKind::Development), Some("0")).is_some(),
-        "only 1 allows it"
-    );
-    assert_eq!(
-        development_refusal(&through, Some(InstallKind::Development), Some("1")),
-        None
-    );
-    assert_eq!(
-        development_refusal(&through, Some(InstallKind::Protected), None),
-        None
-    );
-    assert_eq!(
-        development_refusal(&through, None, None),
-        None,
-        "with nothing installed, the run itself says how to set it up"
-    );
-    for other in [
-        json!({"browser": {"mode": "attach"}}),
-        json!({"browser": {"mode": "fresh"}}),
-        json!({"device": "abc123"}),
-    ] {
-        assert_eq!(
-            development_refusal(&other, Some(InstallKind::Development), None),
-            None,
-            "{other}"
-        );
-    }
-}
-
 /// The instructions put the extension first, and tell the client what to say
 /// to the owner for each way it can stop a run; attach mode follows as the
 /// fallback, with its click on Allow.
@@ -760,16 +716,20 @@ fn the_guidance_leads_with_the_extension() {
     for said in [
         "one-time",
         "no click",
-        "sudo jev-pilot extension install",
+        "`jev-pilot extension install`",
         "resume it from the extension's toolbar button",
-        "sudo jev-pilot extension policy sites add",
+        "`jev-pilot extension policy sites add",
         "put that tab in the 'jev-pilot' tab group first",
-        "JEV_PILOT_ALLOW_DEV_BRIDGE=1",
         "browser:extension",
         "click Allow",
     ] {
         at(said);
     }
+    assert!(
+        !guidance.contains("sudo"),
+        "the install needs no administrator"
+    );
+    assert!(!guidance.contains("JEV_PILOT_ALLOW_DEV_BRIDGE"));
     let identity = &guidance[at("something other than the installed jev-pilot")..];
     assert!(
         identity

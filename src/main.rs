@@ -157,7 +157,7 @@ fn serve_mcp() -> Result<(), Box<dyn core::error::Error>> {
 
 fn run() -> Result<(), Box<dyn core::error::Error>> {
     let invocation = cli::parse(std::env::args().skip(1))?;
-    bridge::give_up_group(&invocation)?;
+    bridge::run_as_installed_copy(&invocation)?;
     match invocation {
         Invocation::Help => {
             print!("{}", cli::USAGE);
@@ -990,9 +990,6 @@ mod web {
                     "Chrome, through the jev-pilot extension".to_owned(),
             }
         );
-        if let Some(header) = super::bridge::development_header(target) {
-            println!("{header}");
-        }
         if let Some(tab) = session.describe_tab() {
             println!("tab    : {tab}");
         }
@@ -1036,9 +1033,7 @@ mod bridge {
     use jev_pilot::browser::discover::Os;
     use jev_pilot::browser::host::channel::{Place, connect_run, host_answers};
     use jev_pilot::browser::host::{Serve, serve};
-    use jev_pilot::browser::install::{
-        self, Found, InstallKind, Installer, Layout, NOT_SET_UP, Status, UNPROTECTED, UserHosts,
-    };
+    use jev_pilot::browser::install::{self, Found, Installer, Layout, NOT_SET_UP, Status};
     use jev_pilot::cli::{BrowserMode, BrowserTarget, ExtensionCommand, Invocation};
     use jev_pilot::peer::{Expected, Native};
     use std::path::{Path, PathBuf};
@@ -1063,22 +1058,9 @@ mod bridge {
         std::fs::read_to_string(path)
     }
 
-    /// Where Windows keeps Program Files and ProgramData, as the system
-    /// says.
-    #[cfg_attr(
-        not(windows),
-        allow(clippy::unnecessary_wraps, reason = "Windows can fail")
-    )]
-    fn folders() -> Result<install::SystemFolders, Error> {
-        #[cfg(windows)]
-        return Ok(install::SystemFolders::of_this_system()?);
-        #[cfg(not(windows))]
-        Ok(install::SystemFolders::of_this_system())
-    }
-
     /// The installed copy, or why there is none.
     fn installed() -> Result<Found, Error> {
-        install::find_installed(Os::current(), &folders()?, &home()?, &env, &read_install)?
+        install::find_installed(Os::current(), &home()?, &env, &read_install)?
             .ok_or_else(|| NOT_SET_UP.into())
     }
 
@@ -1101,25 +1083,13 @@ mod bridge {
         )
     }
 
-    /// Give up the setgid install's group, first thing, in every mode but
-    /// two: the host keeps it (a run reads the host's credentials as they
-    /// were when it listened, and only the group may append to the audit
-    /// log; the host starts no other program), and a run through the
-    /// extension gives it up right after connecting. Before that, a run
-    /// through the extension that is not the installed copy runs the
-    /// installed copy instead.
-    ///
-    /// A development install is never made non-dumpable: its peer could not
-    /// then read its executable to check its hash.
-    pub fn give_up_group(invocation: &Invocation) -> Result<(), Error> {
+    /// A run through the extension that is not the installed copy runs the
+    /// installed copy instead, first thing: only that copy passes the
+    /// host's check.
+    pub fn run_as_installed_copy(invocation: &Invocation) -> Result<(), Error> {
         if through_extension(invocation) {
             return run_the_installed_copy();
         }
-        if matches!(invocation, Invocation::Host) {
-            return Ok(());
-        }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        jev_pilot::peer::drop_install_group()?;
         Ok(())
     }
 
@@ -1151,14 +1121,6 @@ mod bridge {
         }
     }
 
-    /// The label a development install carries in a run's header.
-    pub fn development_header(target: &BrowserTarget) -> Option<String> {
-        if !matches!(target.mode, BrowserMode::Extension { .. }) {
-            return None;
-        }
-        install::run_header(installed().ok()?.record.kind)
-    }
-
     /// Where the channel is on this system.
     fn place() -> Result<Place, Error> {
         #[cfg(windows)]
@@ -1188,8 +1150,7 @@ mod bridge {
         Ok(expected)
     }
 
-    /// A run's way onto the bridge: check the host, take the bridge, then
-    /// give up the install's group.
+    /// A run's way onto the bridge: check the host, then take the bridge.
     pub fn connect(target: &BrowserTarget, goal: &str) -> Result<super::web::AnyWire, Error> {
         let found = installed()?;
         let sites: Vec<String> = target.urls.iter().map(ToString::to_string).collect();
@@ -1201,20 +1162,16 @@ mod bridge {
             &sites,
             &jev_pilot::peer::parent(),
         )?;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        jev_pilot::peer::drop_install_group()?;
         Ok(super::web::AnyWire::Extension(wire))
     }
 
     /// Host mode: Chrome started this program for the extension.
     ///
     /// The host is the genuine installed copy whoever starts it, so it first
-    /// checks that the program that started it is a browser, audits what it
-    /// found, and serves nothing otherwise: a program running as the owner
-    /// could otherwise start it on pipes of its own and pose as the
-    /// extension.
+    /// checks that the program that started it is Google Chrome, audits what
+    /// it found, and serves nothing otherwise.
     pub fn host() -> Result<(), Error> {
-        use jev_pilot::browser::host::{Audit, audit_host_start};
+        use jev_pilot::browser::host::{AUDIT_LIMIT, Audit, append_audit, utc};
         let found = installed()?;
         let parent = jev_pilot::peer::browser::browser_parent();
         let started = Audit::HostStarted {
@@ -1222,16 +1179,14 @@ mod bridge {
             parent_exe: parent.exe.as_ref().map(|e| e.display().to_string()),
             refused: parent.verdict.clone().err(),
         };
-        // A refused start within a minute of the last is counted, not
-        // written, so a loop of them cannot rotate the log away.
-        audit_host_start(
+        append_audit(
             &found.layout.audit_log,
-            &started,
-            std::time::SystemTime::now(),
+            &started.line(&utc(std::time::SystemTime::now())),
+            AUDIT_LIMIT,
         )?;
         if let Err(why) = parent.verdict {
             return Err(format!(
-                "the host serves only a browser, and what started it ({}) is not one: {why}",
+                "the host serves only Google Chrome, and what started it ({}) is not: {why}",
                 parent
                     .exe
                     .map_or_else(|| "unknown".to_owned(), |e| e.display().to_string())
@@ -1314,7 +1269,7 @@ mod bridge {
     /// `jev-pilot extension …`.
     pub fn command(command: ExtensionCommand) -> Result<(), Error> {
         match command {
-            ExtensionCommand::Install { dev } => install_bridge(dev),
+            ExtensionCommand::Install => install_bridge(),
             ExtensionCommand::Status => status(),
             ExtensionCommand::Uninstall => uninstall(),
             ExtensionCommand::Log => log(),
@@ -1327,86 +1282,29 @@ mod bridge {
         }
     }
 
-    /// Whether this process has an administrator's rights.
+    /// Who the install is for: the owner running it.
     #[cfg_attr(
         not(windows),
         allow(clippy::unnecessary_wraps, reason = "Windows can fail")
     )]
-    fn is_admin() -> Result<bool, Error> {
+    fn installer() -> Result<Installer, Error> {
         #[cfg(unix)]
-        return Ok(rustix::process::geteuid().is_root());
+        return Ok(Installer::Uid(rustix::process::getuid().as_raw()));
         #[cfg(windows)]
-        return Ok(jev_pilot::peer::elevated()?);
+        return Ok(Installer::Sid(jev_pilot::peer::own_sid()?));
     }
 
-    const NEEDS_ADMIN: &str = "this changes what only an administrator may: run it with sudo \
-                               (an elevated prompt on Windows)";
-
-    /// Who the install is for, and where their home is.
-    fn installer(dev: bool) -> Result<(Installer, PathBuf), Error> {
-        #[cfg(unix)]
-        {
-            if dev {
-                return Ok((Installer::Uid(rustix::process::getuid().as_raw()), home()?));
-            }
-            // Run with sudo: the owner is who ran sudo.
-            let uid: u32 = env("SUDO_UID")
-                .and_then(|u| u.parse().ok())
-                .ok_or("run it with sudo from your own account, so the bridge is pinned to you")?;
-            let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))?
-                .ok_or("cannot find the account that ran sudo")?;
-            Ok((Installer::Uid(uid), user.dir))
-        }
-        #[cfg(windows)]
-        {
-            if !dev {
-                install::check_elevated_account()?;
-            }
-            Ok((Installer::Sid(jev_pilot::peer::own_sid()?), home()?))
-        }
-    }
-
-    fn install_bridge(dev: bool) -> Result<(), Error> {
+    fn install_bridge() -> Result<(), Error> {
         let os = Os::current();
-        if !dev {
-            println!("{}\n", install::MANAGED_WARNING);
-        }
-        if !dev && !is_admin()? {
-            return Err(format!(
-                "{NEEDS_ADMIN}, or `jev-pilot extension install --dev` for a development \
-                 install"
-            )
-            .into());
-        }
-        let (installer, owner_home) = installer(dev)?;
-        let (kind, layout) = if dev {
-            (
-                InstallKind::Development,
-                Layout::development(os, &owner_home, &env),
-            )
-        } else {
-            (InstallKind::Protected, Layout::protected(os, &folders()?))
-        };
-        let hosts = user_hosts(os, kind, &owner_home)?;
-        // What an earlier install moved stays recorded, so uninstalling
-        // still removes it.
-        let moved_hosts = std::fs::read_to_string(&layout.install_json)
-            .ok()
-            .and_then(|text| serde_json::from_str::<install::InstallRecord>(&text).ok())
-            .map_or_else(Vec::new, |record| record.moved_hosts);
-        let existing = install::Existing {
-            moved_hosts,
-            user_host_dirs: user_host_dirs(os, &owner_home),
-        };
-        let steps = install::plan(
-            os,
-            kind,
-            &layout,
-            &std::env::current_exe()?,
-            &hosts,
-            &existing,
-        );
-        for line in install::apply(&steps, &installer, kind)? {
+        let home = home()?;
+        let layout = Layout::new(os, &home, &env);
+        // Registered for each Chrome channel the owner has.
+        let chrome: Vec<PathBuf> = install::chrome_host_dirs(os, &home)
+            .into_iter()
+            .filter(|dir| dir.parent().is_some_and(Path::exists))
+            .collect();
+        let steps = install::plan(os, &layout, &std::env::current_exe()?, &chrome);
+        for line in install::apply(&steps, &installer()?)? {
             println!("{line}");
         }
         println!(
@@ -1414,9 +1312,6 @@ mod bridge {
             env!("CARGO_PKG_VERSION"),
             layout.binary.display()
         );
-        if dev {
-            println!("{UNPROTECTED}");
-        }
         println!(
             "\nNext, in Chrome: open chrome://extensions, turn on Developer mode (Chrome \
              reminds you of it when it starts), choose \"Load unpacked\", and pick\n  {}\n\
@@ -1426,82 +1321,8 @@ mod bridge {
         Ok(())
     }
 
-    /// The owner's user-level host folders that exist, not followed
-    /// through a link.
-    fn user_host_dirs(os: Os, home: &Path) -> Vec<PathBuf> {
-        install::user_host_dirs(os, home)
-            .into_iter()
-            .map(|(user, _)| user)
-            .filter(|dir| std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()))
-            .collect()
-    }
-
-    /// The owner's user-level hosts, as the install deals with them.
-    fn user_hosts(os: Os, kind: InstallKind, home: &Path) -> Result<UserHosts, Error> {
-        if kind == InstallKind::Development {
-            // Registered for each browser the owner has.
-            let dirs = install::user_host_dirs(os, home)
-                .into_iter()
-                .map(|(user, _)| user)
-                .filter(|dir| dir.parent().is_some_and(Path::exists))
-                .collect();
-            return Ok(UserHosts::Register(dirs));
-        }
-        if os == Os::Windows {
-            let reg = install::tool_here(install::Tool::Reg)?;
-            let mut found = Vec::new();
-            for key in install::windows_host_keys() {
-                let output = std::process::Command::new(&reg)
-                    .args(["query", &format!(r"HKCU\{key}"), "/s"])
-                    .output()?;
-                for (name, manifest) in
-                    install::reg_hosts_in(&String::from_utf8_lossy(&output.stdout))
-                {
-                    found.push(install::RegistryHost {
-                        key: key.to_owned(),
-                        name,
-                        manifest,
-                    });
-                }
-            }
-            // One the machine already has under that name is a vendor's.
-            // Anything but "not found" counts as there, so nothing of a
-            // vendor's is written over.
-            #[cfg(windows)]
-            let at_machine_level = |host: &install::RegistryHost| {
-                !matches!(install::machine_has_host(&host.key, &host.name), Ok(false))
-            };
-            #[cfg(not(windows))]
-            let at_machine_level = |_: &install::RegistryHost| true;
-            return Ok(UserHosts::Registry(install::registry_hosts_to_copy(
-                found,
-                &at_machine_level,
-            )));
-        }
-        // Only the owner's own folders and files, never through a link: the
-        // install copies them as root.
-        let mut found = Vec::new();
-        for (user, system) in install::user_host_dirs(os, home) {
-            if !std::fs::symlink_metadata(&user).is_ok_and(|m| m.is_dir()) {
-                continue;
-            }
-            let Ok(entries) = std::fs::read_dir(&user) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                if entry.file_type().is_ok_and(|t| t.is_file()) {
-                    found.push((entry.path(), system.clone()));
-                }
-            }
-        }
-        Ok(UserHosts::Files(install::host_copies(&found, &|p| {
-            p.exists()
-        })))
-    }
-
     fn status() -> Result<(), Error> {
-        let os = Os::current();
-        let found = install::find_installed(os, &folders()?, &home()?, &env, &read_install)?;
+        let found = install::find_installed(Os::current(), &home()?, &env, &read_install)?;
         let host_answers = match &found {
             Some(found) => host_answers(&place()?, &expected(found)?, &Native),
             None => false,
@@ -1511,10 +1332,8 @@ mod bridge {
             .and_then(|f| read(&f.layout.extension.join("policy.json")))
             .and_then(|text| serde_json::from_str(&text).ok());
         let status = Status {
-            os,
             found,
             this_version: env!("CARGO_PKG_VERSION").into(),
-            policy_in_place: policy_in_place(os),
             host_answers,
             policy,
         };
@@ -1524,62 +1343,12 @@ mod bridge {
         Ok(())
     }
 
-    /// Whether Chrome's policy turning user-level hosts off is in place,
-    /// for every browser: read for its value, not its presence.
-    fn policy_in_place(os: Os) -> bool {
-        match os {
-            Os::MacOs => install::managed_preferences().iter().all(|plist| {
-                install::tool_here(install::Tool::Plutil).is_ok_and(|plutil| {
-                    std::process::Command::new(plutil)
-                        .args([
-                            "-extract",
-                            "NativeMessagingUserLevelHosts",
-                            "raw",
-                            "-o",
-                            "-",
-                        ])
-                        .arg(plist)
-                        .output()
-                        .is_ok_and(|o| o.status.success() && o.stdout.trim_ascii() == b"false")
-                })
-            }),
-            Os::Linux => install::linux_policy_files()
-                .iter()
-                .all(|file| read(file).is_some_and(|text| install::linux_policy_holds(&text))),
-            Os::Windows => install::tool_here(install::Tool::Reg).is_ok_and(|reg| {
-                install::windows_policy_keys().iter().all(|key| {
-                    std::process::Command::new(&reg)
-                        .args([
-                            "query",
-                            &format!(r"HKLM\{key}"),
-                            "/v",
-                            "NativeMessagingUserLevelHosts",
-                        ])
-                        .output()
-                        .is_ok_and(|o| {
-                            install::reg_dword_in(
-                                &String::from_utf8_lossy(&o.stdout),
-                                "NativeMessagingUserLevelHosts",
-                            ) == Some(0)
-                        })
-                })
-            }),
-        }
-    }
-
     fn uninstall() -> Result<(), Error> {
         let found = installed()?;
-        if found.record.kind == InstallKind::Protected && !is_admin()? {
-            return Err(NEEDS_ADMIN.into());
-        }
-        let (installer, owner_home) = installer(found.record.kind == InstallKind::Development)?;
-        let steps = install::uninstall_plan(
-            Os::current(),
-            &found.layout,
-            &found.record,
-            &user_host_dirs(Os::current(), &owner_home),
-        );
-        for line in install::apply(&steps, &installer, found.record.kind)? {
+        let os = Os::current();
+        let steps =
+            install::uninstall_plan(os, &found.layout, &install::chrome_host_dirs(os, &home()?));
+        for line in install::apply(&steps, &installer()?)? {
             println!("{line}");
         }
         println!(
@@ -1600,9 +1369,6 @@ mod bridge {
 
     fn edit_policy(change: impl Fn(&serde_json::Value) -> serde_json::Value) -> Result<(), Error> {
         let found = installed()?;
-        if found.record.kind == InstallKind::Protected && !is_admin()? {
-            return Err(NEEDS_ADMIN.into());
-        }
         let path = found.layout.extension.join("policy.json");
         let policy: serde_json::Value = serde_json::from_str(
             &read(&path).ok_or("the extension's policy.json is missing: run the install again")?,
@@ -1624,7 +1390,7 @@ mod bridge {
     const REBUILD: &str = "this build has no bridge to Chrome's extension; rebuild with \
                            `cargo install --features extension`";
 
-    pub fn give_up_group(_: &Invocation) -> Result<(), Error> {
+    pub fn run_as_installed_copy(_: &Invocation) -> Result<(), Error> {
         Ok(())
     }
 
@@ -1642,10 +1408,5 @@ mod bridge {
         _: &str,
     ) -> Result<super::web::AnyWire, Error> {
         Err(REBUILD.into())
-    }
-
-    #[cfg(feature = "browser")]
-    pub fn development_header(_: &jev_pilot::cli::BrowserTarget) -> Option<String> {
-        None
     }
 }

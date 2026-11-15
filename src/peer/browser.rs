@@ -1,18 +1,23 @@
 //! Whether the program that started the host is the browser.
 //!
 //! The host is the genuine installed jev-pilot whoever starts it, so a run's
-//! check of the host cannot tell Chrome's host from one a program running as
-//! the owner started on pipes of its own, posing as the extension. The host
-//! therefore checks its own parent, with the same kind of OS mechanism the
-//! bridge's checks use, and refuses to serve when it is not a browser:
+//! check of the host cannot tell Chrome's host from one another program
+//! started on pipes of its own, posing as the extension. The host therefore
+//! checks its own parent, with documented OS mechanisms only, and refuses to
+//! serve when it is not Google Chrome:
 //!
 //! - macOS: the parent's running code satisfies Chrome's own designated
-//!   requirement (Google's Developer ID), Chrome for Testing included;
-//! - Linux: the parent's executable, through `/proc`, is one of the known
-//!   browser installs, a root file in folders only root can change;
+//!   requirement (Google's Developer ID);
+//! - Linux: the parent's executable, through `/proc`, is one of Chrome's
+//!   installs, a root file in folders only root can change;
 //! - Windows: Chrome starts the host through `cmd.exe /d /s /c`, so the
-//!   parent is System32's `cmd.exe`, and its parent an image under Program
-//!   Files signed by Google.
+//!   parent is System32's `cmd.exe`, and its parent `chrome.exe` signed by
+//!   Google, under Program Files or, for Chrome installed for the owner
+//!   alone, in their local app data.
+//!
+//! A program running as the owner can still get past this (it could start
+//! Chrome itself), which is the limit the README states: the check keeps the
+//! host from serving anything that is plainly not Chrome.
 
 use std::path::{Path, PathBuf};
 
@@ -116,8 +121,9 @@ fn plain(path: &Path) -> String {
 }
 
 /// Whether the host's parent and grandparent are how Chrome starts it on
-/// Windows: `cmd.exe` from `system32`, started by an image under one of
-/// `program_files` whose Authenticode leaf signer is Google.
+/// Windows: `cmd.exe` from `system32`, started by `chrome.exe` under one of
+/// `folders` (Program Files, and the owner's own Chrome folder) whose
+/// Authenticode leaf signer is Google.
 ///
 /// # Errors
 /// Why they are not.
@@ -126,20 +132,20 @@ pub fn windows_browser(
     grandparent: &Path,
     signer: Option<&str>,
     system32: &Path,
-    program_files: &[&Path],
+    folders: &[&Path],
 ) -> Result<(), String> {
     let cmd = format!(r"{}\cmd.exe", plain(system32));
     if !plain(parent).eq_ignore_ascii_case(&cmd) {
         return Err(format!("{} is not {cmd}", parent.display()));
     }
     let browser = plain(grandparent).to_ascii_lowercase();
-    let installed = program_files.iter().any(|folder| {
+    let installed = folders.iter().any(|folder| {
         let folder = plain(folder).to_ascii_lowercase();
         browser.starts_with(&format!("{folder}\\"))
     });
     if !installed {
         return Err(format!(
-            "{} is not under Program Files",
+            "{} is not where Chrome is installed",
             grandparent.display()
         ));
     }
@@ -223,23 +229,6 @@ fn macos() -> BrowserParent {
     let verdict = code
         .check_validity(Flags::NONE, &requirement)
         .map_err(|_| "it is not Chrome signed by Google".to_owned());
-    // The code checked is what the parent runs now. A parent that ran
-    // another program in place since it started the host has a newer pid
-    // version than the one the host recorded of it at its start.
-    let unchanged = match (
-        jev_pilot_os::pid_versions(std::process::id()),
-        jev_pilot_os::pid_versions(pid),
-    ) {
-        (Ok(mine), Ok(parent)) => parent.version == mine.parent_at_start,
-        _ => false,
-    };
-    if !unchanged {
-        return refused(
-            Some(pid),
-            exe,
-            "the program that started the host has since run another program",
-        );
-    }
     // Still the same parent: had it gone, the host would have a new one.
     if std::os::unix::process::parent_id() != pid {
         return refused(Some(pid), exe, "the program that started the host has gone");
@@ -262,14 +251,9 @@ fn linux() -> BrowserParent {
             "the program that started the host has gone",
         );
     }
-    // The kernel lets one process look at another's executable only when
-    // its filesystem ids match the other's, and the setgid host's gid is
-    // the install's group: it looks as the owner's own gid, then goes back.
-    let held = nix::unistd::setfsgid(nix::unistd::getgid());
     let link = format!("/proc/{pid}/exe");
     let opened = std::fs::File::open(&link).and_then(|file| file.metadata());
     let named = std::fs::read_link(&link);
-    nix::unistd::setfsgid(held);
     let (Ok(opened), Ok(named)) = (opened, named) else {
         return refused(Some(pid), None, "the parent's executable cannot be read");
     };
@@ -364,21 +348,24 @@ fn windows() -> BrowserParent {
         known_folder(KnownFolder::System),
         known_folder(KnownFolder::ProgramFiles),
         known_folder(KnownFolder::ProgramFilesX86),
+        known_folder(KnownFolder::LocalAppData),
     );
-    let (Ok(system32), Ok(programs), Ok(programs_x86)) = folders else {
+    let (Ok(system32), Ok(programs), Ok(programs_x86), Ok(local)) = folders else {
         return refused(
             Some(browser_pid),
             Some(image),
             "Windows's folders cannot be read",
         );
     };
+    // Chrome installed for the owner alone.
+    let own = local.join(r"Google\Chrome\Application");
     let signer = authenticode_signer(&image);
     let verdict = windows_browser(
         &cmd,
         &image,
         signer.as_ref().map(|s| s.subject.as_str()),
         &system32,
-        &[&programs, &programs_x86],
+        &[&programs, &programs_x86, &own],
     );
     drop(parent);
     BrowserParent {

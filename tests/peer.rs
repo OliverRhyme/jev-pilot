@@ -14,7 +14,6 @@ use jev_pilot::peer::{
 };
 
 const UID: u32 = 501;
-const GROUP: u32 = 977;
 const USER_GROUP: u32 = 20;
 const PID: u32 = 4242;
 const SID: &str = "S-1-5-21-1004336348-1177238915-682003330-1001";
@@ -176,62 +175,34 @@ fn macos_recheck_still_decides_on_the_new_facts() {
 // ---- Linux ----
 
 fn linux_path() -> PathBuf {
-    PathBuf::from("/usr/local/libexec/jev-pilot/jev-pilot")
+    PathBuf::from("/home/owner/.local/share/jev-pilot/jev-pilot")
 }
 
 fn linux_expected() -> Expected {
     Expected::Linux {
         uid: UID,
         path: linux_path(),
-        pin: LinuxPin::Group(GROUP),
+        pin: LinuxPin::Sha256(digest(7)),
     }
 }
 
-fn linux_facts() -> Facts {
-    // A setgid peer is non-dumpable, so its executable cannot be read and
-    // there is no path among the facts.
+fn linux_facts_hashing(hash: Sha256Digest) -> Facts {
     Facts {
         uid: Some(UID),
         pid: Some(PID),
-        egid: Some(GROUP),
-        ..Facts::default()
-    }
-}
-
-fn linux_dev_expected() -> Expected {
-    Expected::Linux {
-        uid: UID,
-        path: PathBuf::from("/home/owner/.jev-pilot/bin/jev-pilot"),
-        pin: LinuxPin::DevelopmentSha256(digest(7)),
-    }
-}
-
-fn linux_dev_facts(hash: Sha256Digest) -> Facts {
-    Facts {
-        uid: Some(UID),
-        pid: Some(PID),
-        egid: Some(USER_GROUP),
-        path: Some(PathBuf::from("/home/owner/.jev-pilot/bin/jev-pilot")),
+        path: Some(linux_path()),
         code: Some(Code::ImageSha256(hash)),
         ..Facts::default()
     }
 }
 
-#[test]
-fn linux_accepts_the_right_uid_with_the_jev_pilot_egid() {
-    assert_eq!(decide(&linux_facts(), &linux_expected()), Verdict::Accept);
+fn linux_facts() -> Facts {
+    linux_facts_hashing(digest(7))
 }
 
 #[test]
-fn linux_refuses_the_right_uid_with_the_users_own_gid() {
-    let facts = Facts {
-        egid: Some(USER_GROUP),
-        ..linux_facts()
-    };
-    assert_eq!(
-        decide(&facts, &linux_expected()),
-        refused(Check::Group, Reason::Mismatch)
-    );
+fn linux_accepts_the_installed_executable_by_its_hash() {
+    assert_eq!(decide(&linux_facts(), &linux_expected()), Verdict::Accept);
 }
 
 #[test]
@@ -247,29 +218,21 @@ fn linux_refuses_another_uid() {
 }
 
 #[test]
-fn linux_accepts_a_development_install_whose_hash_matches() {
+fn linux_refuses_an_executable_whose_hash_differs() {
     assert_eq!(
-        decide(&linux_dev_facts(digest(7)), &linux_dev_expected()),
-        Verdict::Accept
-    );
-}
-
-#[test]
-fn linux_refuses_a_development_install_whose_hash_differs() {
-    assert_eq!(
-        decide(&linux_dev_facts(digest(8)), &linux_dev_expected()),
+        decide(&linux_facts_hashing(digest(8)), &linux_expected()),
         refused(Check::ImageSha256, Reason::Mismatch)
     );
 }
 
 #[test]
-fn linux_refuses_a_development_install_from_another_path() {
+fn linux_refuses_an_executable_from_another_path() {
     let facts = Facts {
         path: Some(PathBuf::from("/tmp/jev-pilot")),
-        ..linux_dev_facts(digest(7))
+        ..linux_facts()
     };
     assert_eq!(
-        decide(&facts, &linux_dev_expected()),
+        decide(&facts, &linux_expected()),
         refused(Check::Path, Reason::Mismatch)
     );
 }
@@ -496,7 +459,6 @@ fn without(facts: &Facts, check: Check) -> Facts {
         Check::Sid => facts.sid = None,
         Check::Pid => facts.pid = None,
         Check::Session => facts.session = None,
-        Check::Group => facts.egid = None,
         Check::Path => facts.path = None,
         Check::Requirement | Check::ImageSha256 | Check::Signer => facts.code = None,
         _ => unreachable!("{check:?} is not a fact"),
@@ -515,11 +477,6 @@ fn every_missing_fact_is_refused_and_named() {
         (
             linux_facts(),
             linux_expected(),
-            vec![Check::Uid, Check::Pid, Check::Group],
-        ),
-        (
-            linux_dev_facts(digest(7)),
-            linux_dev_expected(),
             vec![Check::Uid, Check::Pid, Check::Path, Check::ImageSha256],
         ),
         (
@@ -558,7 +515,6 @@ fn no_facts_at_all_is_refused_everywhere() {
     for expected in [
         mac_expected(cdhash_pin()),
         linux_expected(),
-        linux_dev_expected(),
         windows_expected(hash_pin()),
     ] {
         assert!(
@@ -572,7 +528,7 @@ fn no_facts_at_all_is_refused_everywhere() {
 fn a_refusal_names_the_failed_check() {
     let verdict = decide(
         &Facts {
-            egid: Some(USER_GROUP),
+            uid: Some(0),
             ..linux_facts()
         },
         &linux_expected(),
@@ -580,8 +536,8 @@ fn a_refusal_names_the_failed_check() {
     let Verdict::Refuse(refusal) = verdict else {
         panic!("accepted");
     };
-    assert_eq!(refusal.check, Check::Group);
-    assert_eq!(refusal.to_string(), "group: not the expected value");
+    assert_eq!(refusal.check, Check::Uid);
+    assert_eq!(refusal.to_string(), "uid: not the expected value");
     assert_eq!(
         Verdict::refuse(Check::Requirement, Reason::Missing).to_string(),
         "refused: code requirement: not reported by the OS"
@@ -663,13 +619,13 @@ fn expected_round_trips_through_json() {
     );
     assert_eq!(serde_json::from_value::<Expected>(json).unwrap(), expected);
 
-    let dev = linux_dev_expected();
-    let json = serde_json::to_value(&dev).unwrap();
+    let linux = linux_expected();
+    let json = serde_json::to_value(&linux).unwrap();
     assert_eq!(
         json["pin"],
-        serde_json::json!({ "development_sha256": "07".repeat(32) })
+        serde_json::json!({ "sha256": "07".repeat(32) })
     );
-    assert_eq!(serde_json::from_value::<Expected>(json).unwrap(), dev);
+    assert_eq!(serde_json::from_value::<Expected>(json).unwrap(), linux);
 }
 
 #[test]
@@ -796,121 +752,30 @@ mod gather {
         );
     }
 
+    /// On Linux each end reads the other's credentials and hashes the
+    /// executable it runs, through `/proc`.
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_gathers_this_process_from_either_end() {
-        use jev_pilot::peer::LinuxPin;
+        use jev_pilot::peer::{LinuxPin, Sha256Digest};
+        use sha2::{Digest, Sha256};
         let (server, client) = pair();
         let uid = rustix::process::geteuid().as_raw();
-        let egid = rustix::process::getegid().as_raw();
+        let hash: [u8; 32] = Sha256::digest(std::fs::read(own_exe()).unwrap()).into();
         let expected = Expected::Linux {
             uid,
             path: own_exe(),
-            pin: LinuxPin::Group(egid),
+            pin: LinuxPin::Sha256(Sha256Digest::from_bytes(hash)),
         };
         for end in [&server, &client] {
             let facts = Native.facts(end, &expected);
             assert_eq!(facts.uid, Some(uid));
-            assert_eq!(facts.egid, Some(egid));
             assert_eq!(facts.pid, Some(own_pid()));
+            assert_eq!(facts.path, Some(own_exe()));
             assert_eq!(decide(&facts, &expected), Verdict::Accept, "{facts:?}");
             let again = Native.facts(end, &expected);
             assert_eq!(recheck(&facts, &again, &expected), Verdict::Accept);
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_hashes_a_development_peers_executable() {
-        use jev_pilot::peer::{LinuxPin, Sha256Digest};
-        use sha2::{Digest, Sha256};
-        let (server, _client) = pair();
-        let hash: [u8; 32] = Sha256::digest(std::fs::read(own_exe()).unwrap()).into();
-        let expected = Expected::Linux {
-            uid: rustix::process::geteuid().as_raw(),
-            path: own_exe(),
-            pin: LinuxPin::DevelopmentSha256(Sha256Digest::from_bytes(hash)),
-        };
-        let facts = Native.facts(&server, &expected);
-        assert_eq!(facts.path, Some(own_exe()));
-        assert_eq!(decide(&facts, &expected), Verdict::Accept, "{facts:?}");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_development_process_can_make_itself_not_dumpable() {
-        use rustix::process::{DumpableBehavior, dumpable_behavior};
-        const CHILD: &str = "JEV_PILOT_PEER_TEST_NOT_DUMPABLE";
-        // It changes the whole process, so it runs in a child of its own.
-        if std::env::var_os(CHILD).is_some() {
-            jev_pilot::peer::set_not_dumpable().unwrap();
-            assert_eq!(dumpable_behavior().unwrap(), DumpableBehavior::NotDumpable);
-            return;
-        }
-        assert_eq!(dumpable_behavior().unwrap(), DumpableBehavior::Dumpable);
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "gather::a_development_process_can_make_itself_not_dumpable",
-            ])
-            .env(CHILD, "1")
-            .status()
-            .unwrap();
-        assert!(status.success());
-    }
-
-    /// A setgid process gives up its group for good. The test binary is
-    /// copied, given one of the user's other groups with the setgid bit, and
-    /// run: the child holds the group, gives it up, and cannot take it back.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn a_process_can_give_up_the_install_group_for_good() {
-        use nix::unistd::{getegid, getgid};
-        use std::os::unix::fs::PermissionsExt as _;
-        const CHILD: &str = "JEV_PILOT_PEER_TEST_DROP_GROUP";
-        if let Some(group) = std::env::var_os(CHILD) {
-            let held = nix::unistd::Gid::from_raw(group.to_str().unwrap().parse().unwrap());
-            let real = getgid();
-            assert_eq!(getegid(), held, "the setgid bit gave the group");
-            assert_ne!(real, held);
-            jev_pilot::peer::drop_install_group().unwrap();
-            assert_eq!((getgid(), getegid()), (real, real));
-            #[cfg(target_os = "linux")]
-            {
-                let ids = nix::unistd::getresgid().unwrap();
-                assert_eq!((ids.real, ids.effective, ids.saved), (real, real, real));
-            }
-            assert!(
-                nix::unistd::setegid(held).is_err(),
-                "the group cannot be taken back"
-            );
-            return;
-        }
-        let real = getgid();
-        let groups = std::process::Command::new("id").arg("-G").output().unwrap();
-        let other = String::from_utf8_lossy(&groups.stdout)
-            .split_whitespace()
-            .filter_map(|g| g.parse().ok())
-            .map(nix::unistd::Gid::from_raw)
-            .find(|g| *g != real)
-            .expect("the user is in a group other than their own");
-        let dir = std::env::temp_dir().join(format!("jev-pilot-setgid-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let copy = dir.join("peer-test");
-        std::fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
-        std::os::unix::fs::chown(&copy, None, Some(other.as_raw())).unwrap();
-        std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o2755)).unwrap();
-        let status = std::process::Command::new(&copy)
-            .args([
-                "--exact",
-                "gather::a_process_can_give_up_the_install_group_for_good",
-            ])
-            .env(CHILD, other.as_raw().to_string())
-            .status()
-            .unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(status.success());
     }
 
     #[cfg(windows)]
@@ -1167,32 +1032,6 @@ mod browser_parent {
         assert!(linux_browser(chrome, opened(), &gone).is_err());
     }
 
-    /// macOS names each process's pid version, and the version its parent
-    /// had when it started it: the harness's parent has run nothing else
-    /// since, so the two agree.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_parent_that_ran_nothing_else_since_has_the_version_recorded() {
-        let mine = jev_pilot_os::pid_versions(std::process::id()).expect("this process");
-        let parent =
-            jev_pilot_os::pid_versions(std::os::unix::process::parent_id()).expect("its parent");
-        assert_eq!(parent.version, mine.parent_at_start);
-        assert_ne!(mine.version, mine.parent_at_start);
-    }
-
-    /// The pid version read from the kernel's private process record is the
-    /// one the documented audit token carries, so that record is still laid
-    /// out as the host reads it.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_private_pid_version_is_the_audit_tokens() {
-        let mine = jev_pilot_os::pid_versions(std::process::id()).expect("this process");
-        assert_eq!(
-            mine.version,
-            jev_pilot_os::own_pid_version().expect("this process's audit token")
-        );
-    }
-
     /// The test harness was started by cargo, not a browser: its parent is
     /// found, named, and refused.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1255,5 +1094,32 @@ mod browser_parent {
         // Signed by Google, but not Chrome.
         let drive = Path::new(r"C:\Program Files\Google\Drive File Stream\GoogleDriveFS.exe");
         assert!(windows_browser(cmd, drive, Some(google), system32, &programs).is_err());
+    }
+
+    /// Chrome installed for the owner alone, in their local app data, is
+    /// Chrome too when Google signed it: with a program running as the owner
+    /// able to pose as jev-pilot anyway, the signature is what counts.
+    #[test]
+    fn a_windows_chrome_installed_for_the_owner_alone_is_chrome() {
+        let system32 = Path::new(r"C:\Windows\System32");
+        let folders = [
+            Path::new(r"C:\Program Files"),
+            Path::new(r"C:\Program Files (x86)"),
+            Path::new(r"C:\Users\owner\AppData\Local\Google\Chrome\Application"),
+        ];
+        let cmd = Path::new(r"C:\WINDOWS\system32\cmd.exe");
+        let google = "CN=Google LLC, O=Google LLC, L=Mountain View, S=California, C=US";
+        let own =
+            Path::new(r"\\?\C:\Users\owner\AppData\Local\Google\Chrome\Application\chrome.exe");
+        assert_eq!(
+            windows_browser(cmd, own, Some(google), system32, &folders),
+            Ok(())
+        );
+        assert!(
+            windows_browser(cmd, own, Some("CN=Someone, O=Someone"), system32, &folders).is_err()
+        );
+        assert!(windows_browser(cmd, own, None, system32, &folders).is_err());
+        let elsewhere = Path::new(r"C:\Users\owner\AppData\Local\Temp\chrome.exe");
+        assert!(windows_browser(cmd, elsewhere, Some(google), system32, &folders).is_err());
     }
 }

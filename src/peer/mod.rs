@@ -7,8 +7,8 @@
 //!
 //! - **macOS:** the peer's audit token (`LOCAL_PEERTOKEN`), then its code
 //!   checked by the Security framework against a pinned code requirement;
-//! - **Linux:** `SO_PEERCRED`, whose effective gid the peer can only have by
-//!   executing the root-owned setgid install;
+//! - **Linux:** `SO_PEERCRED`, then the SHA-256 of the executable the peer
+//!   runs, read through `/proc` while a pidfd shows the peer is still there;
 //! - **Windows:** the pipe's client or server pid and session, the image that
 //!   process runs, and that image's pinned SHA-256 or Authenticode signer.
 //!
@@ -71,61 +71,6 @@ impl PeerCheck for Native {
     }
 }
 
-/// Makes this process not dumpable (`PR_SET_DUMPABLE` 0), so another program
-/// running as the same user can neither ptrace it nor read its memory or
-/// open its executable through `/proc`.
-///
-/// A setgid install is not dumpable from exec; a development install calls
-/// this first thing in `main`, which leaves a short window after exec. Note
-/// the consequence for the other end: the same user then cannot open this
-/// process's `/proc/<pid>/exe` either, so a development install that calls
-/// this cannot have its executable hashed by its peer.
-///
-/// # Errors
-///
-/// When the kernel refuses the `prctl`.
-#[cfg(target_os = "linux")]
-#[cfg_attr(docsrs, doc(cfg(target_os = "linux")))]
-pub fn set_not_dumpable() -> std::io::Result<()> {
-    linux::set_not_dumpable()
-}
-
-/// Gives up the setgid install's group for good: sets the real, effective
-/// and saved gid to the real gid, then checks all three are.
-///
-/// Linux reads them back with `getresgid`. macOS sets them with `setregid`,
-/// which moves the saved gid with the effective one, and has no way to read
-/// the saved gid; it is checked by trying to take the group back with
-/// `setegid`, which a process that is not root can do only for its real or
-/// saved gid.
-///
-/// A setgid process's children inherit its effective gid, and the group is
-/// what the bridge trusts. jev-pilot starts other programs found on `PATH`
-/// (`adb`, a browser), so a program put first on `PATH` would otherwise run
-/// with the group and pass the bridge's check. Once this has returned, no
-/// program this process starts has it, and this process cannot take it back.
-///
-/// Who calls it:
-///
-/// - every mode, first thing in `main`, except the two below;
-/// - the bridge client (a run in extension mode), right after it connects:
-///   the host reads its credentials as they were at `connect`;
-/// - the bridge host keeps the group: the run reads the host's credentials
-///   as they were at `listen`, and only the group may append to the audit
-///   log. The host starts no other program.
-///
-/// # Errors
-///
-/// When the kernel refuses the change, or the group is still held after it.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[cfg_attr(docsrs, doc(cfg(any(target_os = "linux", target_os = "macos"))))]
-pub fn drop_install_group() -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    return linux::drop_install_group();
-    #[cfg(target_os = "macos")]
-    return macos::drop_install_group();
-}
-
 /// The string form of the SID of the user this process runs as: what a
 /// Windows install pins, and what its pipe's security descriptor names.
 ///
@@ -148,17 +93,6 @@ pub fn own_sid() -> std::io::Result<String> {
 #[cfg_attr(docsrs, doc(cfg(windows)))]
 pub fn own_session() -> std::io::Result<u32> {
     jev_pilot_os::current_session()
-}
-
-/// Whether this process runs elevated, with an administrator's rights.
-///
-/// # Errors
-///
-/// When this process's token cannot be read.
-#[cfg(windows)]
-#[cfg_attr(docsrs, doc(cfg(windows)))]
-pub fn elevated() -> std::io::Result<bool> {
-    jev_pilot_os::is_elevated()
 }
 
 /// The process that started this one, as far as the OS says without
@@ -216,8 +150,6 @@ pub struct Facts {
     pub pid: Option<u32>,
     /// The peer's logon session (Windows).
     pub session: Option<u32>,
-    /// The peer's effective gid when it connected (Linux).
-    pub egid: Option<u32>,
     /// The executable the peer runs, with every link resolved.
     pub path: Option<PathBuf>,
     /// The path the OS says the peer was started from, as it says it
@@ -245,8 +177,8 @@ pub enum Code {
         /// Whether the running code satisfied it.
         satisfied: bool,
     },
-    /// The SHA-256 of the image file the peer was started from (Windows
-    /// without a signature, and a Linux development install).
+    /// The SHA-256 of the image file the peer was started from (Linux, and
+    /// Windows without a signature).
     ImageSha256(Sha256Digest),
     /// Windows: Authenticode verified the image, and this is its leaf
     /// signer's subject.
@@ -277,20 +209,19 @@ pub enum Expected {
     Linux {
         /// The owner's uid.
         uid: u32,
-        /// Where the installed copy lives, canonicalized: a development
-        /// peer's executable is read from `/proc/<pid>/exe`, which has every
-        /// link resolved. A setgid install's path is not compared, because
-        /// its executable cannot be read.
+        /// Where the installed copy lives, canonicalized: the peer's
+        /// executable is read from `/proc/<pid>/exe`, which has every link
+        /// resolved.
         path: PathBuf,
-        /// The setgid group, or a development install's hash.
+        /// The installed executable's hash.
         pin: LinuxPin,
     },
     /// Windows: the SID, the installed image, and what vouches for it.
     Windows {
         /// The string form of the owner's SID.
         sid: String,
-        /// Where the installed image lives, under Program Files, as
-        /// `std::fs::canonicalize` gives it (`\\?\C:\Program Files\…`).
+        /// Where the installed image lives, in the owner's local app data,
+        /// as `std::fs::canonicalize` gives it (`\\?\C:\Users\…`).
         /// The peer's image is compared by its final path, in that form,
         /// and the path Windows says it was started from must name it too,
         /// ignoring case, so a junction cannot stand in for the install.
@@ -503,12 +434,10 @@ fn parse_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LinuxPin {
-    /// The `jev-pilot` group's gid. A process has it as its effective gid
-    /// only by executing the root-owned setgid install.
-    Group(u32),
-    /// A development install: the SHA-256 of the executable. It is not
-    /// protected against other programs running as the owner.
-    DevelopmentSha256(Sha256Digest),
+    /// The SHA-256 of the installed executable. An install made before the
+    /// install was the owner's alone called it a development one.
+    #[serde(alias = "development_sha256")]
+    Sha256(Sha256Digest),
 }
 
 /// What vouches for the image on Windows.
@@ -632,8 +561,6 @@ pub enum Check {
     Pid,
     /// The peer is in this logon session.
     Session,
-    /// The peer's effective gid is the setgid install's group.
-    Group,
     /// The peer runs the installed copy.
     Path,
     /// The peer's code satisfies the pinned requirement.
@@ -653,7 +580,6 @@ impl fmt::Display for Check {
             Check::Sid => "user SID",
             Check::Pid => "process id",
             Check::Session => "logon session",
-            Check::Group => "group",
             Check::Path => "executable path",
             Check::Requirement => "code requirement",
             Check::ImageSha256 => "image SHA-256",
@@ -778,13 +704,9 @@ fn run_checks(facts: &Facts, expected: &Expected) -> Result<(), Refusal> {
         }
         Expected::Linux { uid, path, pin } => {
             equal(facts.uid.as_ref(), uid, Check::Uid)?;
-            match pin {
-                LinuxPin::Group(gid) => equal(facts.egid.as_ref(), gid, Check::Group),
-                LinuxPin::DevelopmentSha256(sha256) => {
-                    equal(facts.path.as_ref(), path, Check::Path)?;
-                    image_sha256(facts.code.as_ref(), sha256)
-                }
-            }
+            let LinuxPin::Sha256(sha256) = pin;
+            equal(facts.path.as_ref(), path, Check::Path)?;
+            image_sha256(facts.code.as_ref(), sha256)
         }
         Expected::Windows {
             sid,
