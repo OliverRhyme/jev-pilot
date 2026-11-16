@@ -750,7 +750,9 @@ fn signup_read_as_attached() -> PageRead {
 }
 
 /// A press checks the document is the one that was read, hit-tests the point,
-/// and clicks only when the node found there is the row's own.
+/// and clicks only when the node found there is the row's own. The hit test
+/// passes over what has `pointer-events: none`, as a real click does: a
+/// ripple layer laid over a row takes no click.
 #[test]
 fn a_press_that_hits_its_node_clicks() {
     let (script, mut engine) = engine_after_read();
@@ -770,7 +772,7 @@ fn a_press_that_hits_its_node_clicks() {
 
     let mut expected = vec![
         json!({"method": "Page.getFrameTree", "params": {}, "sessionId": SESSION}),
-        json!({"method": "DOM.getNodeForLocation", "params": {"x": 120.0, "y": 19.0, "includeUserAgentShadowDOM": false, "ignorePointerEventsNone": true}, "sessionId": SESSION}),
+        json!({"method": "DOM.getNodeForLocation", "params": {"x": 120, "y": 19, "includeUserAgentShadowDOM": false, "ignorePointerEventsNone": false}, "sessionId": SESSION}),
     ];
     expected.extend(click_at(120.0, 19.0));
     assert_eq!(without_ids(command_traffic(&script)), expected);
@@ -995,7 +997,8 @@ fn a_press_after_the_page_changed_refuses_without_hit_testing() {
 }
 
 /// A row below the fold is scrolled into view and measured again, and the
-/// new centre is what is hit-tested and clicked.
+/// new centre, to the whole pixel Chrome's hit test asks for, is what is
+/// hit-tested and clicked.
 #[test]
 fn a_press_on_an_off_screen_row_scrolls_measures_then_hit_tests() {
     let (script, mut engine) = engine_after_read();
@@ -1003,7 +1006,7 @@ fn a_press_on_an_off_screen_row_scrolls_measures_then_hit_tests() {
     script.on("DOM.scrollIntoViewIfNeeded", json!({}));
     script.on(
         "DOM.getBoxModel",
-        json!({"model": {"content": [0, 290, 116, 290, 116, 308, 0, 308], "width": 116, "height": 18}}),
+        json!({"model": {"content": [0, 290.5, 116, 290.5, 116, 308, 0, 308], "width": 116, "height": 17.5}}),
     );
     script.on("DOM.getNodeForLocation", json!({"backendNodeId": 34}));
     script_settle(&script, 4);
@@ -1019,7 +1022,7 @@ fn a_press_on_an_off_screen_row_scrolls_measures_then_hit_tests() {
         json!({"method": "Page.getFrameTree", "params": {}, "sessionId": SESSION}),
         json!({"method": "DOM.scrollIntoViewIfNeeded", "params": {"backendNodeId": 34}, "sessionId": SESSION}),
         json!({"method": "DOM.getBoxModel", "params": {"backendNodeId": 34}, "sessionId": SESSION}),
-        json!({"method": "DOM.getNodeForLocation", "params": {"x": 58.0, "y": 299.0, "includeUserAgentShadowDOM": false, "ignorePointerEventsNone": true}, "sessionId": SESSION}),
+        json!({"method": "DOM.getNodeForLocation", "params": {"x": 58, "y": 299, "includeUserAgentShadowDOM": false, "ignorePointerEventsNone": false}, "sessionId": SESSION}),
     ];
     expected.extend(click_at(58.0, 299.0));
     assert_eq!(without_ids(command_traffic(&script)), expected);
@@ -1322,6 +1325,98 @@ fn submit_presses_enter() {
             json!({"method": "Input.dispatchKeyEvent", "params": {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "text": "\r"}, "sessionId": SESSION}),
             json!({"method": "Input.dispatchKeyEvent", "params": {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13}, "sessionId": SESSION}),
         ]
+    );
+}
+
+/// While its tab is hidden (another tab in front, or its window minimised or
+/// covered), Chrome holds a pointer move unanswered until the tab is shown,
+/// though it answers a press and a release at once. A move with no answer
+/// does not stop the click.
+#[test]
+fn a_press_whose_pointer_move_gets_no_answer_still_clicks() {
+    let (script, mut engine) = engine_after_read();
+    script.on("Page.getFrameTree", signup::load("frame-tree"));
+    script.on("DOM.getNodeForLocation", json!({"backendNodeId": 2}));
+    script.answer("Input.dispatchMouseEvent", Answer::Silence);
+    script_settle(&script, 4);
+
+    engine
+        .perform(&BrowserCommand::Press {
+            at: Point { x: 120, y: 19 },
+            node: email(),
+        })
+        .expect("a move with no answer is not an error");
+
+    let kinds: Vec<Value> = script
+        .params_of("Input.dispatchMouseEvent")
+        .iter()
+        .map(|p| p["type"].clone())
+        .collect();
+    assert_eq!(kinds, ["mouseMoved", "mousePressed", "mouseReleased"]);
+    assert!(!engine.refused());
+}
+
+/// A press Chrome does not answer in time ends the step with an outcome that
+/// says so, never the run.
+#[test]
+fn a_press_chrome_does_not_answer_is_an_outcome() {
+    let (script, mut engine) = engine_after_read();
+    script.on("Page.getFrameTree", signup::load("frame-tree"));
+    script.on("DOM.getNodeForLocation", json!({"backendNodeId": 2}));
+    script.on("Input.dispatchMouseEvent", json!({}));
+    script.answer("Input.dispatchMouseEvent", Answer::Silence);
+    script_settle(&script, 4);
+
+    engine
+        .perform(&BrowserCommand::Press {
+            at: Point { x: 120, y: 19 },
+            node: email(),
+        })
+        .expect("a press with no answer is not an error");
+
+    assert_eq!(
+        engine.outcome(),
+        Some("the tap was sent, but Chrome did not confirm it in time")
+    );
+    assert!(!engine.refused(), "the tap was sent, so it was not refused");
+}
+
+/// Chrome holds a mouse wheel for a hidden tab until the tab is shown, and
+/// only then scrolls and answers. The step ends with that as its outcome,
+/// and the run goes on.
+#[test]
+fn a_scroll_chrome_holds_is_an_outcome_not_an_error() {
+    let (script, mut engine) = engine_after_read();
+    script.answer("Input.dispatchMouseEvent", Answer::Silence);
+    script_settle(&script, 3);
+
+    engine
+        .perform(&BrowserCommand::Scroll(Direction::Down))
+        .expect("a scroll with no answer is not an error");
+
+    assert_eq!(
+        engine.outcome(),
+        Some(
+            "Chrome has not scrolled yet: it holds a scroll while the tab is hidden behind \
+             another tab or window, and makes it once the tab is shown"
+        )
+    );
+}
+
+/// Keys Chrome does not answer in time are an outcome too.
+#[test]
+fn a_submit_chrome_does_not_answer_is_an_outcome() {
+    let (script, mut engine) = engine_after_read();
+    script.answer("Input.dispatchKeyEvent", Answer::Silence);
+    script_settle(&script, 3);
+
+    engine
+        .perform(&BrowserCommand::Submit)
+        .expect("keys with no answer are not an error");
+
+    assert_eq!(
+        engine.outcome(),
+        Some("the keys were sent, but Chrome did not confirm them in time")
     );
 }
 

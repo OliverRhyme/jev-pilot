@@ -5149,10 +5149,10 @@
       "method": "DOM.getNodeForLocation",
       "op": "send",
       "params": {
-        "ignorePointerEventsNone": true,
+        "ignorePointerEventsNone": false,
         "includeUserAgentShadowDOM": false,
-        "x": 120.0,
-        "y": 19.0
+        "x": 120,
+        "y": 19
       },
       "tab": 2,
       "type": "request"

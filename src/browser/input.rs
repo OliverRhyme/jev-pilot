@@ -87,10 +87,23 @@ pub fn wheel(viewport: Viewport, direction: Direction) -> Value {
     })
 }
 
-/// Run on the row's node with the hit node as its argument: whether the hit
-/// node is the row or inside it, and if not, a few words on what it is.
+/// Run on the row's node with the hit node as its argument: whether a click
+/// on the hit node is a click on the row, and if not, a few words on what it
+/// is.
+///
+/// It is when the hit node is the row or inside it, and also when it is in a
+/// link that goes where the row's own link goes. That is a hover card drawn
+/// over the row from elsewhere in the page, as YouTube's inline preview is
+/// drawn over a result's thumbnail: clicking it goes where the row goes.
 pub const CONTAINS: &str = r"function (hit) {
-  const inside = this === hit || (typeof this.contains === 'function' && this.contains(hit));
+  const link = (node) => {
+    const at = node && (node.nodeType === 1 ? node : node.parentElement);
+    const found = at && at.closest('a[href]');
+    return found ? found.href : null;
+  };
+  const own = link(this);
+  const inside = this === hit || (typeof this.contains === 'function' && this.contains(hit))
+    || (own !== null && own === link(hit));
   const el = hit && (hit.nodeType === 1 ? hit : hit.parentElement);
   if (!el) return { inside, what: 'nothing' };
   const words = (el.getAttribute('aria-label') || el.innerText || el.textContent || '')

@@ -125,6 +125,10 @@ pub trait BrowserEngine {
 pub struct Timeouts {
     /// One ordinary call.
     pub call: Duration,
+    /// How long a pointer move or a wheel is given to be answered. Chrome
+    /// holds both unanswered while the tab is hidden (another tab in front,
+    /// or its window minimised or covered), and makes them once it is shown.
+    pub held_input: Duration,
     /// How long a command waits for a navigation to start.
     pub navigation_start: Duration,
     /// How long a started navigation is given to load.
@@ -139,6 +143,7 @@ impl Default for Timeouts {
     fn default() -> Self {
         Self {
             call: Duration::from_secs(10),
+            held_input: Duration::from_secs(2),
             navigation_start: Duration::from_millis(100),
             load: Duration::from_secs(3),
             quiet_window: Duration::from_millis(100),
@@ -774,10 +779,46 @@ impl<W: Wire> CdpEngine<W> {
             Ok(point) => point,
             Err(reason) => return Ok(Err(reason)),
         };
-        for event in input::click(x, y) {
-            self.call("Input.dispatchMouseEvent", event)?;
+        let [moved, pressed, released] = input::click(x, y);
+        // A move Chrome holds does not stop the click: it answers the press
+        // and the release at once, hidden tab or not.
+        let held = self.timeouts.held_input;
+        self.input("Input.dispatchMouseEvent", moved, held)?;
+        let call = self.timeouts.call;
+        let pressed = self.input("Input.dispatchMouseEvent", pressed, call)?;
+        let released = self.input("Input.dispatchMouseEvent", released, call)?;
+        if !(pressed && released) {
+            self.outcome = Some("the tap was sent, but Chrome did not confirm it in time".into());
         }
         Ok(Ok(()))
+    }
+
+    /// Send one input event; `false` when Chrome did not answer it within
+    /// `timeout`. That is an outcome of the command, never the end of the
+    /// run: the event was sent, and Chrome may still make it.
+    fn input(&mut self, method: &str, event: Value, timeout: Duration) -> Result<bool, Stop> {
+        match self.call_within(method, event, timeout) {
+            Ok(_) => Ok(true),
+            Err(Stop::Failed(EngineError::Transport(TransportError::Timeout { .. }))) => Ok(false),
+            Err(stop) => Err(stop),
+        }
+    }
+
+    /// Send key events, saying so in the outcome if Chrome did not answer
+    /// one of them in time.
+    fn keys(
+        &mut self,
+        events: impl IntoIterator<Item = (&'static str, Value)>,
+    ) -> Result<(), Stop> {
+        let mut answered = true;
+        for (method, event) in events {
+            answered &= self.input(method, event, self.timeouts.call)?;
+        }
+        if !answered {
+            self.outcome =
+                Some("the keys were sent, but Chrome did not confirm them in time".into());
+        }
+        Ok(())
     }
 
     /// The point at which the row is the node drawn, after checking the page
@@ -817,10 +858,15 @@ impl<W: Wire> CdpEngine<W> {
         } else {
             (f64::from(at.x), f64::from(at.y))
         };
+        // Chrome's hit test takes whole pixels, and refuses a fraction.
+        let (x, y) = (x.round(), y.round());
 
+        // What has `pointer-events: none` is passed over, as a real click
+        // passes through it: YouTube lays such a ripple layer over every
+        // result.
         let hit = self.call(
             "DOM.getNodeForLocation",
-            json!({"x": x, "y": y, "includeUserAgentShadowDOM": false, "ignorePointerEventsNone": true}),
+            json!({"x": pixel(x), "y": pixel(y), "includeUserAgentShadowDOM": false, "ignorePointerEventsNone": false}),
         );
         let hit = match hit {
             Ok(hit) => hit.get("backendNodeId").and_then(Value::as_i64),
@@ -955,10 +1001,11 @@ impl<W: Wire> CdpEngine<W> {
             self.refused = true;
             return Ok(());
         }
-        for event in input::select_all() {
-            self.call("Input.dispatchKeyEvent", event)?;
-        }
-        self.call("Input.insertText", json!({"text": text}))?;
+        let typed = input::select_all()
+            .map(|event| ("Input.dispatchKeyEvent", event))
+            .into_iter()
+            .chain([("Input.insertText", json!({"text": text}))]);
+        self.keys(typed)?;
         if let Some(object) = self.object(parts.backend)? {
             let answer = self.call(
                 "Runtime.callFunctionOn",
@@ -989,9 +1036,7 @@ impl<W: Wire> CdpEngine<W> {
             }
             BrowserCommand::Fill { at, node, text } => self.fill(*at, node, text)?,
             BrowserCommand::Submit => {
-                for event in input::enter() {
-                    self.call("Input.dispatchKeyEvent", event)?;
-                }
+                self.keys(input::enter().map(|event| ("Input.dispatchKeyEvent", event)))?;
             }
             BrowserCommand::Scroll(direction) => {
                 let viewport = if let Some(v) = self.viewport {
@@ -1007,10 +1052,15 @@ impl<W: Wire> CdpEngine<W> {
                         height: v.get("clientHeight").and_then(Value::as_f64).unwrap_or(0.0),
                     }
                 };
-                self.call(
-                    "Input.dispatchMouseEvent",
-                    input::wheel(viewport, *direction),
-                )?;
+                let wheel = input::wheel(viewport, *direction);
+                let held = self.timeouts.held_input;
+                if !self.input("Input.dispatchMouseEvent", wheel, held)? {
+                    self.outcome = Some(
+                        "Chrome has not scrolled yet: it holds a scroll while the tab is hidden \
+                         behind another tab or window, and makes it once the tab is shown"
+                            .into(),
+                    );
+                }
             }
             BrowserCommand::Back => {
                 let history = self.call("Page.getNavigationHistory", json!({}))?;
@@ -1097,6 +1147,14 @@ impl<W: Wire> CdpEngine<W> {
         };
         self.outcome = line;
     }
+}
+
+/// A viewport coordinate already rounded, as the whole number Chrome's hit
+/// test takes.
+#[allow(clippy::cast_possible_truncation)]
+fn pixel(rounded: f64) -> i64 {
+    // A viewport is far smaller than i64, so nothing is truncated.
+    rounded as i64
 }
 
 /// A call's reply, or `None` when it failed because its node is gone.
