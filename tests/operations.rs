@@ -345,3 +345,433 @@ fn mass_split_across_rows_of_different_names_stays_uncertainty() {
         "three different rows are three choices: {decided:?}",
     );
 }
+
+// ── The browser's vocabulary ────────────────────────────────────────────────
+
+mod browser {
+    use jev_pilot::act::{Catalog, Decision, DialogReply, Indecision, Operation};
+    use jev_pilot::platform::{HierarchyError, Platform};
+    use jev_pilot::snapshot::{
+        Bounds, Dialog, DialogKind, Element, NodeKey, Snapshot, Tab, TabKey,
+    };
+
+    /// A platform with the browser's operations, standing in for the real one.
+    struct Web;
+
+    impl Platform for Web {
+        fn name(&self) -> &'static str {
+            "Web"
+        }
+        fn operations(&self) -> &'static [Operation] {
+            &[
+                Operation::Tap,
+                Operation::TypeText,
+                Operation::Submit,
+                Operation::ScrollUp,
+                Operation::ScrollDown,
+                Operation::Back,
+                Operation::Navigate,
+                Operation::SwitchTab,
+                Operation::AcceptDialog,
+                Operation::DismissDialog,
+                Operation::Wait,
+                Operation::Done,
+                Operation::Blocked,
+            ]
+        }
+        fn parse_hierarchy(&self, _raw: &str) -> Result<Snapshot, HierarchyError> {
+            unreachable!("these tests build snapshots by hand")
+        }
+    }
+
+    fn row(label: &str, editable: bool, top: i32) -> Element {
+        Element {
+            label: label.into(),
+            detail: None,
+            editable,
+            bounds: Bounds::from_origin_size(0, top, 100, 20),
+        }
+    }
+
+    fn page() -> Snapshot {
+        Snapshot::new(vec![row("Search", true, 0), row("Go", false, 40)])
+            .expect("fits")
+            .at_url(Some("https://example.test/".into()))
+    }
+
+    fn tab(key: &str, title: &str) -> Tab {
+        Tab {
+            key: TabKey::new(key),
+            title: title.into(),
+            url: format!("https://example.test/{key}").into(),
+        }
+    }
+
+    fn dialog(kind: DialogKind) -> Dialog {
+        Dialog {
+            kind,
+            message: "Delete this draft?".into(),
+            default_prompt: None,
+        }
+    }
+
+    fn offered(catalog: &Catalog) -> Vec<Operation> {
+        catalog.operations().to_vec()
+    }
+
+    /// Switching tab is only an option when there is another tab to switch to.
+    #[test]
+    fn switching_tab_is_offered_only_when_another_tab_exists() {
+        let alone = Catalog::for_screen(&page(), &Web);
+        assert!(!offered(&alone).contains(&Operation::SwitchTab));
+
+        let with_one = page().with_tabs(vec![tab("t2", "Results")]);
+        let catalog = Catalog::for_screen(&with_one, &Web);
+        assert!(offered(&catalog).contains(&Operation::SwitchTab));
+    }
+
+    /// Navigating is only an option when a supplied address is somewhere else.
+    #[test]
+    fn navigating_is_offered_only_when_a_supplied_address_is_elsewhere() {
+        let here: Box<str> = "https://example.test/".into();
+        let there: Box<str> = "https://example.test/other".into();
+
+        let nothing = Catalog::for_screen(&page(), &Web);
+        assert!(!offered(&nothing).contains(&Operation::Navigate));
+
+        let only_here =
+            Catalog::for_screen(&page(), &Web).navigating_to(std::slice::from_ref(&here));
+        assert!(!offered(&only_here).contains(&Operation::Navigate));
+
+        let elsewhere = Catalog::for_screen(&page(), &Web).navigating_to(&[here, there.clone()]);
+        assert!(offered(&elsewhere).contains(&Operation::Navigate));
+        let Decision::Ready(act) = elsewhere
+            .act_from(Operation::Navigate, Some(0))
+            .expect("the one address elsewhere is offered")
+        else {
+            panic!("navigating needs no words");
+        };
+        assert_eq!(act, jev_pilot::act::Act::Navigate(there));
+    }
+
+    /// The page cannot be touched under a dialog, so the dialog's own answers
+    /// are what is offered, with waiting and the verdicts.
+    #[test]
+    fn under_a_dialog_only_its_answers_and_the_verdicts_are_offered() {
+        let under = page()
+            .with_tabs(vec![tab("t2", "Results")])
+            .with_dialog(Some(dialog(DialogKind::Confirm)));
+        let catalog = Catalog::for_screen(&under, &Web)
+            .accepting_text()
+            .navigating_to(&["https://example.test/other".into()])
+            .returning_to(Some("elsewhere"));
+
+        let mut got = offered(&catalog);
+        got.sort_by_key(|operation| operation.key());
+        let mut want = vec![
+            Operation::AcceptDialog,
+            Operation::DismissDialog,
+            Operation::Wait,
+            Operation::Done,
+            Operation::Blocked,
+        ];
+        want.sort_by_key(|operation| operation.key());
+        assert_eq!(got, want);
+        assert!(
+            catalog.tap_target_question("Delete the draft").is_none(),
+            "no row can be tapped under a dialog, so none is asked about"
+        );
+    }
+
+    /// And the answers are only offered under one.
+    #[test]
+    fn the_dialog_operations_are_not_offered_without_a_dialog() {
+        let catalog = Catalog::for_screen(&page(), &Web);
+        assert!(!offered(&catalog).contains(&Operation::AcceptDialog));
+        assert!(!offered(&catalog).contains(&Operation::DismissDialog));
+    }
+
+    /// A confirm is accepted as it stands, and dismissing it needs no words.
+    #[test]
+    fn a_confirm_is_answered_without_words() {
+        let under = page().with_dialog(Some(dialog(DialogKind::Confirm)));
+        let catalog = Catalog::for_screen(&under, &Web);
+
+        assert_eq!(
+            catalog.act_from(Operation::AcceptDialog, None),
+            Ok(Decision::Ready(jev_pilot::act::Act::Dialog(
+                DialogReply::Accept { words: None }
+            ))),
+        );
+        assert_eq!(
+            catalog.act_from(Operation::DismissDialog, None),
+            Ok(Decision::Ready(jev_pilot::act::Act::Dialog(
+                DialogReply::Dismiss
+            ))),
+        );
+    }
+
+    /// A prompt is answered with words, and a System One model selects and does
+    /// not write: accepting one needs text from elsewhere, so it is offered
+    /// only where text can be supplied, and comes back needing it.
+    #[test]
+    fn a_prompt_is_accepted_only_with_words_from_elsewhere() {
+        let under = page().with_dialog(Some(dialog(DialogKind::Prompt)));
+
+        let mute = Catalog::for_screen(&under, &Web);
+        assert!(!offered(&mute).contains(&Operation::AcceptDialog));
+        assert!(offered(&mute).contains(&Operation::DismissDialog));
+        assert_eq!(
+            mute.act_from(Operation::AcceptDialog, None),
+            Err(Indecision::NotOffered {
+                what: "accept_dialog".into()
+            }),
+        );
+
+        let writing = Catalog::for_screen(&under, &Web).accepting_text();
+        assert!(offered(&writing).contains(&Operation::AcceptDialog));
+        assert_eq!(
+            writing.act_from(Operation::AcceptDialog, None),
+            Ok(Decision::NeedsPromptText),
+        );
+    }
+
+    /// A platform that does not list Return never gets it, whatever the
+    /// screen says about where the run started.
+    #[test]
+    fn return_is_never_offered_on_a_platform_that_does_not_list_it() {
+        let catalog = Catalog::for_screen(&page(), &Web).returning_to(Some("com.elsewhere"));
+        assert!(!offered(&catalog).contains(&Operation::Return));
+    }
+
+    /// A native drop-down is a field to type the option into, never something
+    /// to tap: tapping it opens a pop-up nothing can read.
+    #[test]
+    fn a_field_only_row_is_a_field_and_never_a_tap_target() {
+        let snapshot = Snapshot::new(vec![
+            row("Country", false, 0),
+            row("Search", true, 40),
+            row("Go", false, 80),
+        ])
+        .expect("fits")
+        .with_node_keys(vec![
+            Some(NodeKey::new("1")),
+            Some(NodeKey::new("2")),
+            Some(NodeKey::new("3")),
+        ])
+        .with_field_only(vec![true, false, false]);
+        let catalog = Catalog::for_screen(&snapshot, &Web).accepting_text();
+
+        let fields: Vec<_> = catalog.fields_offered().map(|(_, text)| text).collect();
+        assert_eq!(fields, ["Country", "Search"]);
+        let rows: Vec<_> = catalog.rows().map(|(_, text)| text).collect();
+        assert_eq!(rows, ["Search", "Go"]);
+        assert_eq!(catalog.targets(), 2);
+
+        // An escalation numbers every row, and may not tap this one either.
+        assert_eq!(
+            catalog.act_from(Operation::Tap, Some(0)),
+            Err(Indecision::NotOffered {
+                what: "row 0".into()
+            }),
+        );
+        assert!(catalog.act_from(Operation::Tap, Some(1)).is_ok());
+        assert!(matches!(
+            catalog.act_from(Operation::TypeText, Some(0)),
+            Ok(Decision::NeedsText { .. })
+        ));
+    }
+}
+
+mod browser_heads {
+    use jev_pilot::act::{Act, Catalog, Decision, Floors, Indecision, Operation};
+    use jev_pilot::judgment::Confidence;
+    use jev_pilot::platform::{HierarchyError, Platform};
+    use jev_pilot::snapshot::{Bounds, Element, Snapshot, Tab, TabKey};
+    use jev_pilot::step::{StepAnswers, StepQuestions};
+
+    struct Web;
+
+    impl Platform for Web {
+        fn name(&self) -> &'static str {
+            "Web"
+        }
+        fn operations(&self) -> &'static [Operation] {
+            &[
+                Operation::Tap,
+                Operation::Navigate,
+                Operation::SwitchTab,
+                Operation::Wait,
+                Operation::Done,
+                Operation::Blocked,
+            ]
+        }
+        fn parse_hierarchy(&self, _raw: &str) -> Result<Snapshot, HierarchyError> {
+            unreachable!("these tests build snapshots by hand")
+        }
+    }
+
+    fn page(tabs: usize) -> Snapshot {
+        Snapshot::new(vec![Element {
+            label: "Go".into(),
+            detail: None,
+            editable: false,
+            bounds: Bounds::from_origin_size(0, 0, 100, 20),
+        }])
+        .expect("fits")
+        .at_url(Some("https://example.test/".into()))
+        .with_tabs(
+            (0..tabs)
+                .map(|n| Tab {
+                    key: TabKey::new(format!("t{n}")),
+                    title: format!("Tab {n}").into(),
+                    url: format!("https://example.test/{n}").into(),
+                })
+                .collect(),
+        )
+    }
+
+    fn urls(n: usize) -> Vec<Box<str>> {
+        (0..n)
+            .map(|k| format!("https://example.test/dest{k}").into())
+            .collect()
+    }
+
+    fn answers(value: serde_json::Value) -> StepAnswers {
+        serde_json::from_value(value).expect("answers parse")
+    }
+
+    fn base(operation: &str) -> serde_json::Value {
+        serde_json::json!({
+            "operation": { "type": "choice", "choice": operation, "confidence": 0.99 },
+            "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+            "is_error_screen": { "type": "noul", "noul": 0.01 },
+        })
+    }
+
+    /// With several tabs or addresses the choice is a head of its own, asked
+    /// in the same request, and its field name is the wire key.
+    #[test]
+    fn the_tab_and_destination_heads_are_asked_when_there_is_more_than_one_candidate() {
+        let snapshot = page(2);
+        let catalog = Catalog::for_screen(&snapshot, &Web).navigating_to(&urls(2));
+
+        let wire = serde_json::to_value(StepQuestions::new("Find it", &catalog)).expect("wire");
+
+        assert_eq!(wire["tab"]["type"], "choice");
+        assert_eq!(wire["destination"]["type"], "choice");
+        let tabs = wire["tab"]["criteria"].as_object().expect("a map");
+        assert_eq!(tabs.len(), 2);
+        assert!(tabs["A1"].as_str().expect("words").contains("Tab 0"));
+        assert!(
+            tabs["A1"]
+                .as_str()
+                .expect("words")
+                .contains("https://example.test/0")
+        );
+        assert_eq!(
+            wire["destination"]["criteria"]["A2"],
+            "https://example.test/dest1"
+        );
+    }
+
+    /// With exactly one candidate the head is skipped and that candidate used.
+    #[test]
+    fn a_single_candidate_is_used_without_being_asked_about() {
+        let snapshot = page(1);
+        let catalog = Catalog::for_screen(&snapshot, &Web).navigating_to(&urls(1));
+
+        let wire = serde_json::to_value(StepQuestions::new("Find it", &catalog)).expect("wire");
+        assert!(wire.get("tab").is_none());
+        assert!(wire.get("destination").is_none());
+
+        let floors = Floors::new(Confidence::ZERO);
+        let switched = catalog.resolve(&answers(base("switch_tab")), &floors);
+        assert!(
+            matches!(switched, Ok(Decision::Ready(Act::SwitchTab(_)))),
+            "{switched:?}"
+        );
+        assert_eq!(
+            catalog.resolve(&answers(base("navigate")), &floors),
+            Ok(Decision::Ready(Act::Navigate(
+                "https://example.test/dest0".into()
+            ))),
+        );
+    }
+
+    /// With none to switch to, neither head is asked.
+    #[test]
+    fn no_head_is_asked_about_an_operation_that_is_not_offered() {
+        let catalog = Catalog::for_screen(&page(0), &Web);
+        let wire = serde_json::to_value(StepQuestions::new("Find it", &catalog)).expect("wire");
+        assert!(wire.get("tab").is_none());
+        assert!(wire.get("destination").is_none());
+    }
+
+    /// The head's answer picks which, and is held to the floor like a row.
+    #[test]
+    fn the_chosen_tab_and_destination_are_the_ones_acted_on() {
+        let snapshot = page(3);
+        let catalog = Catalog::for_screen(&snapshot, &Web).navigating_to(&urls(3));
+        let floors = Floors::new(Confidence::new(0.6).expect("floor"));
+
+        let mut tab = base("switch_tab");
+        tab["tab"] = serde_json::json!({ "type": "choice", "choice": "A3", "confidence": 0.9 });
+        let third = snapshot.tabs().nth(2).expect("three tabs").0;
+        assert_eq!(
+            catalog.resolve(&answers(tab.clone()), &floors),
+            Ok(Decision::Ready(Act::SwitchTab(third))),
+        );
+
+        tab["tab"]["confidence"] = serde_json::json!(0.3);
+        assert!(matches!(
+            catalog.resolve(&answers(tab), &floors),
+            Err(Indecision::TooUncertain { .. })
+        ));
+
+        let mut destination = base("navigate");
+        destination["destination"] =
+            serde_json::json!({ "type": "choice", "choice": "A2", "confidence": 0.9 });
+        assert_eq!(
+            catalog.resolve(&answers(destination), &floors),
+            Ok(Decision::Ready(Act::Navigate(
+                "https://example.test/dest1".into()
+            ))),
+        );
+
+        // Naming nothing at all is not a guess to act on.
+        assert_eq!(
+            catalog.resolve(&answers(base("navigate")), &floors),
+            Err(Indecision::NoTarget),
+        );
+    }
+
+    /// An escalation numbers tabs and addresses on their own.
+    #[test]
+    fn an_escalation_numbers_tabs_and_destinations_separately_from_rows() {
+        let snapshot = page(2);
+        let catalog = Catalog::for_screen(&snapshot, &Web).navigating_to(&urls(2));
+        let second = snapshot.tabs().nth(1).expect("two tabs").0;
+
+        assert_eq!(
+            catalog.act_from(Operation::SwitchTab, Some(1)),
+            Ok(Decision::Ready(Act::SwitchTab(second))),
+        );
+        assert_eq!(
+            catalog.act_from(Operation::Navigate, Some(1)),
+            Ok(Decision::Ready(Act::Navigate(
+                "https://example.test/dest1".into()
+            ))),
+        );
+        assert_eq!(
+            catalog.act_from(Operation::SwitchTab, Some(2)),
+            Err(Indecision::NotOffered {
+                what: "tab 2".into()
+            }),
+        );
+        assert_eq!(
+            catalog.act_from(Operation::Navigate, None),
+            Err(Indecision::NoTarget),
+        );
+    }
+}

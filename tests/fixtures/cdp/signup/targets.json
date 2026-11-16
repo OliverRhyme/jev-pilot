@@ -1,0 +1,58 @@
+{
+ "targetInfos": [
+  {
+   "targetId": "8D2320658693E771A01AE95B242AF8CF",
+   "type": "service_worker",
+   "title": "Service Worker chrome-extension://nkeimhogjdpnpccoofpliimaahmaaome/thunk.js",
+   "url": "chrome-extension://nkeimhogjdpnpccoofpliimaahmaaome/thunk.js",
+   "attached": false,
+   "canAccessOpener": false,
+   "browserContextId": "959847BD33360777AAF7AA64A1A0D2E2"
+  },
+  {
+   "targetId": "F222B115FAB7FA27F24646690BC5E76A",
+   "type": "service_worker",
+   "title": "Service Worker chrome-extension://glbjnfimcajjenihimblfaponejbkoph/background.js",
+   "url": "chrome-extension://glbjnfimcajjenihimblfaponejbkoph/background.js",
+   "attached": false,
+   "canAccessOpener": false,
+   "browserContextId": "959847BD33360777AAF7AA64A1A0D2E2"
+  },
+  {
+   "targetId": "E8DD778F620BA08560C3270923315360",
+   "type": "page",
+   "title": "about:blank",
+   "url": "about:blank",
+   "attached": false,
+   "canAccessOpener": false,
+   "browserContextId": "959847BD33360777AAF7AA64A1A0D2E2"
+  },
+  {
+   "targetId": "FA023F286B3B29F2554BB4AD3B8811B3",
+   "type": "browser_ui",
+   "title": "Omnibox Popup",
+   "url": "chrome://omnibox-popup.top-chrome/omnibox_popup_aim.html",
+   "attached": false,
+   "canAccessOpener": false,
+   "browserContextId": "959847BD33360777AAF7AA64A1A0D2E2"
+  },
+  {
+   "targetId": "52F33AF613C7A710F0778CB73997B09A",
+   "type": "browser_ui",
+   "title": "Omnibox Popup",
+   "url": "chrome://omnibox-popup.top-chrome/",
+   "attached": false,
+   "canAccessOpener": false,
+   "browserContextId": "959847BD33360777AAF7AA64A1A0D2E2"
+  },
+  {
+   "targetId": "933B271DD0EC81D3402A478AE60B40E5",
+   "type": "page",
+   "title": "Sign up",
+   "url": "http://127.0.0.1:52578/signup",
+   "attached": true,
+   "canAccessOpener": false,
+   "browserContextId": "959847BD33360777AAF7AA64A1A0D2E2"
+  }
+ ]
+}

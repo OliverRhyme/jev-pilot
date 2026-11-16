@@ -15,8 +15,14 @@ use core::fmt;
 
 #[cfg(feature = "android")]
 mod android;
+#[cfg(feature = "browser")]
+#[cfg_attr(docsrs, doc(cfg(feature = "browser")))]
+pub mod browser;
 #[cfg(feature = "ios")]
 mod ios;
+#[cfg(feature = "browser")]
+#[cfg_attr(docsrs, doc(cfg(feature = "browser")))]
+pub mod page;
 
 #[cfg(feature = "android")]
 #[cfg_attr(docsrs, doc(cfg(feature = "android")))]

@@ -5,13 +5,13 @@
 //! step limit — is tested against scripted answers instead of against a model.
 
 use crate::act::{
-    Act, Catalog, Consequence, Decision, Direction, Floors, Indecision, Operation, Outcome,
-    SystemAct,
+    Act, Catalog, Consequence, Decision, DialogReply, Direction, Floors, Indecision, Operation,
+    Outcome, SystemAct,
 };
 use crate::device::{Command, Device, command_for};
 use crate::judgment::{Confidence, Criterion, Progress};
 use crate::platform::Platform;
-use crate::snapshot::{Element, ElementRef, Snapshot, TapError};
+use crate::snapshot::{Bounds, Dialog, Element, ElementRef, Snapshot, TapError};
 use crate::step::{StepAnswers, StepQuestions};
 use core::fmt;
 
@@ -148,6 +148,16 @@ pub struct Impasse<'i> {
     /// answering with a row's number types into the wrong one, or into
     /// nothing.
     pub fields: &'i [String],
+    /// The other tabs the run could switch to, in the order they are numbered.
+    ///
+    /// Numbered on their own, as fields are: `switch_tab 1` means the second
+    /// tab, whatever number the rows reach. Empty on a phone.
+    pub tabs: &'i [String],
+    /// The addresses the run could go to, in the order they are numbered.
+    ///
+    /// Only the ones the caller supplied, and numbered on their own like the
+    /// tabs. Empty on a phone.
+    pub destinations: &'i [String],
     /// What the screen says, beyond what it offers to act on.
     ///
     /// A person deciding an impasse should not be shown less than the model
@@ -381,6 +391,12 @@ pub struct StepReport<'s> {
     /// means something quite different in the app the goal was about than on a
     /// launcher the run wandered onto.
     pub app: Option<&'s str>,
+    /// The address of the page, when the screen is one.
+    ///
+    /// Beside the origin in `app`, because two steps on one site are often two
+    /// different pages, and a transcript that says only the site cannot tell
+    /// a form that reset from the next one.
+    pub url: Option<&'s str>,
     /// What the model chose, if it was certain enough to act.
     pub chosen: Option<&'s Act>,
     /// How sure the model was about *what* to do.
@@ -391,6 +407,11 @@ pub struct StepReport<'s> {
     pub goal_met: Progress,
     /// How likely the screen was an error state.
     pub is_error_screen: f64,
+    /// What the device said the action did, when it said anything.
+    ///
+    /// Recorded so a transcript can tell a tap that did nothing from one that
+    /// was never made, which the screen alone cannot.
+    pub outcome: Option<String>,
     /// Whether the step carried its action out, or waited instead.
     ///
     /// Recorded because the two look identical otherwise: a step that chose
@@ -510,6 +531,10 @@ pub struct Pilot<'p, D, J, X = Halt, C = Mute> {
     keys: Vec<Box<str>>,
     /// Names of the fields the caller supplied words for, lowercased.
     supplied: Vec<Box<str>>,
+    /// The addresses the caller allows a browser to be sent to.
+    destinations: Vec<Box<str>>,
+    /// What the device said the last action did, for the step report.
+    outcome: Option<Box<str>>,
 }
 
 impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
@@ -539,6 +564,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             plan: self.plan,
             keys: self.keys,
             supplied: self.supplied,
+            destinations: self.destinations,
+            outcome: self.outcome,
         }
     }
 
@@ -566,6 +593,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             plan: self.plan,
             keys: self.keys,
             supplied: self.supplied,
+            destinations: self.destinations,
+            outcome: self.outcome,
         }
     }
 }
@@ -590,6 +619,8 @@ impl<'p, D: Device, J: Judge> Pilot<'p, D, J, Halt, Mute> {
             plan: Vec::new(),
             keys: Vec::new(),
             supplied: Vec::new(),
+            destinations: Vec::new(),
+            outcome: None,
         }
     }
 }
@@ -745,6 +776,16 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             .into_iter()
             .map(|field| field.as_ref().to_lowercase().into_boxed_str())
             .collect();
+        self
+    }
+
+    /// The addresses a browser may be sent to.
+    ///
+    /// Only these are ever offered to `navigate`, and the model chooses among
+    /// them by position: an address of its own is not something it can write.
+    #[must_use]
+    pub fn navigating_to<S: Into<Box<str>>>(mut self, urls: impl IntoIterator<Item = S>) -> Self {
+        self.destinations = urls.into_iter().map(Into::into).collect();
         self
     }
 
@@ -956,11 +997,13 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             unavailable: snapshot.unavailable().map(ToOwned::to_owned).collect(),
             repeating: went.repeating,
             app: snapshot.app(),
+            url: snapshot.url(),
             chosen,
             operation_confidence: answers.operation.confidence,
             target_confidence: answers.tap_target.as_ref().map(|chosen| chosen.confidence),
             goal_met: answers.goal_met.progress(),
             is_error_screen: answers.is_error_screen.noul,
+            outcome: self.outcome.as_deref().map(ToOwned::to_owned),
             acted: went.acted,
             read_ms: spent.read_ms,
             step_ms: spent.step_ms,
@@ -1090,6 +1133,14 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             .fields_offered()
             .map(|(_, at)| at.to_owned())
             .collect();
+        let tabs: Vec<String> = catalog
+            .tabs_offered()
+            .map(|(_, text)| text.to_owned())
+            .collect();
+        let destinations: Vec<String> = catalog
+            .destinations_offered()
+            .map(|(_, url)| url.to_owned())
+            .collect();
 
         // Sorted so the thing it was nearly beaten by comes first: that is the
         // decision actually being asked about.
@@ -1115,6 +1166,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                 covered: &covered,
                 keyboard_open: snapshot.keyboard_open(),
                 fields: &fields,
+                tabs: &tabs,
+                destinations: &destinations,
                 says: &says,
                 unavailable: &unavailable,
                 operations: catalog.operations(),
@@ -1171,6 +1224,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
         let mut lately: Vec<String> = Vec::new();
         // How many actions in a row have left the screen exactly as it was.
         let mut ineffective: u32 = 0;
+        // Whether the screen has already been looked at again, before asking,
+        // since the last action that seemed to change nothing.
+        let mut looked_again = false;
         // How many of `self.keys` have been pressed on the keypad now showing.
         let mut entered: usize = 0;
         // Whether the last action was seen to move the screen, so this step
@@ -1242,6 +1298,7 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // Filled in as the step goes: zero until the act, since a step
             // that touches nothing settles nothing.
             let mut settled_ms = 0_u64;
+            self.outcome = None;
             let mut snapshot = self.device.observe().map_err(RunError::Device)?;
             // A sheet whose scrim renders before its contents offers exactly
             // one row, and that row is the way out of it. Acting then taps
@@ -1266,8 +1323,9 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             {
                 origin = Some(app.into());
             }
-            let mut catalog =
-                Catalog::for_screen(&snapshot, self.platform).returning_to(origin.as_deref());
+            let mut catalog = Catalog::for_screen(&snapshot, self.platform)
+                .returning_to(origin.as_deref())
+                .navigating_to(&self.destinations);
             if self.types {
                 catalog = catalog.accepting_text();
             }
@@ -1355,6 +1413,8 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                             sequence: sequence.as_ref(),
                             empty_fields: &empty_fields,
                             words_ready_for: &words_ready_for,
+                            url: snapshot.url(),
+                            dialog: snapshot.dialog(),
                         },
                     ),
                     &questions,
@@ -1480,8 +1540,17 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             // things and shown one of them is not finished. With no criteria
             // given there is nothing to be satisfied by, and the progress
             // score above remains the only word on it.
+            //
+            // A plan says there is work to do, so with one, criteria that hold
+            // before the run has done anything are not that work done.
+            // Measured on GitHub: "the star button reads Star" held on the
+            // unstarred repository, and a run told to star it and then unstar
+            // it ended achieved without touching it. Without a plan, a screen
+            // that already satisfies the criteria is where the run should
+            // stop, as for "make sure Wi-Fi is on".
             if !blind
                 && !self.criteria.is_empty()
+                && (self.plan.is_empty() || self.acted > 0)
                 && answers.unmet(&self.criteria, self.certainty).is_none()
             {
                 self.report(
@@ -1538,6 +1607,47 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
             }
 
             let moved_before = core::mem::take(&mut just_moved);
+            // An action that seemed to change nothing may only be slow. A
+            // link that starts a network call leaves the old page up, quiet
+            // from just after the click, until the new one arrives, so the
+            // watch after acting can call it dead while it is on its way.
+            // Before asking about what may be the old screen, look again once,
+            // as patiently as a second try of the action would.
+            //
+            // Measured on GitHub: the Issues tab was tapped, judged to have
+            // done nothing in 627ms, and the question asked about the old
+            // page waited five minutes for an answer.
+            let arrived_late = matches!(decided, Err(Indecision::TooUncertain { .. }))
+                && ineffective > 0
+                && !core::mem::replace(&mut looked_again, true)
+                && self.settled_on_a_new_screen(snapshot.fingerprint(), ineffective + 1)?;
+            if arrived_late {
+                ineffective = 0;
+                looked_again = false;
+                just_moved = true;
+                previous = Some(format!(
+                    "{} — the screen changed after a wait",
+                    last_did.as_deref().unwrap_or("Acted")
+                ));
+                self.report(
+                    index,
+                    &snapshot,
+                    &answers,
+                    Some(&Act::Wait),
+                    Went {
+                        repeating: repeated,
+                        acted: false,
+                    },
+                    Spent {
+                        read_ms,
+                        step_ms: elapsed_ms(began),
+                        waited_ms: waited.get(),
+                        judged_ms,
+                        settled_ms,
+                    },
+                );
+                continue;
+            }
             let decision = match decided {
                 Ok(decision) => decision,
                 // A screen on its way from one thing to the next is read as it
@@ -1641,6 +1751,37 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     waited.set(waited.get().saturating_add(elapsed_ms(asking)));
                     let text = text?;
                     Act::TypeText { into, text }
+                }
+                // The same handover as a field, with the prompt's own question
+                // standing where a field's name would: whoever writes the
+                // words, or looks them up by key, sees what is being asked.
+                Decision::NeedsPromptText => {
+                    let rows: Vec<String> = snapshot
+                        .refs()
+                        .map(|(_, element)| element.describe())
+                        .collect();
+                    let question = snapshot.dialog().map_or("", |open| &*open.message);
+                    let asked = Element {
+                        label: question.into(),
+                        detail: None,
+                        editable: true,
+                        bounds: Bounds::from_origin_size(0, 0, 0, 0),
+                    };
+                    let asking = std::time::Instant::now();
+                    let words = self
+                        .composer
+                        .compose(&Writing {
+                            goal,
+                            step: index,
+                            field: &asked,
+                            rows: &rows,
+                            previous: previous.as_deref(),
+                        })
+                        .map_err(RunError::Composition);
+                    waited.set(waited.get().saturating_add(elapsed_ms(asking)));
+                    Act::Dialog(DialogReply::Accept {
+                        words: Some(words?),
+                    })
                 }
             };
 
@@ -1799,7 +1940,16 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                         continue;
                     }
                     self.device.perform(&command).map_err(RunError::Device)?;
-                    self.acted = self.acted.saturating_add(1);
+                    // A command the device refused was never made: choosing
+                    // it again is not a repeat, and it is not an action taken.
+                    // Measured on GitHub: Unstar was refused once, and the
+                    // guard against repeating turned the next two tries into
+                    // waits, so it was never pressed.
+                    if self.device.refused() {
+                        last_sent = None;
+                    } else {
+                        self.acted = self.acted.saturating_add(1);
+                    }
                     if let Act::Tap(row) = &act
                         && let Ok(pressed) = snapshot.resolve(*row)
                     {
@@ -1835,8 +1985,20 @@ impl<'p, D: Device, J: Judge, X: Escalate, C: Compose> Pilot<'p, D, J, X, C> {
                     let moved =
                         self.settled_on_a_new_screen(snapshot.fingerprint(), ineffective + 1)?;
                     settled_ms = elapsed_ms(acting);
+                    // What the device saw the command do, which the screen
+                    // alone cannot say: a tap refused because a banner sat
+                    // over its target leaves the page as it was, exactly as a
+                    // tap that worked on nothing does.
+                    self.outcome = self.device.outcome();
+                    if let Some(outcome) = &self.outcome {
+                        previous = Some(format!(
+                            "{} — {outcome}",
+                            previous.as_deref().unwrap_or("Acted")
+                        ));
+                    }
                     if moved {
                         ineffective = 0;
+                        looked_again = false;
                         just_moved = true;
                     } else {
                         // It never moved. That is worth saying: a run that
@@ -1938,6 +2100,10 @@ struct Standing<'s> {
     empty_fields: &'s [&'s str],
     /// Fields the caller supplied words for, by name.
     words_ready_for: &'s [&'s str],
+    /// Where a browser is, when the screen is a page.
+    url: Option<&'s str>,
+    /// The dialog open over the page, if there is one.
+    dialog: Option<&'s Dialog>,
 }
 
 fn describe(
@@ -1958,6 +2124,8 @@ fn describe(
         sequence,
         empty_fields,
         words_ready_for,
+        url,
+        dialog,
     } = where_it_stands;
     // Rows are keyed the way the Choice offers them, so its options can be
     // bare keys and the text travels once rather than twice.
@@ -2028,6 +2196,20 @@ fn describe(
     {
         state["in_progress"] =
             format!("The app is still working on the previous action: {busy}").into();
+    }
+    // Said only of a page, so a phone's state is the one it always was.
+    if let Some(url) = url {
+        state["url"] = url.into();
+    }
+    if let Some(open) = dialog {
+        // Under a dialog the page cannot be touched, and what is being asked
+        // is the whole decision: said as its own fact, not left among the
+        // words the page happens to show.
+        state["dialog"] = serde_json::json!({
+            "kind": open.kind,
+            "message": open.message,
+            "default_text": open.default_prompt,
+        });
     }
     if !says.is_empty() {
         // Apart from the rows, and unkeyed: none of it can be chosen, and a
@@ -2179,11 +2361,26 @@ fn recount(act: &Act, snapshot: &Snapshot) -> String {
         Act::SwipeElement { target, direction } => {
             format!("Swiped {} {direction:?}", named(*target))
         }
+        // A password's words are not repeated even here: this account goes to
+        // the model with the next step.
+        Act::TypeText { into, .. } if snapshot.is_protected(*into).unwrap_or(false) => {
+            format!("Typed the supplied text into {}", named(*into))
+        }
         Act::TypeText { into, text } => format!("Typed {text:?} into {}", named(*into)),
         Act::Scroll(direction) => format!("Scrolled {direction:?}"),
         Act::System(gesture) => format!("Pressed {gesture:?}"),
         Act::CloseKeyboard => "Put the keyboard away".to_owned(),
         Act::Return(app) => format!("Returned to {app}"),
+        Act::Navigate(url) => format!("Went to {url}"),
+        Act::SwitchTab(tab) => snapshot.resolve_tab(*tab).map_or_else(
+            |_| "Switched to a tab that is gone".to_owned(),
+            |tab| format!("Switched to the tab {:?} at {}", tab.title, tab.url),
+        ),
+        Act::Dialog(DialogReply::Accept { words: Some(words) }) => {
+            format!("Accepted the dialog, answering {words:?}")
+        }
+        Act::Dialog(DialogReply::Accept { words: None }) => "Accepted the dialog".to_owned(),
+        Act::Dialog(DialogReply::Dismiss) => "Dismissed the dialog".to_owned(),
         Act::Wait => "Waited for the screen to settle".to_owned(),
         Act::Finish(outcome) => format!("Declared {outcome:?}"),
     }

@@ -99,6 +99,8 @@ fn the_question_marks_the_rows_that_are_covered() {
         keyboard_open: false,
         unavailable: &[],
         fields: &[],
+        tabs: &[],
+        destinations: &[],
         says: &[],
         operations: &[Operation::Tap],
         previous: None,
@@ -212,4 +214,235 @@ fn words_given_with_an_answer_are_the_words_typed() {
         .recv_timeout(Duration::from_secs(10))
         .expect("the words were already given, so nothing was asked again");
     assert_eq!(typed.as_deref(), Some("50"));
+}
+
+/// What a browser run can switch to and go to is put to whoever answers, each
+/// numbered on its own so that `switch_tab 1` and `navigate 1` mean the second
+/// tab and the second address, whatever number the rows reach.
+#[test]
+fn the_question_numbers_tabs_and_addresses_on_their_own() {
+    use jev_pilot::act::{Indecision, Operation};
+    use jev_pilot::judgment::Confidence;
+    use jev_pilot::pilot::{Impasse, Resolution};
+
+    let rows = vec!["Open".to_owned(), "Close".to_owned(), "Menu".to_owned()];
+    let tabs = vec![
+        "Results — https://example.test/r".to_owned(),
+        "Cart — https://example.test/c".to_owned(),
+    ];
+    let destinations = vec![
+        "https://example.test/".to_owned(),
+        "https://example.test/pricing".to_owned(),
+    ];
+    let impasse = Impasse {
+        goal: "Find the price",
+        step: 2,
+        because: &Indecision::NoProgress { repeated: 3 },
+        leaning: Operation::Tap,
+        operation_confidence: Confidence::new(0.4).expect("valid"),
+        target_confidence: None,
+        alternatives: &[],
+        rows: &rows,
+        covered: &[],
+        keyboard_open: false,
+        unavailable: &[],
+        fields: &[],
+        tabs: &tabs,
+        destinations: &destinations,
+        says: &[],
+        operations: &[Operation::Tap, Operation::SwitchTab, Operation::Navigate],
+        previous: None,
+        lately: &[],
+    };
+
+    let asked = jev_pilot::desk::describe(&impasse);
+    assert!(
+        asked.contains("switch_tab 1 -> Cart — https://example.test/c"),
+        "{asked}"
+    );
+    assert!(
+        asked.contains("navigate 0 -> https://example.test/"),
+        "{asked}"
+    );
+    assert!(asked.contains("switch_tab <n>"), "{asked}");
+    assert!(asked.contains("navigate <n>"), "{asked}");
+
+    let (dir, sender, desk) = desk("jev-pilot-test-desk-tabs");
+    let reader = std::thread::spawn({
+        let ask = dir.join("ask.json");
+        move || {
+            for _ in 0..200 {
+                if let Ok(raw) = std::fs::read_to_string(&ask) {
+                    // The desk drains whatever was typed before it began
+                    // waiting, so the answer has to come after it has.
+                    std::thread::sleep(Duration::from_millis(50));
+                    sender.send("navigate 1".to_owned()).expect("answered");
+                    return serde_json::from_str::<serde_json::Value>(&raw).expect("json");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("nothing was asked");
+        }
+    });
+    let resolution = desk.choose(&impasse).expect("answered");
+    let written = reader.join().expect("the question was read");
+
+    assert_eq!(
+        resolution,
+        Resolution::Choose {
+            operation: Operation::Navigate,
+            target: Some(1)
+        }
+    );
+    assert_eq!(written["tabs"], serde_json::json!(tabs));
+    assert_eq!(written["destinations"], serde_json::json!(destinations));
+}
+
+/// A phone's question is the one it has always been: nothing about tabs or
+/// addresses, in the file or at the terminal.
+#[test]
+fn a_phones_question_says_nothing_of_tabs_or_addresses() {
+    use jev_pilot::act::{Indecision, Operation};
+    use jev_pilot::judgment::Confidence;
+    use jev_pilot::pilot::Impasse;
+
+    let rows = vec!["Result A".to_owned()];
+    let impasse = Impasse {
+        goal: "Open it",
+        step: 1,
+        because: &Indecision::Covered,
+        leaning: Operation::Tap,
+        operation_confidence: Confidence::new(0.9).expect("valid"),
+        target_confidence: None,
+        alternatives: &[],
+        rows: &rows,
+        covered: &[],
+        keyboard_open: false,
+        unavailable: &[],
+        fields: &[],
+        tabs: &[],
+        destinations: &[],
+        says: &[],
+        operations: &[Operation::Tap],
+        previous: None,
+        lately: &[],
+    };
+
+    let asked = jev_pilot::desk::describe(&impasse);
+
+    assert!(!asked.contains("switch_tab"), "{asked}");
+    assert!(!asked.contains("navigate"), "{asked}");
+    assert!(
+        asked.contains("tap <n> | type <n> | back | scroll_down | done | stop: "),
+        "{asked}"
+    );
+}
+
+/// A prompt takes its words from the text supplied for a key that matches the
+/// prompt's own question, by containment and ignoring case, as a field does.
+/// Without a match it asks, as a field does.
+#[test]
+fn a_prompt_takes_its_words_from_the_text_supplied_for_a_matching_key() {
+    use jev_pilot::act::{DialogReply, Operation};
+    use jev_pilot::device::{Command, Device};
+    use jev_pilot::pilot::{Pilot, Writing};
+    use jev_pilot::platform::{HierarchyError, Platform};
+    use jev_pilot::snapshot::{Bounds, Dialog, DialogKind, Element, Snapshot};
+    use jev_pilot::step::{StepAnswers, StepQuestions};
+    use std::rc::Rc;
+
+    struct Web;
+    impl Platform for Web {
+        fn name(&self) -> &'static str {
+            "Web"
+        }
+        fn operations(&self) -> &'static [Operation] {
+            &[
+                Operation::AcceptDialog,
+                Operation::DismissDialog,
+                Operation::Wait,
+                Operation::Done,
+                Operation::Blocked,
+            ]
+        }
+        fn parse_hierarchy(&self, _raw: &str) -> Result<Snapshot, HierarchyError> {
+            unreachable!("these tests build snapshots by hand")
+        }
+    }
+    struct Page(Vec<Command>);
+    impl Device for Page {
+        type Error = std::convert::Infallible;
+        fn observe(&mut self) -> Result<Snapshot, Self::Error> {
+            let rows = ["Save", "Cancel"]
+                .iter()
+                .enumerate()
+                .map(|(n, label)| Element {
+                    label: (*label).into(),
+                    detail: None,
+                    editable: false,
+                    bounds: Bounds::from_origin_size(
+                        0,
+                        i32::try_from(n).expect("small") * 40,
+                        50,
+                        20,
+                    ),
+                })
+                .collect();
+            let snapshot = Snapshot::new(rows).expect("a page");
+            Ok(if self.0.is_empty() {
+                snapshot.with_dialog(Some(Dialog {
+                    kind: DialogKind::Prompt,
+                    message: "Name this draft".into(),
+                    default_prompt: None,
+                }))
+            } else {
+                snapshot.with_keyboard_open(true)
+            })
+        }
+        fn perform(&mut self, command: &Command) -> Result<(), Self::Error> {
+            self.0.push(command.clone());
+            Ok(())
+        }
+    }
+    struct Accepts(std::cell::Cell<bool>);
+    impl jev_pilot::pilot::Judge for Accepts {
+        type Error = std::convert::Infallible;
+        fn evaluate(
+            &self,
+            _state: serde_json::Value,
+            _questions: &StepQuestions<'_>,
+        ) -> Result<StepAnswers, Self::Error> {
+            let first = !self.0.replace(true);
+            let operation = if first { "accept_dialog" } else { "done" };
+            Ok(serde_json::from_value(serde_json::json!({
+                "operation": { "type": "choice", "choice": operation, "confidence": 0.99 },
+                "goal_met": { "type": "score", "score": if first { 0.1 } else { 1.9 }, "confidence": 0.9 },
+                "is_error_screen": { "type": "noul", "noul": 0.01 },
+            }))
+            .expect("parses"))
+        }
+    }
+
+    let dir = std::env::temp_dir().join("jev-pilot-test-desk-prompt");
+    let _ = std::fs::remove_dir_all(&dir);
+    let desk = Desk::at(
+        dir,
+        std::sync::mpsc::channel().1,
+        vec![("NAME THIS".into(), "Quarterly plan".into())],
+        Duration::from_millis(20),
+    )
+    .expect("a desk");
+    let desk = Rc::new(desk);
+    let writing = Rc::clone(&desk);
+    let mut pilot = Pilot::new(Page(Vec::new()), Accepts(std::cell::Cell::new(false)), &Web)
+        .writing_with(move |request: &Writing<'_>| writing.compose(request));
+
+    pilot.pursue("Name the draft").expect("the run completes");
+
+    assert_eq!(
+        pilot.device().0.first(),
+        Some(&Command::Dialog(DialogReply::Accept {
+            words: Some("Quarterly plan".into())
+        })),
+    );
 }

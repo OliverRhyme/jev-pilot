@@ -654,7 +654,18 @@ impl Action {
             // Launching an app is neither: an accessibility service may not
             // start an arbitrary activity, so it goes through the shell like
             // any other thing the helper is not allowed to do.
-            Command::Settle | Command::Peek(_) | Command::Launch(_) => return None,
+            //
+            // The browser commands are not an accessibility service's to
+            // carry out, and an Android device has no page to press, fill,
+            // navigate or answer a dialog on.
+            Command::Settle
+            | Command::Peek(_)
+            | Command::Launch(_)
+            | Command::Press { .. }
+            | Command::Fill { .. }
+            | Command::Navigate(_)
+            | Command::SwitchTab(_)
+            | Command::Dialog(_) => return None,
         };
         Some(Self {
             body: body.to_string(),

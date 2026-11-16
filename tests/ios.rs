@@ -110,3 +110,33 @@ fn bare_static_text_is_not_offered_as_an_action() {
 
     assert_eq!(labels, vec!["Edit"], "static text must not be a target");
 }
+
+/// A secure text field is marked protected, so what the run types into it is
+/// never repeated in its account of the step.
+#[test]
+fn a_secure_text_field_is_protected() {
+    let xml = r#"
+<XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Login"
+    enabled="true" visible="true" x="0" y="0" width="390" height="844">
+  <XCUIElementTypeTextField type="XCUIElementTypeTextField" label="Email"
+      enabled="true" visible="true" x="0" y="100" width="390" height="44"/>
+  <XCUIElementTypeSecureTextField type="XCUIElementTypeSecureTextField" label="Password"
+      enabled="true" visible="true" x="0" y="200" width="390" height="44"/>
+</XCUIElementTypeApplication>
+"#;
+    let snapshot = Ios.parse_hierarchy(xml).expect("parses");
+
+    let protected: Vec<(String, bool)> = snapshot
+        .refs()
+        .map(|(handle, element)| {
+            (
+                element.label.to_string(),
+                snapshot.is_protected(handle).expect("fresh"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        protected,
+        [("Email".to_owned(), false), ("Password".to_owned(), true)]
+    );
+}

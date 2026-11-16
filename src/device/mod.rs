@@ -11,8 +11,8 @@
 pub mod adb;
 pub mod helper;
 
-use crate::act::{Act, Direction, Swipe, SystemAct};
-use crate::snapshot::{Point, Snapshot, TapError};
+use crate::act::{Act, DialogReply, Direction, Swipe, SystemAct};
+use crate::snapshot::{NodeKey, Point, Snapshot, TabKey, TapError};
 
 /// A concrete instruction a device adapter can carry out.
 ///
@@ -64,6 +64,33 @@ pub enum Command {
     /// named app from an arbitrary screen, and hunting one across a launcher
     /// is how a run ends up in the wrong app entirely.
     Launch(Box<str>),
+    /// Press the element at this point, which the reader gave a key for.
+    ///
+    /// What a browser does for [`Command::Tap`]. The key lets the engine check
+    /// the element is still the one the pointer would land on before it clicks.
+    Press {
+        /// Where to press, for an engine that has to move a pointer there.
+        at: Point,
+        /// The reader's own handle for the element.
+        node: NodeKey,
+    },
+    /// Focus the field the reader gave a key for, and put text in it.
+    ///
+    /// What a browser does for [`Command::TypeText`].
+    Fill {
+        /// Where the field is, for focusing it.
+        at: Point,
+        /// The reader's own handle for the field.
+        node: NodeKey,
+        /// What to put in it.
+        text: Box<str>,
+    },
+    /// Go to this address.
+    Navigate(Box<str>),
+    /// Make this tab the one being driven.
+    SwitchTab(TabKey),
+    /// Answer the open dialog.
+    Dialog(DialogReply),
     /// Let the screen finish whatever it is doing, then look again.
     ///
     /// Carries no duration: how long a screen needs is a property of the
@@ -83,7 +110,13 @@ pub enum Command {
 /// entirely covered by whatever is drawn over it.
 pub fn command_for(act: &Act, snapshot: &Snapshot) -> Result<Option<Command>, TapError> {
     Ok(match act {
-        Act::Tap(handle) => Some(Command::Tap(snapshot.tap_point(*handle)?)),
+        Act::Tap(handle) => {
+            let at = snapshot.tap_point(*handle)?;
+            Some(match keyed(snapshot, *handle) {
+                Some(node) => Command::Press { at, node },
+                None => Command::Tap(at),
+            })
+        }
         Act::DoubleTap(handle) => Some(Command::DoubleTap(snapshot.tap_point(*handle)?)),
         Act::LongPress(handle) => Some(Command::LongPress(snapshot.tap_point(*handle)?)),
         Act::SwipeElement { target, direction } => Some(Command::SwipeFrom {
@@ -91,19 +124,39 @@ pub fn command_for(act: &Act, snapshot: &Snapshot) -> Result<Option<Command>, Ta
             direction: *direction,
         }),
         Act::Peek(handle) => Some(Command::Peek(snapshot.tap_point(*handle)?)),
-        Act::TypeText { into, text } => Some(Command::TypeText {
-            at: snapshot.tap_point(*into)?,
-            text: text.clone(),
-        }),
+        Act::TypeText { into, text } => {
+            let at = snapshot.tap_point(*into)?;
+            let text = text.clone();
+            Some(match keyed(snapshot, *into) {
+                Some(node) => Command::Fill { at, node, text },
+                None => Command::TypeText { at, text },
+            })
+        }
         Act::System(gesture) => Some(Command::System(*gesture)),
         // Back dismisses an IME on Android, and closing the keyboard is
         // offered only where one is up, so it cannot navigate instead.
         Act::CloseKeyboard => Some(Command::System(SystemAct::Back)),
         Act::Return(app) => Some(Command::Launch(app.clone())),
         Act::Scroll(direction) => Some(Command::Scroll(*direction)),
+        Act::Navigate(url) => Some(Command::Navigate(url.clone())),
+        Act::SwitchTab(tab) => Some(Command::SwitchTab(
+            snapshot
+                .resolve_tab(*tab)
+                .map_err(TapError::Stale)?
+                .key
+                .clone(),
+        )),
+        Act::Dialog(reply) => Some(Command::Dialog(reply.clone())),
         Act::Wait => Some(Command::Settle),
         Act::Finish(_) => None,
     })
+}
+
+/// The reader's own handle for a row, when it gave one.
+///
+/// The reference was just resolved for its tap point, so it cannot be stale.
+fn keyed(snapshot: &Snapshot, handle: crate::snapshot::ElementRef) -> Option<NodeKey> {
+    snapshot.node_key(handle).ok().flatten().cloned()
 }
 
 /// A device the worker can observe and drive.
@@ -138,5 +191,30 @@ pub trait Device {
     /// returned for the same reason.
     fn home_screen_app(&mut self) -> Option<Box<str>> {
         None
+    }
+
+    /// What the last command did, as the device saw it.
+    ///
+    /// A tap that was refused, a link that opened a new tab and a click that
+    /// changed nothing look alike from the screen alone, and a run that cannot
+    /// tell them apart repeats what did not work. The pilot tells the judge, and
+    /// records it in the transcript.
+    ///
+    /// Defaulted to `None`: a phone has nothing to add to what its next
+    /// reading shows.
+    fn outcome(&mut self) -> Option<Box<str>> {
+        None
+    }
+
+    /// Whether the last command was refused rather than carried out, as a
+    /// browser refuses a tap on a row it finds covered or replaced at click
+    /// time.
+    ///
+    /// A refused command was never made, so choosing it again is not a
+    /// repeat, and it is not an action the run has taken.
+    ///
+    /// Defaulted to `false`: a phone carries out every command it accepts.
+    fn refused(&mut self) -> bool {
+        false
     }
 }

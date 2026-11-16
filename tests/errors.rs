@@ -29,7 +29,7 @@ fn a_wrapped_cause_stays_reachable_through_the_source_chain() {
 fn a_blank_credential_is_refused_with_a_message() {
     let error = ApiKey::new("  ").expect_err("blank is not a credential");
     assert!(matches!(error, CredentialError::Empty));
-    assert!(!error.to_string().is_empty());
+    assert_ne!(error.to_string(), "");
 }
 
 /// A refusal that carries no message is a refusal nobody can act on.

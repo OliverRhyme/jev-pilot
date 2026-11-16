@@ -272,6 +272,51 @@ fn criteria_that_all_hold_end_the_run_whatever_the_progress_score_says() {
     );
 }
 
+/// A plan says there is work to do, so criteria that hold before the run has
+/// done anything are not that work done. Measured on GitHub: "the star button
+/// reads Star" held on the unstarred repository, and a run told to star it and
+/// then unstar it ended achieved without touching it. Once the run has acted,
+/// the criteria end it as they would any other.
+#[test]
+fn a_planned_run_is_not_finished_by_criteria_that_held_before_it_did_anything() {
+    let mut pilot = Pilot::new(
+        Fake::default(),
+        Scripted::new(vec![
+            serde_json::json!({
+                "operation": { "type": "choice", "choice": "tap", "confidence": 0.95 },
+                "tap_target": { "type": "choice", "choice": "A3", "confidence": 0.95 },
+                "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+                "is_error_screen": { "type": "noul", "noul": 0.01 },
+                "check_0": { "type": "noul", "noul": 0.97 },
+            }),
+            serde_json::json!({
+                "operation": { "type": "choice", "choice": "back", "confidence": 0.99 },
+                "goal_met": { "type": "score", "score": 0.2, "confidence": 0.9 },
+                "is_error_screen": { "type": "noul", "noul": 0.01 },
+                "check_0": { "type": "noul", "noul": 0.97 },
+            }),
+        ]),
+        &Android,
+    )
+    .following(["Turn Wi-Fi on", "Turn Wi-Fi off again"])
+    .confirming(["Wi-Fi is off"]);
+
+    let ending = pilot
+        .pursue("turn Wi-Fi on and off again")
+        .expect("it completes");
+
+    assert_eq!(ending, Ending::Finished(Outcome::Achieved));
+    assert!(
+        pilot
+            .device()
+            .performed
+            .iter()
+            .any(|c| matches!(c, Command::Tap(_))),
+        "the planned work was started: {:?}",
+        pilot.device().performed,
+    );
+}
+
 /// One criterion holding is not all of them holding. A run asked for two
 /// things and shown one of them is not finished, and must go on until the
 /// other holds too.

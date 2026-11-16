@@ -30,6 +30,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod act;
+#[cfg(feature = "browser")]
+#[cfg_attr(docsrs, doc(cfg(feature = "browser")))]
+pub mod browser;
 pub mod cli;
 pub mod client;
 pub mod credential;
@@ -39,6 +42,9 @@ pub mod judgment;
 #[cfg(feature = "mcp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
 pub mod mcp;
+#[cfg(feature = "extension")]
+#[cfg_attr(docsrs, doc(cfg(feature = "extension")))]
+pub mod peer;
 pub mod pilot;
 pub mod platform;
 pub mod snapshot;

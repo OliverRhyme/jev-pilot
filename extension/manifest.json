@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "jev-pilot",
+  "version": "0.1.3",
+  "description": "Lets the installed jev-pilot drive the tabs it opens, one run at a time, within the sites its policy allows.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwvv4+qZfjTcyMjkiAwty71pf796lx5WteLL8kNlgOYq7lK5tJB59p5Eoy/p106DUVCD9/jTjiCUi6cHCFQnl9tPQyK2yrvDz21+H9lNbvs/kWTK5SrePfra3MrktmFOEQ8/QpqaG7oz1KtPIwwHcQ6slt3TUJcm9zPydWP5yPrQNM0o8GeeZUlLIPAFbEr1LACn9pYrYag2WgVhGIOxhiYnWqGNBc75I4eb0VZM3Kj2XK6PX37GahjONhj8TGVMgPOJUj+EedeOan/acTfZS3qsnGcVrQwSuggd+cLfbTyid8JwoWYeyln4pmj+J/cXRfehEI0fRyPVHzH+Dw59JEQIDAQAB",
+  "minimum_chrome_version": "125",
+  "permissions": [
+    "debugger",
+    "nativeMessaging",
+    "tabs",
+    "tabGroups",
+    "webNavigation",
+    "storage",
+    "alarms",
+    "notifications"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "jev-pilot",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
